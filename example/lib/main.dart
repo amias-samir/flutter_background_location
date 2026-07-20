@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_background_location/flutter_background_location.dart';
+import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,6 +43,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   String? _trackId;
   String? _completedTrackId;
   String? _message;
+  List<Track> _tracks = const <Track>[];
   bool _busy = true;
 
   @override
@@ -79,6 +82,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         _status = _tracking.currentStatus;
         _busy = false;
       });
+      await _refreshTracks();
     } catch (error) {
       _showError(error);
     }
@@ -114,12 +118,19 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     });
   }
 
+  Future<void> _refreshTracks() async {
+    final tracks = await _tracking.listTracks();
+    if (!mounted) return;
+    setState(() => _tracks = tracks);
+  }
+
   Future<void> _start() => _run(() async {
     if (_trackId != null &&
         (_status.lifecycle == TrackerLifecycle.paused ||
             _status.lifecycle == TrackerLifecycle.interrupted ||
             _status.lifecycle == TrackerLifecycle.failed)) {
       await _tracking.resumeTrack(_trackId!);
+      await _refreshTracks();
       return;
     }
     _trackId = await _tracking.startTrack(
@@ -128,16 +139,19 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       config: const TrackingConfig(mockLocationPolicy: MockLocationPolicy.flag),
     );
     _completedTrackId = null;
+    await _refreshTracks();
   });
 
-  Future<void> _pause() => _run(
-    () => _tracking.pauseTrack(trackId: _trackId, reason: 'example_pause'),
-  );
+  Future<void> _pause() => _run(() async {
+    await _tracking.pauseTrack(trackId: _trackId, reason: 'example_pause');
+    await _refreshTracks();
+  });
 
   Future<void> _resume() => _run(() async {
     final trackId = _trackId;
     if (trackId == null) return;
     await _tracking.resumeTrack(trackId);
+    await _refreshTracks();
   });
 
   Future<void> _complete() => _run(() async {
@@ -154,7 +168,17 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         _status = const TrackerStatus(lifecycle: TrackerLifecycle.idle);
       });
     }
+    await _refreshTracks();
   });
+
+  Future<void> _viewTrackOnMap(Track track) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => TrackMapPage(tracking: _tracking, track: track),
+      ),
+    );
+    await _refreshTracks();
+  }
 
   Future<void> _export(TrackExportFormat format) async {
     final trackId = _trackId ?? _completedTrackId;
@@ -274,6 +298,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                 )
                 .toList(growable: false),
           ),
+          const SizedBox(height: 16),
+          _RecordedTracksSection(
+            tracks: _tracks,
+            onRefresh: _busy ? null : _refreshTracks,
+            onViewMap: _busy ? null : _viewTrackOnMap,
+          ),
           if (_busy) ...<Widget>[
             const SizedBox(height: 16),
             const LinearProgressIndicator(),
@@ -338,6 +368,284 @@ class _ExportNameDialogState extends State<_ExportNameDialog> {
       FilledButton(onPressed: _submit, child: const Text('Export')),
     ],
   );
+}
+
+class _RecordedTracksSection extends StatelessWidget {
+  const _RecordedTracksSection({
+    required this.tracks,
+    required this.onRefresh,
+    required this.onViewMap,
+  });
+
+  final List<Track> tracks;
+  final Future<void> Function()? onRefresh;
+  final Future<void> Function(Track track)? onViewMap;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: <Widget>[
+      Row(
+        children: <Widget>[
+          Text(
+            'Recorded tracks',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const Spacer(),
+          IconButton(
+            tooltip: 'Refresh tracks',
+            onPressed: onRefresh,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      if (tracks.isEmpty)
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 12),
+          child: Text(
+            'No recorded tracks yet. Complete a trip to export or map it.',
+          ),
+        )
+      else
+        ...tracks.map(
+          (track) => Card(
+            child: ListTile(
+              title: Text(_trackTitle(track)),
+              subtitle: Text(_trackSubtitle(track)),
+              trailing: IconButton(
+                tooltip: 'View route on map',
+                onPressed: onViewMap == null ? null : () => onViewMap!(track),
+                icon: const Icon(Icons.map_outlined),
+              ),
+            ),
+          ),
+        ),
+    ],
+  );
+
+  static String _trackTitle(Track track) {
+    final started = _formatDateTime(track.startedAt);
+    return '${track.status.name} • $started';
+  }
+
+  static String _trackSubtitle(Track track) {
+    final distanceKm = track.totalDistanceMeters / 1000;
+    final ended = track.endedAt == null
+        ? 'not completed'
+        : 'ended ${_formatDateTime(track.endedAt!)}';
+    return '${track.acceptedPointCount} points • '
+        '${distanceKm.toStringAsFixed(2)} km • '
+        '${track.segmentCount} segment(s) • $ended';
+  }
+
+  static String _formatDateTime(DateTime value) {
+    final local = value.toLocal();
+    final date =
+        '${local.year.toString().padLeft(4, '0')}-'
+        '${local.month.toString().padLeft(2, '0')}-'
+        '${local.day.toString().padLeft(2, '0')}';
+    final time =
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+    return '$date $time';
+  }
+}
+
+class TrackMapPage extends StatelessWidget {
+  const TrackMapPage({super.key, required this.tracking, required this.track});
+
+  final FieldTrackingClient tracking;
+  final Track track;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Track route')),
+    body: FutureBuilder<TrackBundle>(
+      future: tracking.loadTrackBundle(track.id),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Center(child: Text(snapshot.error.toString()));
+        }
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final route = _RouteGeometry.fromBundle(snapshot.requireData);
+        if (route.points.isEmpty) {
+          return const Center(
+            child: Text('This track does not have route coordinates yet.'),
+          );
+        }
+        return Column(
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                '${track.status.name} route • '
+                '${route.pointCount} accepted points • '
+                '${route.segments.length} drawable segment(s)',
+              ),
+            ),
+            Expanded(child: _TrackRouteMap(route: route)),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+class _TrackRouteMap extends StatefulWidget {
+  const _TrackRouteMap({required this.route});
+
+  final _RouteGeometry route;
+
+  @override
+  State<_TrackRouteMap> createState() => _TrackRouteMapState();
+}
+
+class _TrackRouteMapState extends State<_TrackRouteMap> {
+  maplibre.MapLibreMapController? _controller;
+  bool _styleLoaded = false;
+  bool _routeDrawn = false;
+
+  @override
+  Widget build(BuildContext context) => maplibre.MapLibreMap(
+    styleString: maplibre.MapLibreStyles.demo,
+    initialCameraPosition: maplibre.CameraPosition(
+      target: widget.route.center,
+      zoom: widget.route.points.length == 1 ? 15 : 13,
+    ),
+    onMapCreated: (controller) {
+      _controller = controller;
+      unawaited(_drawRoute());
+    },
+    onStyleLoadedCallback: () {
+      _styleLoaded = true;
+      unawaited(_drawRoute());
+    },
+  );
+
+  Future<void> _drawRoute() async {
+    final controller = _controller;
+    if (controller == null || !_styleLoaded || _routeDrawn) return;
+    _routeDrawn = true;
+    for (final segment in widget.route.segments) {
+      await controller.addLine(
+        maplibre.LineOptions(
+          geometry: segment,
+          lineColor: '#00796B',
+          lineWidth: 5,
+          lineOpacity: 0.9,
+        ),
+      );
+    }
+    if (widget.route.segments.isEmpty && widget.route.points.isNotEmpty) {
+      await controller.addCircle(
+        maplibre.CircleOptions(
+          geometry: widget.route.points.first,
+          circleColor: '#00796B',
+          circleRadius: 7,
+          circleStrokeColor: '#FFFFFF',
+          circleStrokeWidth: 2,
+        ),
+      );
+    }
+    if (widget.route.points.length == 1) {
+      await controller.animateCamera(
+        maplibre.CameraUpdate.newLatLng(widget.route.center),
+      );
+      return;
+    }
+    await controller.animateCamera(
+      maplibre.CameraUpdate.newLatLngBounds(
+        widget.route.bounds,
+        left: 48,
+        top: 48,
+        right: 48,
+        bottom: 48,
+      ),
+    );
+  }
+}
+
+class _RouteGeometry {
+  const _RouteGeometry({
+    required this.segments,
+    required this.points,
+    required this.bounds,
+    required this.center,
+    required this.pointCount,
+  });
+
+  final List<List<maplibre.LatLng>> segments;
+  final List<maplibre.LatLng> points;
+  final maplibre.LatLngBounds bounds;
+  final maplibre.LatLng center;
+  final int pointCount;
+
+  factory _RouteGeometry.fromBundle(TrackBundle bundle) {
+    final allPoints = <maplibre.LatLng>[];
+    final drawableSegments = <List<maplibre.LatLng>>[];
+    var pointCount = 0;
+    for (final segment in bundle.segments) {
+      final coordinates = segment.points
+          .where((point) => point.accepted && _isValidCoordinate(point))
+          .map((point) => maplibre.LatLng(point.latitude, point.longitude))
+          .toList(growable: false);
+      pointCount += coordinates.length;
+      allPoints.addAll(coordinates);
+      if (coordinates.length >= 2) {
+        drawableSegments.add(coordinates);
+      }
+    }
+    final bounds = _boundsFor(allPoints);
+    return _RouteGeometry(
+      segments: drawableSegments,
+      points: allPoints,
+      bounds: bounds,
+      center: maplibre.LatLng(
+        (bounds.southwest.latitude + bounds.northeast.latitude) / 2,
+        (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
+      ),
+      pointCount: pointCount,
+    );
+  }
+
+  static bool _isValidCoordinate(TrackPoint point) =>
+      point.latitude.isFinite &&
+      point.longitude.isFinite &&
+      point.latitude >= -90 &&
+      point.latitude <= 90 &&
+      point.longitude >= -180 &&
+      point.longitude <= 180;
+
+  static maplibre.LatLngBounds _boundsFor(List<maplibre.LatLng> points) {
+    if (points.isEmpty) {
+      const fallback = maplibre.LatLng(0, 0);
+      return maplibre.LatLngBounds(southwest: fallback, northeast: fallback);
+    }
+    var minLatitude = points.first.latitude;
+    var maxLatitude = points.first.latitude;
+    var minLongitude = points.first.longitude;
+    var maxLongitude = points.first.longitude;
+    for (final point in points.skip(1)) {
+      minLatitude = math.min(minLatitude, point.latitude);
+      maxLatitude = math.max(maxLatitude, point.latitude);
+      minLongitude = math.min(minLongitude, point.longitude);
+      maxLongitude = math.max(maxLongitude, point.longitude);
+    }
+    if (minLatitude == maxLatitude) {
+      minLatitude -= 0.0005;
+      maxLatitude += 0.0005;
+    }
+    if (minLongitude == maxLongitude) {
+      minLongitude -= 0.0005;
+      maxLongitude += 0.0005;
+    }
+    return maplibre.LatLngBounds(
+      southwest: maplibre.LatLng(minLatitude, minLongitude),
+      northeast: maplibre.LatLng(maxLatitude, maxLongitude),
+    );
+  }
 }
 
 class _StatusCard extends StatelessWidget {

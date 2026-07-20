@@ -56,6 +56,7 @@ abstract interface class FieldTracking {
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
   });
+  Future<TrackBundle> loadTrackBundle(String trackId);
 }
 
 class FieldTrackingClient implements FieldTracking {
@@ -1201,6 +1202,12 @@ class FieldTrackingClient implements FieldTracking {
   Future<List<Track>> listTracks() async {
     await initialize();
     return _store.listTracks();
+  }
+
+  @override
+  Future<TrackBundle> loadTrackBundle(String trackId) async {
+    await initialize();
+    return _store.loadTrackBundle(trackId);
   }
 
   Future<LocationSample?> getLastNativeLocation() async {
