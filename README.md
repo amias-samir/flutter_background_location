@@ -171,12 +171,17 @@ Exports are written to a user-visible folder by default:
 name the export; the package adds or corrects the `.geojson`, `.kml`, or `.gpx`
 extension for the selected format.
 
-GeoJSON route geometry omits segments with fewer than two accepted points from
-the `MultiLineString`, because a GeoJSON line cannot contain one point. Those
-segments are preserved as Point features even when optional point properties
-are disabled. KML emits a Point, and GPX preserves the one-point `<trkseg>`.
-Rejected rows with invalid or non-finite coordinates can be included for
-diagnostics, but are never inserted into route geometry.
+While tracking, the package stores point-level evidence so it can keep
+timestamps, mock-location signals, activity, accuracy, pause gaps, and upload
+state. Completed GeoJSON exports are route-first: one continuous route exports
+as a `LineString`, and multiple completed route segments export as a
+`MultiLineString`. Segments with fewer than two accepted points are omitted from
+GeoJSON route geometry because a GeoJSON line cannot contain one point. Set
+`TrackExportOptions(includeGeoJsonPointFeatures: true)` when you also need the
+individual point features for diagnostics. KML emits single-point segments as a
+Point, and GPX preserves the one-point `<trkseg>`. Rejected rows with invalid
+or non-finite coordinates can be included for diagnostics, but are never
+inserted into route geometry.
 
 ## Mock-location interpretation
 

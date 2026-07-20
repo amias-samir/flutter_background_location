@@ -7,6 +7,7 @@ final class TrackExportOptions {
     this.includeActivityMetadata = true,
     this.useUtcTimestamps = true,
     this.allowIncompleteTrackSnapshot = false,
+    this.includeGeoJsonPointFeatures = false,
   });
 
   final bool includePointProperties;
@@ -14,6 +15,7 @@ final class TrackExportOptions {
   final bool includeActivityMetadata;
   final bool useUtcTimestamps;
   final bool allowIncompleteTrackSnapshot;
+  final bool includeGeoJsonPointFeatures;
 }
 
 final class TrackExportResult {

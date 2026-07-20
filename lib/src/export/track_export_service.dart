@@ -230,15 +230,10 @@ final class TrackExportService {
       <String, Object?>{
         'type': 'Feature',
         'properties': _trackProperties(bundle.track),
-        'geometry': lines.isEmpty
-            ? null
-            : <String, Object?>{
-                'type': 'MultiLineString',
-                'coordinates': lines,
-              },
+        'geometry': _geoJsonRouteGeometry(lines),
       },
     ];
-    if (options.includePointProperties) {
+    if (options.includeGeoJsonPointFeatures) {
       for (final points in selectedSegmentPoints) {
         for (final point in points) {
           final hasCoordinate = _hasValidCoordinate(point);
@@ -258,29 +253,6 @@ final class TrackExportService {
           });
         }
       }
-    } else {
-      // A one-point segment cannot be represented by a GeoJSON LineString.
-      // Keep its geometry even when optional per-point metadata is disabled.
-      for (final points
-          in segmentPoints.where((points) => points.length == 1)) {
-        final point = points.single;
-        features.add(<String, Object?>{
-          'type': 'Feature',
-          'properties': <String, Object?>{
-            'trackId': point.trackId,
-            'segmentId': point.segmentId,
-            'sequence': point.sequence,
-          },
-          'geometry': <String, Object?>{
-            'type': 'Point',
-            'coordinates': <double>[
-              point.longitude,
-              point.latitude,
-              if (point.altitude?.isFinite ?? false) point.altitude!,
-            ],
-          },
-        });
-      }
     }
     final contents = const JsonEncoder.withIndent('  ').convert(
       <String, Object?>{'type': 'FeatureCollection', 'features': features},
@@ -293,6 +265,22 @@ final class TrackExportService {
       contents,
       selectedSegmentPoints,
     );
+  }
+
+  static Map<String, Object?>? _geoJsonRouteGeometry(
+    List<List<List<double>>> lines,
+  ) {
+    if (lines.isEmpty) return null;
+    if (lines.length == 1) {
+      return <String, Object?>{
+        'type': 'LineString',
+        'coordinates': lines.single,
+      };
+    }
+    return <String, Object?>{
+      'type': 'MultiLineString',
+      'coordinates': lines,
+    };
   }
 
   static TrackExportArtifact _kml(

@@ -72,7 +72,7 @@ void main() {
     final route = features.first! as Map<String, Object?>;
     expect(json['type'], 'FeatureCollection');
     expect(route['geometry'], isNull);
-    expect(features, hasLength(2));
+    expect(features, hasLength(1));
     expect(geoJson.pointCount, 1);
     expect(geoJson.segmentCount, 1);
 
@@ -95,7 +95,7 @@ void main() {
         _elements(gpxDocument, 'mockAssessment').single.innerText, 'detected');
   });
 
-  test('GeoJSON retains singleton geometry without point metadata', () async {
+  test('GeoJSON can include point features for diagnostics', () async {
     final trackId = await harness.createActiveTrack(trackId: 'bare-point');
     await harness.append(
       trackId: trackId,
@@ -108,7 +108,7 @@ void main() {
     final artifact = await exporter.renderTrack(
       trackId: trackId,
       format: TrackExportFormat.geoJson,
-      options: const TrackExportOptions(includePointProperties: false),
+      options: const TrackExportOptions(includeGeoJsonPointFeatures: true),
     );
     final json = jsonDecode(artifact.contents) as Map<String, Object?>;
     final features = json['features']! as List<Object?>;
@@ -118,6 +118,54 @@ void main() {
     expect(features, hasLength(2));
     expect(geometry['type'], 'Point');
     expect(geometry['coordinates'], <Object?>[85.324, 27.7172]);
+  });
+
+  test('GeoJSON exports multiple route segments as a MultiLineString',
+      () async {
+    final trackId = await harness.createActiveTrack(trackId: 'multi-line');
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.7,
+      longitude: 85.3,
+      capturedAt: harness.now,
+    );
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.701,
+      longitude: 85.301,
+      capturedAt: harness.now.add(const Duration(seconds: 15)),
+    );
+    await harness.repository.pauseTrack(trackId, reason: 'break');
+    await harness.repository.prepareResume(trackId);
+    await harness.repository.markTrackActive(trackId);
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.8,
+      longitude: 85.4,
+      capturedAt: harness.now.add(const Duration(minutes: 1)),
+    );
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.801,
+      longitude: 85.401,
+      capturedAt: harness.now.add(const Duration(minutes: 1, seconds: 15)),
+    );
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+
+    final artifact = await exporter.renderTrack(
+      trackId: trackId,
+      format: TrackExportFormat.geoJson,
+    );
+    final json = jsonDecode(artifact.contents) as Map<String, Object?>;
+    final features = json['features']! as List<Object?>;
+    final route = features.single! as Map<String, Object?>;
+    final geometry = route['geometry']! as Map<String, Object?>;
+    final lines = geometry['coordinates']! as List<Object?>;
+
+    expect(geometry['type'], 'MultiLineString');
+    expect(lines, hasLength(2));
+    expect(lines.first! as List<Object?>, hasLength(2));
+    expect(lines.last! as List<Object?>, hasLength(2));
   });
 
   test('exportTrack accepts a user supplied file name', () async {
@@ -213,16 +261,10 @@ void main() {
     final route = features.first! as Map<String, Object?>;
     final geometry = route['geometry']! as Map<String, Object?>;
     final lines = geometry['coordinates']! as List<Object?>;
-    final pointSequences = features.skip(1).map((feature) {
-      final properties = (feature! as Map<String, Object?>)['properties']!
-          as Map<String, Object?>;
-      return properties['sequence'];
-    });
-    expect(geometry['type'], 'MultiLineString');
-    expect(lines, hasLength(1),
+    expect(features, hasLength(1));
+    expect(geometry['type'], 'LineString');
+    expect(lines, hasLength(2),
         reason: 'The one-point segment must not become a LineString.');
-    expect(lines.single! as List<Object?>, hasLength(2));
-    expect(pointSequences, <Object?>[1, 3, 4]);
     expect(geoJson.pointCount, 3);
     expect(geoJson.segmentCount, 2);
 
@@ -288,7 +330,10 @@ void main() {
       rejectionReason: 'invalid_coordinate',
     );
     await harness.repository.completeTrack(trackId, reason: 'finished');
-    const options = TrackExportOptions(includeRejectedPoints: true);
+    const options = TrackExportOptions(
+      includeRejectedPoints: true,
+      includeGeoJsonPointFeatures: true,
+    );
 
     final geoJson = await exporter.renderTrack(
       trackId: trackId,
