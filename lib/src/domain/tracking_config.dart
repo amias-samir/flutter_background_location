@@ -148,7 +148,7 @@ final class TrackingConfig {
 final class FieldTrackingConfiguration {
   const FieldTrackingConfiguration({
     this.databaseName = 'flutter_background_location.sqlite',
-    this.exportDirectoryName = 'track_exports',
+    this.exportDirectoryName = 'flutter_background_location',
     this.defaultTrackingConfig = const TrackingConfig(),
     this.maximumUploadBatchPointCount = 100,
     this.maximumUploadBatchBytes = 256 * 1024,

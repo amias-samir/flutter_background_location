@@ -12,6 +12,16 @@ import '../domain/track_segment.dart';
 import '../domain/tracking_config.dart';
 import 'track_repository.dart';
 
+/// Configures connection-scoped SQLite behavior used by the track repository.
+///
+/// This is kept outside [SqliteTrackRepository] so the Android-compatible
+/// query path for result-returning PRAGMAs can be regression tested.
+Future<void> configureTrackDatabase(Database database) async {
+  await database.execute('PRAGMA foreign_keys = ON');
+  await database.rawQuery('PRAGMA busy_timeout = 5000');
+  await database.rawQuery('PRAGMA journal_mode = WAL');
+}
+
 final class SqliteTrackRepository
     implements TrackRepository, UploadOutboxRepository {
   SqliteTrackRepository({
@@ -71,11 +81,7 @@ final class SqliteTrackRepository
       options: OpenDatabaseOptions(
         version: 2,
         singleInstance: _singleInstance,
-        onConfigure: (database) async {
-          await database.execute('PRAGMA foreign_keys = ON');
-          await database.execute('PRAGMA busy_timeout = 5000');
-          await database.rawQuery('PRAGMA journal_mode = WAL');
-        },
+        onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
         onUpgrade: _upgradeSchema,
       ),

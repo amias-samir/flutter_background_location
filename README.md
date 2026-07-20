@@ -152,6 +152,7 @@ longer resumable.
 final result = await tracking.exportTrack(
   trackId: trackId,
   format: TrackExportFormat.gpx,
+  fileName: 'morning-field-route',
 );
 
 print(result.path);
@@ -163,6 +164,12 @@ await tracking.deleteExport(result);
 Completed tracks export by default. To create an explicit point-in-time
 snapshot of an active or paused track, pass
 `TrackExportOptions(allowIncompleteTrackSnapshot: true)`.
+
+Exports are written to a user-visible folder by default:
+`Download/flutter_background_location` on Android and
+`Documents/flutter_background_location` on iOS. Pass `fileName` to let the user
+name the export; the package adds or corrects the `.geojson`, `.kml`, or `.gpx`
+extension for the selected format.
 
 GeoJSON route geometry omits segments with fewer than two accepted points from
 the `MultiLineString`, because a GeoJSON line cannot contain one point. Those

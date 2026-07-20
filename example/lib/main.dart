@@ -39,6 +39,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   ActivitySnapshot _activity = const ActivitySnapshot.unknown();
   TrackPoint? _lastPoint;
   String? _trackId;
+  String? _completedTrackId;
   String? _message;
   bool _busy = true;
 
@@ -69,8 +70,8 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         )
         ..add(
           _tracking.watchCurrentTrack().listen((value) {
-            if (mounted && value != null) {
-              setState(() => _trackId = value.id);
+            if (mounted) {
+              setState(() => _trackId = value?.id);
             }
           }),
         );
@@ -114,11 +115,19 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   }
 
   Future<void> _start() => _run(() async {
+    if (_trackId != null &&
+        (_status.lifecycle == TrackerLifecycle.paused ||
+            _status.lifecycle == TrackerLifecycle.interrupted ||
+            _status.lifecycle == TrackerLifecycle.failed)) {
+      await _tracking.resumeTrack(_trackId!);
+      return;
+    }
     _trackId = await _tracking.startTrack(
       userId: 'example-user',
       organizationId: 'example-organization',
       config: const TrackingConfig(mockLocationPolicy: MockLocationPolicy.flag),
     );
+    _completedTrackId = null;
   });
 
   Future<void> _pause() => _run(
@@ -131,26 +140,53 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     await _tracking.resumeTrack(trackId);
   });
 
-  Future<void> _complete() => _run(
-    () =>
-        _tracking.completeTrack(trackId: _trackId, reason: 'example_completed'),
-  );
-
-  Future<void> _export(TrackExportFormat format) => _run(() async {
+  Future<void> _complete() => _run(() async {
     final trackId = _trackId;
     if (trackId == null) return;
-    final result = await _tracking.exportTrack(
+    await _tracking.completeTrack(
       trackId: trackId,
-      format: format,
+      reason: 'example_completed',
     );
     if (mounted) {
-      setState(
-        () => _message =
-            'Exported ${result.pointCount} points to '
-            '${result.path}',
-      );
+      setState(() {
+        _completedTrackId = trackId;
+        _trackId = null;
+        _status = const TrackerStatus(lifecycle: TrackerLifecycle.idle);
+      });
     }
   });
+
+  Future<void> _export(TrackExportFormat format) async {
+    final trackId = _trackId ?? _completedTrackId;
+    if (trackId == null) return;
+    final fileName = await _askExportFileName(format);
+    if (fileName == null) return;
+    await _run(() async {
+      final result = await _tracking.exportTrack(
+        trackId: trackId,
+        format: format,
+        fileName: fileName,
+      );
+      if (mounted) {
+        setState(
+          () => _message =
+              'Exported ${result.pointCount} points to '
+              '${result.path}',
+        );
+      }
+    });
+  }
+
+  Future<String?> _askExportFileName(TrackExportFormat format) async {
+    final trackId = _trackId;
+    final date = DateTime.now().toUtc().toIso8601String().split('T').first;
+    final initialFileName = 'track_${date}_${trackId ?? 'export'}';
+    return showDialog<String>(
+      context: context,
+      builder: (context) =>
+          _ExportNameDialog(format: format, initialFileName: initialFileName),
+    );
+  }
 
   @override
   void dispose() {
@@ -163,15 +199,19 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   @override
   Widget build(BuildContext context) {
     final canStart =
-        _status.lifecycle == TrackerLifecycle.idle || _trackId == null;
+        _status.lifecycle == TrackerLifecycle.idle && _trackId == null;
     final canPause = _status.lifecycle == TrackerLifecycle.tracking;
     final canResume =
-        _status.lifecycle == TrackerLifecycle.paused ||
-        _status.lifecycle == TrackerLifecycle.interrupted;
+        _trackId != null &&
+        (_status.lifecycle == TrackerLifecycle.paused ||
+            _status.lifecycle == TrackerLifecycle.interrupted ||
+            _status.lifecycle == TrackerLifecycle.failed);
     final canComplete =
         _trackId != null &&
         _status.lifecycle != TrackerLifecycle.idle &&
         _status.lifecycle != TrackerLifecycle.stopping;
+    final canExport =
+        _status.lifecycle == TrackerLifecycle.idle && _completedTrackId != null;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Background location tracker')),
@@ -226,8 +266,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
             children: TrackExportFormat.values
                 .map(
                   (format) => TextButton(
-                    onPressed:
-                        !_busy && _status.lifecycle == TrackerLifecycle.idle
+                    onPressed: !_busy && canExport
                         ? () => _export(format)
                         : null,
                     child: Text('Export ${format.name}'),
@@ -243,6 +282,62 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       ),
     );
   }
+}
+
+class _ExportNameDialog extends StatefulWidget {
+  const _ExportNameDialog({
+    required this.format,
+    required this.initialFileName,
+  });
+
+  final TrackExportFormat format;
+  final String initialFileName;
+
+  @override
+  State<_ExportNameDialog> createState() => _ExportNameDialogState();
+}
+
+class _ExportNameDialogState extends State<_ExportNameDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialFileName);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final trimmed = _controller.text.trim();
+    Navigator.of(context).pop(trimmed.isEmpty ? null : trimmed);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text('Export ${widget.format.name}'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      decoration: const InputDecoration(
+        labelText: 'File name',
+        helperText: 'The correct extension is added automatically.',
+      ),
+      textInputAction: TextInputAction.done,
+      onSubmitted: (_) => _submit(),
+    ),
+    actions: <Widget>[
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(onPressed: _submit, child: const Text('Export')),
+    ],
+  );
 }
 
 class _StatusCard extends StatelessWidget {

@@ -11,6 +11,9 @@ import 'package:xml/xml.dart';
 import 'test_support.dart';
 
 final class _MemoryWriter implements ExportFileWriter {
+  String? lastFileName;
+  String? lastMimeType;
+
   @override
   Future<void> delete(String path) async {}
 
@@ -18,8 +21,12 @@ final class _MemoryWriter implements ExportFileWriter {
   Future<String> write({
     required String fileName,
     required String contents,
-  }) async =>
-      '/exports/$fileName';
+    String? mimeType,
+  }) async {
+    lastFileName = fileName;
+    lastMimeType = mimeType;
+    return '/exports/$fileName';
+  }
 }
 
 Iterable<XmlElement> _elements(XmlDocument document, String localName) =>
@@ -30,13 +37,15 @@ Iterable<XmlElement> _elements(XmlDocument document, String localName) =>
 void main() {
   late RepositoryHarness harness;
   late TrackExportService exporter;
+  late _MemoryWriter writer;
 
   setUp(() async {
     harness = RepositoryHarness();
     await harness.initialize();
+    writer = _MemoryWriter();
     exporter = TrackExportService(
       repository: harness.repository,
-      fileWriter: _MemoryWriter(),
+      fileWriter: writer,
     );
   });
 
@@ -109,6 +118,47 @@ void main() {
     expect(features, hasLength(2));
     expect(geometry['type'], 'Point');
     expect(geometry['coordinates'], <Object?>[85.324, 27.7172]);
+  });
+
+  test('exportTrack accepts a user supplied file name', () async {
+    final trackId = await harness.createActiveTrack(trackId: 'renamed-track');
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.7172,
+      longitude: 85.324,
+      capturedAt: harness.now,
+    );
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+
+    final result = await exporter.exportTrack(
+      trackId: trackId,
+      format: TrackExportFormat.gpx,
+      fileName: 'morning ride',
+    );
+
+    expect(writer.lastFileName, 'morning ride.gpx');
+    expect(writer.lastMimeType, 'application/gpx+xml');
+    expect(result.fileName, 'morning ride.gpx');
+  });
+
+  test('exportTrack corrects mismatched custom extensions', () async {
+    final trackId = await harness.createActiveTrack(trackId: 'geojson-name');
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.7172,
+      longitude: 85.324,
+      capturedAt: harness.now,
+    );
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+
+    final result = await exporter.exportTrack(
+      trackId: trackId,
+      format: TrackExportFormat.geoJson,
+      fileName: 'route.kml',
+    );
+
+    expect(writer.lastFileName, 'route.geojson');
+    expect(result.fileName, 'route.geojson');
   });
 
   test('all formats preserve segments and exclude rejected points by default',

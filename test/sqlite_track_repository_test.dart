@@ -23,6 +23,21 @@ void main() {
 
   tearDown(() => harness.repository.close());
 
+  test('uses query APIs for result-returning connection PRAGMAs', () async {
+    final database = _AndroidCompatiblePragmaDatabase();
+
+    await configureTrackDatabase(database);
+
+    expect(database.executedSql, <String>['PRAGMA foreign_keys = ON']);
+    expect(
+      database.queriedSql,
+      <String>[
+        'PRAGMA busy_timeout = 5000',
+        'PRAGMA journal_mode = WAL',
+      ],
+    );
+  });
+
   test('persists lifecycle state and makes lifecycle operations idempotent',
       () async {
     final trackId = await harness.repository.createTrack(
@@ -390,4 +405,29 @@ void main() {
     );
     expect(columns.map((row) => row['name']), contains('native_event_id'));
   });
+}
+
+final class _AndroidCompatiblePragmaDatabase implements Database {
+  final List<String> executedSql = <String>[];
+  final List<String> queriedSql = <String>[];
+
+  @override
+  Future<void> execute(String sql, [List<Object?>? arguments]) async {
+    if (sql.contains('busy_timeout') || sql.contains('journal_mode')) {
+      throw StateError('Result-returning PRAGMAs require rawQuery on Android.');
+    }
+    executedSql.add(sql);
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> rawQuery(
+    String sql, [
+    List<Object?>? arguments,
+  ]) async {
+    queriedSql.add(sql);
+    return const <Map<String, Object?>>[];
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

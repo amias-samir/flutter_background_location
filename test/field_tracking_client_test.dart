@@ -13,6 +13,7 @@ final class _MemoryWriter implements ExportFileWriter {
   Future<String> write({
     required String fileName,
     required String contents,
+    String? mimeType,
   }) async =>
       '/exports/$fileName';
 }
@@ -306,6 +307,64 @@ void main() {
     expect(resumed.track.status, TrackStatus.active);
     expect(resumed.segments, hasLength(2));
     expect(tracker.running, isTrue);
+
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('startTrack reuses an already active track', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = FieldTrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final firstTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    final secondTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+
+    expect(secondTrackId, firstTrackId);
+    expect(tracker.starts, <String>[firstTrackId]);
+    expect((await harness.repository.findActiveTrack())!.id, firstTrackId);
+
+    await client.completeTrack(trackId: firstTrackId);
+    await client.dispose();
+  });
+
+  test('startTrack resumes an interrupted current track', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'interrupted');
+    await harness.repository.interruptTrack(
+      trackId,
+      reason: 'native_stopped',
+    );
+    final tracker = _FakeTracker();
+    final client = FieldTrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final resumedTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+
+    expect(resumedTrackId, trackId);
+    expect(tracker.starts, <String>[trackId]);
+    expect((await harness.repository.getTrack(trackId))!.status,
+        TrackStatus.active);
 
     await client.completeTrack(trackId: trackId);
     await client.dispose();

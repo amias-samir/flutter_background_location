@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path_util;
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xml/xml.dart';
 
@@ -12,8 +14,88 @@ import '../domain/track_point.dart';
 import '../storage/track_repository.dart';
 
 abstract interface class ExportFileWriter {
-  Future<String> write({required String fileName, required String contents});
+  Future<String> write({
+    required String fileName,
+    required String contents,
+    String? mimeType,
+  });
+
   Future<void> delete(String path);
+}
+
+/// Writes exports to a user-visible folder.
+///
+/// Android uses MediaStore so files appear in
+/// `Download/flutter_background_location` without broad storage permissions.
+/// iOS has no shared Downloads folder, so it writes to
+/// `Documents/flutter_background_location`.
+final class PublicDownloadsExportWriter implements ExportFileWriter {
+  PublicDownloadsExportWriter({
+    this.directoryName = 'flutter_background_location',
+    MethodChannel? methodChannel,
+  }) : _methodChannel = methodChannel ?? const MethodChannel(_methodsName);
+
+  static const String _methodsName = 'flutter_background_location/methods';
+
+  final String directoryName;
+  final MethodChannel _methodChannel;
+
+  @override
+  Future<String> write({
+    required String fileName,
+    required String contents,
+    String? mimeType,
+  }) async {
+    final safeName = sanitizeExportFileName(fileName);
+    if (Platform.isAndroid) {
+      final path = await _methodChannel.invokeMethod<String>(
+        'exportToDownloads',
+        <String, Object?>{
+          'directoryName': directoryName,
+          'fileName': safeName,
+          'mimeType': mimeType ?? 'application/octet-stream',
+          'contents': contents,
+        },
+      );
+      if (path == null || path.isEmpty) {
+        throw StateError('Android export did not return a destination path.');
+      }
+      return path;
+    }
+
+    final directory = await _fallbackExportDirectory();
+    return FileSystemExportWriter(directory.path).write(
+      fileName: safeName,
+      contents: contents,
+      mimeType: mimeType,
+    );
+  }
+
+  @override
+  Future<void> delete(String exportPath) async {
+    if (Platform.isAndroid) {
+      await _methodChannel.invokeMethod<Object?>(
+        'deleteDownloadExport',
+        <String, Object?>{
+          'directoryName': directoryName,
+          'fileName': sanitizeExportFileName(path_util.basename(exportPath)),
+        },
+      );
+      return;
+    }
+
+    final directory = await _fallbackExportDirectory();
+    await FileSystemExportWriter(directory.path).delete(exportPath);
+  }
+
+  Future<Directory> _fallbackExportDirectory() async {
+    final downloads = await getDownloadsDirectory();
+    if (downloads != null) {
+      return Directory(path_util.join(downloads.path, directoryName));
+    }
+    final documents = await getApplicationDocumentsDirectory();
+    return Directory(path_util.join(documents.path, directoryName));
+  }
 }
 
 final class FileSystemExportWriter implements ExportFileWriter {
@@ -25,14 +107,11 @@ final class FileSystemExportWriter implements ExportFileWriter {
   Future<String> write({
     required String fileName,
     required String contents,
+    String? mimeType,
   }) async {
     final directory = Directory(directoryPath);
     await directory.create(recursive: true);
-    final safeName = path_util.basename(fileName);
-    if (safeName != fileName || safeName == '.' || safeName == '..') {
-      throw ArgumentError.value(
-          fileName, 'fileName', 'Unsafe export file name');
-    }
+    final safeName = sanitizeExportFileName(fileName);
     var destination = File(path_util.join(directory.path, safeName));
     var counter = 1;
     final extension = path_util.extension(safeName);
@@ -79,15 +158,22 @@ final class TrackExportService {
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
+    String? fileName,
   }) async {
     final artifact = await renderTrack(
       trackId: trackId,
       format: format,
       options: options,
     );
+    final exportName = resolveExportFileName(
+      format: format,
+      fallbackFileName: artifact.fileName,
+      requestedFileName: fileName,
+    );
     final path = await fileWriter.write(
-      fileName: artifact.fileName,
+      fileName: exportName,
       contents: artifact.contents,
+      mimeType: artifact.mimeType,
     );
     return TrackExportResult(
       trackId: artifact.trackId,
@@ -480,3 +566,38 @@ final class TrackExportService {
     );
   }
 }
+
+String resolveExportFileName({
+  required TrackExportFormat format,
+  required String fallbackFileName,
+  String? requestedFileName,
+}) {
+  final extension = _extensionForFormat(format);
+  final fallback = sanitizeExportFileName(fallbackFileName);
+  final requested = requestedFileName?.trim();
+  if (requested == null || requested.isEmpty) return fallback;
+
+  final safe = sanitizeExportFileName(requested);
+  final currentExtension = path_util.extension(safe);
+  if (currentExtension.toLowerCase() == extension) return safe;
+  if (currentExtension.isEmpty) return '$safe$extension';
+  return '${path_util.basenameWithoutExtension(safe)}$extension';
+}
+
+String sanitizeExportFileName(String fileName) {
+  final sanitized = path_util
+      .basename(fileName)
+      .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_')
+      .trim()
+      .replaceAll(RegExp(r'^[. ]+|[. ]+$'), '');
+  if (sanitized.isEmpty || sanitized == '.' || sanitized == '..') {
+    throw ArgumentError.value(fileName, 'fileName', 'Unsafe export file name');
+  }
+  return sanitized;
+}
+
+String _extensionForFormat(TrackExportFormat format) => switch (format) {
+      TrackExportFormat.geoJson => '.geojson',
+      TrackExportFormat.kml => '.kml',
+      TrackExportFormat.gpx => '.gpx',
+    };

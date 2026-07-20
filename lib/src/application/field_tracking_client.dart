@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as path_util;
-import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../domain/activity_snapshot.dart';
@@ -55,6 +54,7 @@ abstract interface class FieldTracking {
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
+    String? fileName,
   });
 }
 
@@ -167,12 +167,9 @@ class FieldTrackingClient implements FieldTracking {
       );
     }
     await _store.initialize();
-    if (_exportFileWriter == null) {
-      final support = await getApplicationSupportDirectory();
-      _exportFileWriter = FileSystemExportWriter(
-        path_util.join(support.path, configuration.exportDirectoryName),
-      );
-    }
+    _exportFileWriter ??= PublicDownloadsExportWriter(
+      directoryName: configuration.exportDirectoryName,
+    );
     _exportService = TrackExportService(
       repository: _store,
       fileWriter: _exportFileWriter!,
@@ -358,6 +355,41 @@ class FieldTrackingClient implements FieldTracking {
       if (!permission.canTrackInBackground) {
         throw TrackingPermissionException(permission);
       }
+      final active = await _store.findActiveTrack();
+      if (active != null) {
+        final nativeRunning = await _tracker.isRunning();
+        final nativeTrackId =
+            nativeRunning ? (await _tracker.runtimeState()).trackId : null;
+        if (!nativeRunning ||
+            nativeTrackId == null ||
+            nativeTrackId == active.id) {
+          if (active.status == TrackStatus.starting) {
+            await _store.markTrackActive(active.id);
+          }
+          if (!nativeRunning) {
+            await _tracker.start(trackId: active.id, config: active.config);
+          }
+          _motionGate = MotionGate(active.config);
+          _acceptingLocations = true;
+          _scheduleBatchUploads(active.id, active.config);
+          _emitStatus(
+            TrackerStatus(
+              lifecycle: TrackerLifecycle.tracking,
+              trackId: active.id,
+              lastPointAt: active.lastPointAt,
+            ),
+          );
+          return active.id;
+        }
+        throw StateError(
+          'Native tracking belongs to $nativeTrackId, not ${active.id}.',
+        );
+      }
+      final paused = await _store.findLatestPausedTrack();
+      if (paused != null) {
+        await _resumeTrack(paused.id);
+        return paused.id;
+      }
       final trackId = await _store.createTrack(
         userId: userId,
         organizationId: organizationId,
@@ -470,73 +502,75 @@ class FieldTrackingClient implements FieldTracking {
   @override
   Future<void> resumeTrack(String trackId) async {
     await initialize();
-    await _serializeCommand(() async {
-      final existing = await _store.getTrack(trackId);
-      if (existing == null) throw StateError('Unknown track: $trackId');
-      if (existing.status == TrackStatus.active ||
-          existing.status == TrackStatus.starting) {
-        final nativeRunning = await _tracker.isRunning();
-        final nativeTrackId =
-            nativeRunning ? (await _tracker.runtimeState()).trackId : null;
-        if (nativeRunning &&
-            (nativeTrackId == null || nativeTrackId == trackId)) {
-          return;
-        }
-        if (nativeRunning && nativeTrackId != trackId) {
-          throw StateError(
-            'Native tracking belongs to $nativeTrackId, not $trackId.',
-          );
-        }
-        await _drainPendingNativeLocations(trackId: trackId);
-        await _store.interruptTrack(
-          trackId,
-          reason: 'resume_found_inactive_native_runner',
+    await _serializeCommand(() => _resumeTrack(trackId));
+  }
+
+  Future<void> _resumeTrack(String trackId) async {
+    final existing = await _store.getTrack(trackId);
+    if (existing == null) throw StateError('Unknown track: $trackId');
+    if (existing.status == TrackStatus.active ||
+        existing.status == TrackStatus.starting) {
+      final nativeRunning = await _tracker.isRunning();
+      final nativeTrackId =
+          nativeRunning ? (await _tracker.runtimeState()).trackId : null;
+      if (nativeRunning &&
+          (nativeTrackId == null || nativeTrackId == trackId)) {
+        return;
+      }
+      if (nativeRunning && nativeTrackId != trackId) {
+        throw StateError(
+          'Native tracking belongs to $nativeTrackId, not $trackId.',
         );
       }
-      final permission = await _tracker.permissions(request: true);
-      if (!permission.canTrackInBackground) {
-        throw TrackingPermissionException(permission);
+      await _drainPendingNativeLocations(trackId: trackId);
+      await _store.interruptTrack(
+        trackId,
+        reason: 'resume_found_inactive_native_runner',
+      );
+    }
+    final permission = await _tracker.permissions(request: true);
+    if (!permission.canTrackInBackground) {
+      throw TrackingPermissionException(permission);
+    }
+    final prepared = await _store.prepareResume(trackId);
+    if (prepared.status == TrackStatus.active) return;
+    _motionGate = MotionGate(prepared.config);
+    _emitStatus(
+      TrackerStatus(
+        lifecycle: TrackerLifecycle.starting,
+        trackId: trackId,
+      ),
+    );
+    try {
+      await _store.markTrackActive(trackId);
+      _acceptingLocations = true;
+      if (await _tracker.isRunning()) {
+        await _tracker.resume(trackId: trackId, config: prepared.config);
+      } else {
+        await _tracker.start(trackId: trackId, config: prepared.config);
       }
-      final prepared = await _store.prepareResume(trackId);
-      if (prepared.status == TrackStatus.active) return;
-      _motionGate = MotionGate(prepared.config);
       _emitStatus(
         TrackerStatus(
-          lifecycle: TrackerLifecycle.starting,
+          lifecycle: TrackerLifecycle.tracking,
           trackId: trackId,
         ),
       );
-      try {
-        await _store.markTrackActive(trackId);
-        _acceptingLocations = true;
-        if (await _tracker.isRunning()) {
-          await _tracker.resume(trackId: trackId, config: prepared.config);
-        } else {
-          await _tracker.start(trackId: trackId, config: prepared.config);
-        }
-        _emitStatus(
-          TrackerStatus(
-            lifecycle: TrackerLifecycle.tracking,
-            trackId: trackId,
-          ),
-        );
-        _scheduleBatchUploads(trackId, prepared.config);
-      } catch (error) {
-        _acceptingLocations = false;
-        await _store.interruptTrack(
-          trackId,
-          reason: 'tracker_resume_failed',
-        );
-        _emitStatus(
-          TrackerStatus(
-            lifecycle: TrackerLifecycle.failed,
-            trackId: trackId,
-            message: error.toString(),
-          ),
-        );
-        rethrow;
-      }
-    });
+      _scheduleBatchUploads(trackId, prepared.config);
+    } catch (error) {
+      _acceptingLocations = false;
+      await _store.interruptTrack(
+        trackId,
+        reason: 'tracker_resume_failed',
+      );
+      _emitStatus(
+        TrackerStatus(
+          lifecycle: TrackerLifecycle.failed,
+          trackId: trackId,
+          message: error.toString(),
+        ),
+      );
+      rethrow;
+    }
   }
 
   @override
@@ -1147,6 +1181,7 @@ class FieldTrackingClient implements FieldTracking {
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
+    String? fileName,
   }) async {
     await initialize();
     await _pointTail;
@@ -1154,6 +1189,7 @@ class FieldTrackingClient implements FieldTracking {
       trackId: trackId,
       format: format,
       options: options,
+      fileName: fileName,
     );
   }
 

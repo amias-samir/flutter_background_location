@@ -4,13 +4,16 @@ import android.Manifest
 import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -21,6 +24,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
+import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -140,8 +144,154 @@ class FlutterBackgroundLocationPlugin :
             )
             "openAppSettings" -> openAppSettings(result)
             "openLocationSettings" -> openSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS, result)
+            "exportToDownloads" -> exportToDownloads(call, result)
+            "deleteDownloadExport" -> deleteDownloadExport(call, result)
             else -> result.notImplemented()
         }
+    }
+
+    private fun exportToDownloads(call: MethodCall, result: MethodChannel.Result) {
+        val arguments = call.arguments as? Map<*, *>
+        val directoryName = safeExportPart(arguments?.get("directoryName") as? String)
+            ?: "flutter_background_location"
+        val fileName = safeExportPart(arguments?.get("fileName") as? String)
+        val contents = arguments?.get("contents") as? String
+        val mimeType = arguments?.get("mimeType") as? String ?: "application/octet-stream"
+        if (fileName == null || contents == null) {
+            result.error("invalid_export", "Export requires fileName and contents.", null)
+            return
+        }
+
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$directoryName"
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val displayName = uniqueMediaStoreExportName(relativePath, fileName)
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val resolver = applicationContext.contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    result.error("export_failed", "Could not create the export file.", null)
+                    return
+                }
+                try {
+                    resolver.openOutputStream(uri, "w")?.use { stream ->
+                        stream.write(contents.toByteArray(Charsets.UTF_8))
+                    } ?: throw IllegalStateException("Could not open export output stream.")
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    result.success("/storage/emulated/0/$relativePath/$displayName")
+                } catch (error: Throwable) {
+                    resolver.delete(uri, null, null)
+                    throw error
+                }
+            } else {
+                val directory = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    directoryName,
+                )
+                if (!directory.exists() && !directory.mkdirs()) {
+                    result.error("export_failed", "Could not create the export directory.", null)
+                    return
+                }
+                val file = uniqueExportFile(directory, fileName)
+                file.writeText(contents, Charsets.UTF_8)
+                result.success(file.absolutePath)
+            }
+        } catch (error: Throwable) {
+            result.error("export_failed", error.localizedMessage, null)
+        }
+    }
+
+    private fun deleteDownloadExport(call: MethodCall, result: MethodChannel.Result) {
+        val arguments = call.arguments as? Map<*, *>
+        val directoryName = safeExportPart(arguments?.get("directoryName") as? String)
+            ?: "flutter_background_location"
+        val fileName = safeExportPart(arguments?.get("fileName") as? String)
+        if (fileName == null) {
+            result.error("invalid_export", "Delete requires fileName.", null)
+            return
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$directoryName/"
+                val deleted = applicationContext.contentResolver.delete(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+                    arrayOf(fileName, relativePath),
+                )
+                result.success(deleted > 0)
+            } else {
+                val file = File(
+                    File(
+                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                        directoryName,
+                    ),
+                    fileName,
+                )
+                result.success(!file.exists() || file.delete())
+            }
+        } catch (error: Throwable) {
+            result.error("delete_export_failed", error.localizedMessage, null)
+        }
+    }
+
+    private fun uniqueMediaStoreExportName(relativePath: String, requestedName: String): String {
+        val resolver = applicationContext.contentResolver
+        val relativePathWithSlash = "$relativePath/"
+        val dot = requestedName.lastIndexOf('.')
+        val base = if (dot > 0) requestedName.substring(0, dot) else requestedName
+        val extension = if (dot > 0) requestedName.substring(dot) else ""
+        var candidate = requestedName
+        var counter = 1
+        while (mediaStoreExportExists(resolver, relativePathWithSlash, candidate)) {
+            candidate = "${base}_${counter}${extension}"
+            counter += 1
+        }
+        return candidate
+    }
+
+    private fun mediaStoreExportExists(
+        resolver: android.content.ContentResolver,
+        relativePath: String,
+        displayName: String,
+    ): Boolean {
+        resolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+            arrayOf(displayName, relativePath),
+            null,
+        )?.use { cursor ->
+            return cursor.moveToFirst()
+        }
+        return false
+    }
+
+    private fun safeExportPart(value: String?): String? {
+        val trimmed = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val name = File(trimmed).name
+        if (name == "." || name == ".." || name.contains(File.separatorChar)) return null
+        return name.replace(Regex("""[\\/:*?"<>|\u0000-\u001F]"""), "_")
+    }
+
+    private fun uniqueExportFile(directory: File, requestedName: String): File {
+        var destination = File(directory, requestedName)
+        val dot = requestedName.lastIndexOf('.')
+        val base = if (dot > 0) requestedName.substring(0, dot) else requestedName
+        val extension = if (dot > 0) requestedName.substring(dot) else ""
+        var counter = 1
+        while (destination.exists()) {
+            destination = File(directory, "${base}_${counter}${extension}")
+            counter += 1
+        }
+        return destination
     }
 
     private fun initialize(call: MethodCall, result: MethodChannel.Result) {
@@ -182,12 +332,16 @@ class FlutterBackgroundLocationPlugin :
 
         val existingTrackId = stateStore.activeTrackId
         if (existingTrackId != null && existingTrackId != trackId && stateStore.state != TrackingStateStore.STATE_IDLE) {
-            result.error(
-                "tracking_already_active",
-                "Track $existingTrackId must be stopped before a different track starts.",
-                stateStore.statusMap(),
-            )
-            return
+            if (!stateStore.isActuallyTracking()) {
+                stateStore.stop("stale_native_session_replaced")
+            } else {
+                result.error(
+                    "tracking_already_active",
+                    "Track $existingTrackId must be stopped before a different track starts.",
+                    stateStore.statusMap(),
+                )
+                return
+            }
         }
 
         val configuration = TrackingConfiguration.fromMap(arguments["config"] as? Map<*, *>)
