@@ -1,0 +1,4 @@
+<resources>
+    <string name="flutter_background_location_notification_channel_name">Active location tracking</string>
+</resources>
+
