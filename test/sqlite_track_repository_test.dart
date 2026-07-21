@@ -116,6 +116,25 @@ void main() {
     );
   });
 
+  test('deleteTracksExcept removes older tracks and cascades child rows',
+      () async {
+    final removed = await harness.createActiveTrack(trackId: 'removed-track');
+    await harness.append(trackId: removed, latitude: 27.7, longitude: 85.3);
+    await harness.repository.completeTrack(removed, reason: 'finished');
+    final retained = await harness.createActiveTrack(trackId: 'retained-track');
+    await harness.append(trackId: retained, latitude: 27.8, longitude: 85.4);
+
+    await harness.repository.deleteTracksExcept(<String>{retained});
+
+    expect(await harness.repository.getTrack(removed), isNull);
+    await expectLater(
+      harness.repository.loadTrackBundle(removed),
+      throwsStateError,
+    );
+    final retainedBundle = await harness.repository.loadTrackBundle(retained);
+    expect(retainedBundle.segments.single.points, hasLength(1));
+  });
+
   test('current track stream replays its latest state to new listeners',
       () async {
     final trackId = await harness.createActiveTrack(trackId: 'stream-track');

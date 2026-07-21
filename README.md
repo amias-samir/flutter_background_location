@@ -104,6 +104,9 @@ import 'package:flutter_background_location/flutter_background_location.dart';
 final tracking = FieldTrackingClient(
   configuration: const FieldTrackingConfiguration(
     databaseName: 'field_routes.sqlite',
+    // Default is keepLatestOnly, which clears older track history when a new
+    // track starts. Use keepAll if your app needs a full local history.
+    recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
   ),
 );
 
@@ -252,6 +255,17 @@ GeoJSON, KML, and GPX files are plaintext and can reveal sensitive routes. The
 host app should show the destination before sharing, avoid logging coordinates,
 apply a retention policy, and call `deleteExport` after the artifact is no
 longer needed.
+
+By default, `FieldTrackingConfiguration.recordRetentionPolicy` is
+`TrackRecordRetentionPolicy.keepLatestOnly`. That keeps the current session
+through pause, resume, and completion, then removes older track rows only when a
+new track starts. Set `TrackRecordRetentionPolicy.keepAll` to keep every
+recorded track in SQLite.
+
+SQLite entries named `sqlite_autoindex_*` are internal indexes created for
+`PRIMARY KEY` and `UNIQUE` constraints, such as unique point sequences and
+upload outbox idempotency keys. They are not extra schemas and they are not
+created once per tracking session.
 
 ## Example and validation
 

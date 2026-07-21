@@ -55,6 +55,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   Future<void> _initialize() async {
     try {
       await _tracking.initialize();
+
       _subscriptions
         ..add(
           _tracking.statusStream.listen((value) {
@@ -509,7 +510,7 @@ class _TrackRouteMapState extends State<_TrackRouteMap> {
 
   @override
   Widget build(BuildContext context) => maplibre.MapLibreMap(
-    styleString: maplibre.MapLibreStyles.demo,
+    styleString: maplibre.MapLibreStyles.openfreemapLiberty,
     initialCameraPosition: maplibre.CameraPosition(
       target: widget.route.center,
       zoom: widget.route.points.length == 1 ? 15 : 13,
@@ -675,6 +676,7 @@ class _StatusCard extends StatelessWidget {
           Text('Sampling: ${status.samplingProfile.name}'),
           Text('Last sequence: ${point?.sequence ?? 'none'}'),
           Text('Mock signal: ${point?.mockAssessment.name ?? 'unavailable'}'),
+          Text('Is Mocked: ${point?.isMocked ?? 'unavailable'}'),
         ],
       ),
     ),

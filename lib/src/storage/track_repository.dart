@@ -178,6 +178,7 @@ abstract interface class TrackRepository {
   Future<TrackPoint> appendPoint(PointWriteRequest request);
   Future<Track?> getTrack(String trackId);
   Future<List<Track>> listTracks();
+  Future<void> deleteTracksExcept(Set<String> retainedTrackIds);
   Future<Track?> findActiveTrack();
   Future<Track?> findLatestPausedTrack();
   Future<TrackPoint?> findLastAcceptedPoint(

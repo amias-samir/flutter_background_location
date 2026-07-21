@@ -398,6 +398,7 @@ class FieldTrackingClient implements FieldTracking {
         config: selectedConfig,
         requestedTrackId: requestedTrackId,
       );
+      await _applyRecordRetention(retainedTrackId: trackId);
       _motionGate = MotionGate(selectedConfig);
       _emitStatus(
         TrackerStatus(
@@ -435,6 +436,14 @@ class FieldTrackingClient implements FieldTracking {
         rethrow;
       }
     });
+  }
+
+  Future<void> _applyRecordRetention({required String retainedTrackId}) async {
+    if (configuration.recordRetentionPolicy !=
+        TrackRecordRetentionPolicy.keepLatestOnly) {
+      return;
+    }
+    await _store.deleteTracksExcept(<String>{retainedTrackId});
   }
 
   @override

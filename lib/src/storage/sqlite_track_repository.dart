@@ -781,6 +781,24 @@ final class SqliteTrackRepository
   }
 
   @override
+  Future<void> deleteTracksExcept(Set<String> retainedTrackIds) async {
+    await _db.transaction((transaction) async {
+      if (retainedTrackIds.isEmpty) {
+        await transaction.delete('tracks');
+        return;
+      }
+      final placeholders =
+          List<String>.filled(retainedTrackIds.length, '?').join(',');
+      await transaction.delete(
+        'tracks',
+        where: 'id NOT IN ($placeholders)',
+        whereArgs: retainedTrackIds.toList(growable: false),
+      );
+    });
+    await _emitCurrentTrack();
+  }
+
+  @override
   Future<Track?> findActiveTrack() async {
     final rows = await _db.query(
       'tracks',

@@ -2,6 +2,8 @@ import 'dart:convert';
 
 enum MockLocationPolicy { allow, flag, reject }
 
+enum TrackRecordRetentionPolicy { keepLatestOnly, keepAll }
+
 /// Sampling, validation, and battery policy for a tracking session.
 final class TrackingConfig {
   const TrackingConfig({
@@ -149,6 +151,7 @@ final class FieldTrackingConfiguration {
   const FieldTrackingConfiguration({
     this.databaseName = 'flutter_background_location.sqlite',
     this.exportDirectoryName = 'flutter_background_location',
+    this.recordRetentionPolicy = TrackRecordRetentionPolicy.keepLatestOnly,
     this.defaultTrackingConfig = const TrackingConfig(),
     this.maximumUploadBatchPointCount = 100,
     this.maximumUploadBatchBytes = 256 * 1024,
@@ -161,6 +164,7 @@ final class FieldTrackingConfiguration {
 
   final String databaseName;
   final String exportDirectoryName;
+  final TrackRecordRetentionPolicy recordRetentionPolicy;
   final TrackingConfig defaultTrackingConfig;
   final int maximumUploadBatchPointCount;
   final int maximumUploadBatchBytes;

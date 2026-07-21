@@ -340,6 +340,68 @@ void main() {
     await client.dispose();
   });
 
+  test('startTrack keeps only the latest track by default', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = FieldTrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final firstTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    await client.completeTrack(trackId: firstTrackId);
+    final secondTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+
+    expect(await harness.repository.getTrack(firstTrackId), isNull);
+    expect((await harness.repository.listTracks()).map((track) => track.id),
+        <String>[secondTrackId]);
+
+    await client.completeTrack(trackId: secondTrackId);
+    await client.dispose();
+  });
+
+  test('startTrack can keep all track history', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = FieldTrackingClient(
+      configuration: const FieldTrackingConfiguration(
+        recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+      ),
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final firstTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    await client.completeTrack(trackId: firstTrackId);
+    final secondTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+
+    expect(
+      (await harness.repository.listTracks()).map((track) => track.id).toSet(),
+      <String>{firstTrackId, secondTrackId},
+    );
+
+    await client.completeTrack(trackId: secondTrackId);
+    await client.dispose();
+  });
+
   test('startTrack resumes an interrupted current track', () async {
     final harness = RepositoryHarness();
     await harness.initialize();
