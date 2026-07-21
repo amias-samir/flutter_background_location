@@ -33,10 +33,12 @@ class TrackingExamplePage extends StatefulWidget {
 }
 
 class _TrackingExamplePageState extends State<TrackingExamplePage> {
-  final FieldTrackingClient _tracking = FieldTrackingClient();
   final List<StreamSubscription<Object?>> _subscriptions =
       <StreamSubscription<Object?>>[];
 
+  late FieldTrackingClient _tracking;
+  TrackRecordRetentionPolicy _retentionPolicy =
+      TrackRecordRetentionPolicy.keepLatestOnly;
   TrackerStatus _status = const TrackerStatus(lifecycle: TrackerLifecycle.idle);
   ActivitySnapshot _activity = const ActivitySnapshot.unknown();
   TrackPoint? _lastPoint;
@@ -49,36 +51,21 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   @override
   void initState() {
     super.initState();
+    _tracking = _createTrackingClient();
     unawaited(_initialize());
   }
+
+  FieldTrackingClient _createTrackingClient() => FieldTrackingClient(
+    configuration: FieldTrackingConfiguration(
+      recordRetentionPolicy: _retentionPolicy,
+    ),
+  );
 
   Future<void> _initialize() async {
     try {
       await _tracking.initialize();
 
-      _subscriptions
-        ..add(
-          _tracking.statusStream.listen((value) {
-            if (mounted) setState(() => _status = value);
-          }),
-        )
-        ..add(
-          _tracking.activityStream.listen((value) {
-            if (mounted) setState(() => _activity = value);
-          }),
-        )
-        ..add(
-          _tracking.pointStream.listen((value) {
-            if (mounted) setState(() => _lastPoint = value);
-          }),
-        )
-        ..add(
-          _tracking.watchCurrentTrack().listen((value) {
-            if (mounted) {
-              setState(() => _trackId = value?.id);
-            }
-          }),
-        );
+      _listenToTrackingClient();
       setState(() {
         _status = _tracking.currentStatus;
         _busy = false;
@@ -86,6 +73,48 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       await _refreshTracks();
     } catch (error) {
       _showError(error);
+    }
+  }
+
+  void _listenToTrackingClient() {
+    _subscriptions
+      ..add(
+        _tracking.statusStream.listen((value) {
+          if (mounted) setState(() => _status = value);
+        }),
+      )
+      ..add(
+        _tracking.activityStream.listen((value) {
+          if (mounted) setState(() => _activity = value);
+        }),
+      )
+      ..add(
+        _tracking.pointStream.listen((value) {
+          if (mounted) setState(() => _lastPoint = value);
+        }),
+      )
+      ..add(
+        _tracking.watchCurrentTrack().listen((value) {
+          if (mounted) {
+            setState(() => _trackId = value?.id);
+          }
+        }),
+      );
+  }
+
+  Future<void> _cancelTrackingSubscriptions() async {
+    for (final subscription in _subscriptions) {
+      await subscription.cancel();
+    }
+    _subscriptions.clear();
+  }
+
+  Future<void> _disposeTrackingClient() async {
+    try {
+      await _tracking.dispose();
+    } catch (_) {
+      // The client intentionally refuses disposal while native tracking is
+      // active. The app lifecycle will keep the foreground service visible.
     }
   }
 
@@ -125,6 +154,32 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     setState(() => _tracks = tracks);
   }
 
+  Future<void> _changeRetentionPolicy(TrackRecordRetentionPolicy value) async {
+    if (value == _retentionPolicy || _busy || _trackId != null) return;
+    setState(() {
+      _busy = true;
+      _message = null;
+      _retentionPolicy = value;
+    });
+    try {
+      await _cancelTrackingSubscriptions();
+      await _tracking.dispose();
+      _tracking = _createTrackingClient();
+      await _tracking.initialize();
+      _listenToTrackingClient();
+      final tracks = await _tracking.listTracks();
+      if (!mounted) return;
+      setState(() {
+        _status = _tracking.currentStatus;
+        _activity = _tracking.currentActivity;
+        _tracks = tracks;
+        _busy = false;
+      });
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
   Future<void> _start() => _run(() async {
     if (_trackId != null &&
         (_status.lifecycle == TrackerLifecycle.paused ||
@@ -137,7 +192,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     _trackId = await _tracking.startTrack(
       userId: 'example-user',
       organizationId: 'example-organization',
-      config: const TrackingConfig(mockLocationPolicy: MockLocationPolicy.flag),
+      config: const TrackingConfig(mockLocationPolicy: MockLocationPolicy.flag,
+        movingDistanceFilterMeters: 5,
+        movingInterval: Duration(seconds: 5),
+        maximumAcceptedAccuracyMeters: 40
+      ),
     );
     _completedTrackId = null;
     await _refreshTracks();
@@ -215,9 +274,8 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
 
   @override
   void dispose() {
-    for (final subscription in _subscriptions) {
-      unawaited(subscription.cancel());
-    }
+    unawaited(_cancelTrackingSubscriptions());
+    unawaited(_disposeTrackingClient());
     super.dispose();
   }
 
@@ -237,6 +295,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         _status.lifecycle != TrackerLifecycle.stopping;
     final canExport =
         _status.lifecycle == TrackerLifecycle.idle && _completedTrackId != null;
+    final canConfigureRetention =
+        !_busy &&
+        _status.lifecycle == TrackerLifecycle.idle &&
+        _trackId == null;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Background location tracker')),
@@ -258,6 +320,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
             const SizedBox(height: 12),
             SelectableText(_message!),
           ],
+          const SizedBox(height: 16),
+          _RetentionPolicyControl(
+            value: _retentionPolicy,
+            enabled: canConfigureRetention,
+            onChanged: _changeRetentionPolicy,
+          ),
           const SizedBox(height: 16),
           Wrap(
             spacing: 8,
@@ -367,6 +435,52 @@ class _ExportNameDialogState extends State<_ExportNameDialog> {
         child: const Text('Cancel'),
       ),
       FilledButton(onPressed: _submit, child: const Text('Export')),
+    ],
+  );
+}
+
+class _RetentionPolicyControl extends StatelessWidget {
+  const _RetentionPolicyControl({
+    required this.value,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final TrackRecordRetentionPolicy value;
+  final bool enabled;
+  final ValueChanged<TrackRecordRetentionPolicy> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: <Widget>[
+      Text('Track retention', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      SegmentedButton<TrackRecordRetentionPolicy>(
+        segments: const <ButtonSegment<TrackRecordRetentionPolicy>>[
+          ButtonSegment<TrackRecordRetentionPolicy>(
+            value: TrackRecordRetentionPolicy.keepLatestOnly,
+            icon: Icon(Icons.filter_1),
+            label: Text('Latest only'),
+          ),
+          ButtonSegment<TrackRecordRetentionPolicy>(
+            value: TrackRecordRetentionPolicy.keepAll,
+            icon: Icon(Icons.history),
+            label: Text('Keep all'),
+          ),
+        ],
+        selected: <TrackRecordRetentionPolicy>{value},
+        onSelectionChanged: enabled
+            ? (selection) => onChanged(selection.single)
+            : null,
+      ),
+      const SizedBox(height: 6),
+      Text(
+        value == TrackRecordRetentionPolicy.keepLatestOnly
+            ? 'Older tracks are deleted when a new track starts.'
+            : 'Every completed track remains in the local database.',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
     ],
   );
 }
