@@ -193,9 +193,9 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       userId: 'example-user',
       organizationId: 'example-organization',
       config: const TrackingConfig(mockLocationPolicy: MockLocationPolicy.flag,
-        movingDistanceFilterMeters: 5,
+        movingDistanceFilterMeters: 2,
         movingInterval: Duration(seconds: 5),
-        maximumAcceptedAccuracyMeters: 40
+        maximumAcceptedAccuracyMeters: 20
       ),
     );
     _completedTrackId = null;
@@ -540,7 +540,7 @@ class _RecordedTracksSection extends StatelessWidget {
 
   static String _trackTitle(Track track) {
     final started = _formatDateTime(track.startedAt);
-    return '${track.status.name} • $started';
+    return '${track.status.name} ${track.id} • $started';
   }
 
   static String _trackSubtitle(Track track) {
