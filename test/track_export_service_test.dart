@@ -1,10 +1,10 @@
 import 'dart:convert';
 
-import 'package:flutter_background_location/src/domain/activity_snapshot.dart';
-import 'package:flutter_background_location/src/domain/export_models.dart';
-import 'package:flutter_background_location/src/domain/track_point.dart';
-import 'package:flutter_background_location/src/domain/tracker_status.dart';
-import 'package:flutter_background_location/src/export/track_export_service.dart';
+import 'package:flutter_background_location_tracker/src/domain/activity_snapshot.dart';
+import 'package:flutter_background_location_tracker/src/domain/export_models.dart';
+import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
+import 'package:flutter_background_location_tracker/src/domain/tracker_status.dart';
+import 'package:flutter_background_location_tracker/src/export/track_export_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xml/xml.dart';
 

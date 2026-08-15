@@ -1,10 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter_background_location/src/domain/track.dart';
-import 'package:flutter_background_location/src/domain/track_point.dart';
-import 'package:flutter_background_location/src/storage/track_repository.dart';
-import 'package:flutter_background_location/src/upload/track_uploader.dart';
-import 'package:flutter_background_location/src/upload/tracking_batch_uploader.dart';
+import 'package:flutter_background_location_tracker/src/domain/track.dart';
+import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
+import 'package:flutter_background_location_tracker/src/storage/track_repository.dart';
+import 'package:flutter_background_location_tracker/src/upload/track_uploader.dart';
+import 'package:flutter_background_location_tracker/src/upload/tracking_batch_uploader.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'test_support.dart';

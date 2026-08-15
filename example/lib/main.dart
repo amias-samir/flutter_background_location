@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_background_location/flutter_background_location.dart';
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
 void main() {
@@ -192,10 +192,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     _trackId = await _tracking.startTrack(
       userId: 'example-user',
       organizationId: 'example-organization',
-      config: const TrackingConfig(mockLocationPolicy: MockLocationPolicy.flag,
+      config: const TrackingConfig(
+        mockLocationPolicy: MockLocationPolicy.flag,
         movingDistanceFilterMeters: 2,
         movingInterval: Duration(seconds: 5),
-        maximumAcceptedAccuracyMeters: 20
+        maximumAcceptedAccuracyMeters: 20,
       ),
     );
     _completedTrackId = null;

@@ -1,13 +1,13 @@
 import 'dart:io';
 
-import 'package:flutter_background_location/src/domain/activity_snapshot.dart';
-import 'package:flutter_background_location/src/domain/location_sample.dart';
-import 'package:flutter_background_location/src/domain/track.dart';
-import 'package:flutter_background_location/src/domain/track_point.dart';
-import 'package:flutter_background_location/src/domain/track_segment.dart';
-import 'package:flutter_background_location/src/domain/tracker_status.dart';
-import 'package:flutter_background_location/src/storage/sqlite_track_repository.dart';
-import 'package:flutter_background_location/src/storage/track_repository.dart';
+import 'package:flutter_background_location_tracker/src/domain/activity_snapshot.dart';
+import 'package:flutter_background_location_tracker/src/domain/location_sample.dart';
+import 'package:flutter_background_location_tracker/src/domain/track.dart';
+import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
+import 'package:flutter_background_location_tracker/src/domain/track_segment.dart';
+import 'package:flutter_background_location_tracker/src/domain/tracker_status.dart';
+import 'package:flutter_background_location_tracker/src/storage/sqlite_track_repository.dart';
+import 'package:flutter_background_location_tracker/src/storage/track_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 

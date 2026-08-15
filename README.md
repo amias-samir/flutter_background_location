@@ -1,4 +1,4 @@
-# flutter_background_location
+# flutter_background_location_tracker
 
 Foreground and background route tracking for Android and iOS. The package
 combines native location and motion APIs with ordered SQLite storage,
@@ -48,8 +48,7 @@ integration.
 
 ```yaml
 dependencies:
-  flutter_background_location:
-    path: ../flutter_background_location
+  flutter_background_location_tracker: ^0.1.0
 ```
 
 Then run `flutter pub get`.
@@ -99,7 +98,7 @@ permission/start action again to request Always access.
 ## Usage
 
 ```dart
-import 'package:flutter_background_location/flutter_background_location.dart';
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
 final tracking = FieldTrackingClient(
   configuration: const FieldTrackingConfiguration(

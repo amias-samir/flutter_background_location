@@ -1,9 +1,9 @@
-import 'package:flutter_background_location/src/application/position_validator.dart';
-import 'package:flutter_background_location/src/domain/activity_snapshot.dart';
-import 'package:flutter_background_location/src/domain/location_sample.dart';
-import 'package:flutter_background_location/src/domain/track_point.dart';
-import 'package:flutter_background_location/src/domain/tracker_status.dart';
-import 'package:flutter_background_location/src/domain/tracking_config.dart';
+import 'package:flutter_background_location_tracker/src/application/position_validator.dart';
+import 'package:flutter_background_location_tracker/src/domain/activity_snapshot.dart';
+import 'package:flutter_background_location_tracker/src/domain/location_sample.dart';
+import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
+import 'package:flutter_background_location_tracker/src/domain/tracker_status.dart';
+import 'package:flutter_background_location_tracker/src/domain/tracking_config.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

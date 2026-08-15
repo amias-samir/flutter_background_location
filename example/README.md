@@ -1,4 +1,4 @@
-# flutter_background_location example
+# flutter_background_location_tracker example
 
 This app demonstrates permission recovery, start, pause, next-session resume,
 completion, live status/activity/mock evidence, and GeoJSON/KML/GPX export.

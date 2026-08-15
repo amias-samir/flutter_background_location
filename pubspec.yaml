@@ -1,6 +1,7 @@
-name: flutter_background_location
+name: flutter_background_location_tracker
 description: Durable foreground and background location tracking for Android and iOS with activity, mock-location signals, segmented storage, and export.
 version: 0.1.0
+repository: https://github.com/amias-samir/flutter_background_location
 topics:
   - location
   - background-location

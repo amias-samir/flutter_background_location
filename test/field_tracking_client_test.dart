@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter_background_location/flutter_background_location.dart';
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'test_support.dart';
