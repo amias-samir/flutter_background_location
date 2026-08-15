@@ -1,281 +1,778 @@
-# flutter_background_location
+# flutter_background_location_tracker
 
-Foreground and background route tracking for Android and iOS. The package
-combines native location and motion APIs with ordered SQLite storage,
-pause/resume segments, mock-location signals, adaptive sampling, and offline
-GeoJSON, KML, and GPX export.
+Durable, battery-aware foreground and background route tracking for Android
+and iOS.
 
-> This implementation still requires real-device route, lifecycle, OEM, and
-> battery validation before production rollout. Mobile operating systems do
-> not guarantee exact callback intervals or indefinite process survival.
+The plugin combines native location and activity APIs with ordered SQLite
+storage, pause/resume segments, mock-location evidence, adaptive sampling, and
+offline GeoJSON, KML, and GPX export.
+
+> Background location is privacy-sensitive and controlled by the operating
+> system. Callback intervals and process lifetime are never guaranteed. Test
+> your exact configuration on real devices before releasing it.
 
 ## Features
 
-- Android location foreground service with a persistent notification.
-- iOS Core Location updates using the `location` background mode.
-- Motion classification: stationary, walking, running, cycling, motorized
-  vehicle, and unknown.
-- Moving and stationary sampling profiles with hysteresis to reduce GPS use.
-- Platform mock/simulation evidence stored with every point.
-- One logical track across multiple pause/resume periods.
-- A new segment on every resume, with no false distance across pause gaps.
-- Transactional, monotonic point sequences and local SQLite persistence.
-- Crash-durable pause and completion intents reconciled on the next launch.
-- Native fix journaling before Flutter delivery, with acknowledgement only
-  after the route database commit succeeds.
-- Accepted/rejected points, accuracy checks, speed flags, and gap flags.
-- Offline GeoJSON `MultiLineString`, segmented KML, and GPX 1.1 export.
-- Optional injectable uploader backed by a leased SQLite outbox, persisted
-  retry/backoff state, byte/count limits, and idempotency keys.
-- Streams and plain Dart contracts; no host state-management dependency.
+- Foreground and background route recording on Android and iOS.
+- Android foreground service with a persistent tracking notification.
+- Activity classification: stationary, walking, running, bicycle, vehicle,
+  and unknown.
+- Moving and stationary sampling profiles for lower battery use.
+- Per-fix mock/simulation evidence with allow, flag, or reject policies.
+- Pause and resume without adding false distance across the pause gap.
+- Durable, ordered SQLite persistence with crash recovery.
+- Track history with `keepLatestOnly` or `keepAll` retention.
+- Completed route export as GeoJSON, KML, or GPX.
+- User-defined export names and collision-safe file creation.
+- Optional application-supplied uploader with durable retry state.
+- Streams and plain Dart models with no state-management dependency.
 
-## Requirements
+## Platform support
 
-| Platform | Minimum |
-|---|---|
-| Flutter | 3.22 |
-| Dart | 3.4 |
-| Android | API 21, Java 17 |
-| iOS | 13.0 |
+| Platform | Minimum | Native implementation |
+|---|---:|---|
+| Flutter | 3.22 | Dart 3.4 or later |
+| Android | API 21 | Fused Location Provider, Activity Recognition, foreground service |
+| iOS | 13.0 | Core Location and Core Motion |
 
-The Android library compiles against SDK 35 and uses Android Gradle Plugin
-8.6.1 and Kotlin 1.9.24.
-
-The iOS plugin supports both CocoaPods and Flutter's Swift Package Manager
-integration.
+Android builds use Java 17 and compile SDK 35. iOS supports CocoaPods and
+Flutter's Swift Package Manager integration.
 
 ## Installation
 
+Add the package to your application:
+
 ```yaml
 dependencies:
-  flutter_background_location:
-    path: ../flutter_background_location
+  flutter_background_location_tracker: ^0.1.0
 ```
 
-Then run `flutter pub get`.
+Then run:
 
-## Host app setup
+```shell
+flutter pub get
+```
+
+Import the public library:
+
+```dart
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
+```
+
+## Platform configuration
 
 ### Android
 
-The plugin manifest contributes coarse/fine/background location, location
-foreground-service, notification, activity-recognition, boot, and wake-lock
-permissions. It also registers the foreground service and boot receiver.
+#### Manifest
 
-Start tracking only from a visible screen after a clear user action. Android
-12+ restricts foreground-service starts from the background, and Android 14+
-checks location permission when the service starts.
+The plugin manifest is merged into the host app automatically. It contributes
+the complete permission and component set shown below, so applications normally
+must not duplicate it. Verify these entries in the merged release manifest if
+your build customizes manifest merging:
 
-On Android 11+, the first permission dialog normally cannot grant “Allow all
-the time.” If `TrackingPermissionState.requiresSettings` is true, explain the
-setting, call `openAppSettings()`, and retry after the user returns. Background
-location also requires an appropriate Play policy declaration when distributed
-through Google Play.
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application>
+        <service
+            android:name="com.samir.flutter_background_location.LocationTrackingService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="location"
+            android:stopWithTask="false" />
+
+        <receiver
+            android:name="com.samir.flutter_background_location.ActivityRecognitionReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <receiver
+            android:name="com.samir.flutter_background_location.TrackingBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
+```
+
+Do not remove `ACCESS_BACKGROUND_LOCATION` or the `location` foreground-service
+type. The package intentionally keeps the native
+`com.samir.flutter_background_location` namespace for upgrade compatibility.
+
+#### Required runtime state
+
+`startTrack()` and `resumeTrack()` refuse to start native background capture
+until all required conditions are true:
+
+- Location Services are enabled.
+- **Precise** foreground location is granted.
+- Background location is reported as **Allow all the time**.
+- Notification permission is granted on Android 13 and later.
+- The command is initiated while an Activity is visible.
+
+Activity Recognition permission is requested on Android 10 and later. If it is
+denied, route capture can continue, but activity classification becomes unknown
+and the battery-saving stationary transition remains conservative.
+
+#### Permission sequence by Android version
+
+1. Start the flow only after the user taps a visible Start/Enable Tracking
+   control. The plugin requests `ACCESS_COARSE_LOCATION` and
+   `ACCESS_FINE_LOCATION` together. On Android 12 and later the user must select
+   **Precise**, not Approximate.
+2. On Android 9 and earlier, the older permission model grants background
+   capability with the foreground location grant.
+3. On Android 10, the plugin makes the separate background permission request;
+   the system dialog can offer **Allow all the time**.
+4. On Android 11 and later, the runtime dialog cannot grant **Allow all the
+   time**. When `requiresSettings` is true, show an educational screen, call
+   `openAppSettings()`, and ask the user to choose Location → **Allow all the
+   time** and keep **Use precise location** enabled.
+5. On Android 13 and later, the user must also allow notifications so the
+   foreground-service notification remains visible.
+6. After the app resumes from Settings, read permissions again. Enable Start
+   only when `state.canTrackInBackground` is true.
+
+Android 11 and later ignore a combined foreground/background runtime request,
+which is why permission elevation must be incremental. Android 12 and later
+also restrict foreground-service starts from the background. On Android 14 and
+later, the system validates location access when the location foreground
+service starts. Always call `startTrack()` from a visible screen after a clear
+user action.
+
+Android does not let an app grant **Allow all the time** on the user's behalf.
+The plugin can request or open the correct Settings page, but the user must make
+the final permission choice.
+
+See Android's official guides for [runtime location
+permission](https://developer.android.com/develop/sensors-and-location/location/permissions/runtime),
+[background location](https://developer.android.com/develop/sensors-and-location/location/permissions/background),
+and [foreground-service startup](https://developer.android.com/develop/background-work/services/fgs/launch).
+
+Google Play applies additional policy requirements to background location and
+foreground services. The host application is responsible for its prominent
+disclosure, privacy policy, Data safety answers, permission flow, Play Console
+declaration, and demonstrating that background access is core functionality.
 
 ### iOS
 
-Enable **Signing & Capabilities → Background Modes → Location updates** and add
-these values to the host target's `Info.plist`:
+#### Background capability
+
+In Xcode, enable:
+
+**Runner target → Signing & Capabilities → Background Modes → Location
+updates**
+
+This adds `location` to `UIBackgroundModes`. The plugin validates the background
+mode before starting.
+
+#### `Info.plist`
+
+Add all of these keys to the host application's `Info.plist`. Replace the sample
+strings with clear, product-specific explanations of what is recorded, when it
+continues in the background, and how the user stops it:
 
 ```xml
 <key>NSLocationWhenInUseUsageDescription</key>
-<string>Location is used to record your active route.</string>
+<string>Location is used to record your route while a trip is active.</string>
 <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-<string>Location is recorded while an active route continues in the background.</string>
+<string>Your active trip continues to record when the app is in the background.</string>
 <key>NSMotionUsageDescription</key>
-<string>Motion is used to reduce GPS and battery usage while stationary.</string>
+<string>Motion helps adjust location frequency and reduce battery use.</string>
 <key>UIBackgroundModes</key>
 <array>
     <string>location</string>
 </array>
 ```
 
-Use product-specific text that tells the user exactly why tracking continues
-with the screen locked. The default configuration requires precise, Always
-location authorization for background sessions. Permission elevation is
-staged: after When In Use is granted, explain the background need and call the
-permission/start action again to request Always access.
+`NSLocationWhenInUseUsageDescription` is required for the first authorization
+stage. `NSLocationAlwaysAndWhenInUseUsageDescription` is required before the
+plugin can request Always access. `NSMotionUsageDescription` is required for
+`CMMotionActivityManager`; without motion access, tracking remains on the
+conservative moving profile.
 
-## Usage
+The deprecated `NSLocationAlwaysUsageDescription` key is not used because this
+package supports iOS 13 and later and checks the modern
+`NSLocationAlwaysAndWhenInUseUsageDescription` key.
+
+#### Required runtime state and permission sequence
+
+The plugin requires Location Services, **Precise Location**, and **Always**
+authorization before starting background tracking:
+
+1. After an explicit user action, call `permissions(request: true)`. When the
+   status is not determined, iOS presents the When In Use prompt using
+   `NSLocationWhenInUseUsageDescription`.
+2. The user must first choose **Allow While Using App**. **Allow Once** is not
+   enough for elevation because iOS can ignore the immediate Always request
+   after a temporary grant.
+3. Explain why the active route must continue with the screen locked or app in
+   the background. When `canRequestBackground` is true, call
+   `permissions(request: true)` again. The plugin calls
+   `requestAlwaysAuthorization()`.
+4. The user must choose **Change to Always Allow** when iOS presents the
+   elevation prompt. The timing and wording of system prompts are controlled by
+   iOS.
+5. If the user keeps When In Use, denies access, or disables Precise Location,
+   direct them to Settings and recheck when the app becomes active.
+6. Start or resume only when `state.canTrackInBackground` is true.
+
+Do not loop permission requests or present an Always prompt without your own
+educational UI. Users can change authorization or Precise Location at any time,
+so recheck before every start/resume and handle later revocation.
+
+iOS does not let an app grant Always authorization itself. The plugin requests
+the elevation, but only the user can approve **Change to Always Allow** or select
+Always in Settings.
+
+See Apple's official documentation for [requesting location
+authorization](https://developer.apple.com/documentation/corelocation/requesting-authorization-to-use-location-services),
+[`requestAlwaysAuthorization()`](https://developer.apple.com/documentation/corelocation/cllocationmanager/requestalwaysauthorization()),
+[background location updates](https://developer.apple.com/documentation/corelocation/handling-location-updates-in-the-background),
+and [`NSMotionUsageDescription`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsmotionusagedescription).
+
+## Quick start
+
+Keep one `FieldTrackingClient` for the lifetime of the tracking feature. Call
+`initialize()` before reading stored tracks or issuing commands.
 
 ```dart
-import 'package:flutter_background_location/flutter_background_location.dart';
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
 final tracking = FieldTrackingClient(
   configuration: const FieldTrackingConfiguration(
-    databaseName: 'field_routes.sqlite',
-    // Default is keepLatestOnly, which clears older track history when a new
-    // track starts. Use keepAll if your app needs a full local history.
+    // The default. Older tracks are removed only when a new track starts.
     recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
   ),
 );
 
-await tracking.initialize();
+Future<void> initializeTracking() async {
+  await tracking.initialize();
 
-tracking.statusStream.listen((status) {
-  print('lifecycle=${status.lifecycle.name}');
-});
+  tracking.statusStream.listen((status) {
+    print('state=${status.lifecycle.name} track=${status.trackId}');
+  });
 
-tracking.activityStream.listen((activity) {
-  print('activity=${activity.type.value} confidence=${activity.confidence}');
-});
+  tracking.activityStream.listen((activity) {
+    print(
+      'activity=${activity.type.value} confidence=${activity.confidence}',
+    );
+  });
 
-tracking.pointStream.listen((point) {
-  print('sequence=${point.sequence} mock=${point.mockAssessment.name}');
-});
-
-final trackId = await tracking.startTrack(
-  userId: 'user-42',
-  organizationId: 'organization-7',
-  patrolId: 'patrol-9',
-  config: const TrackingConfig(
-    movingInterval: Duration(seconds: 15),
-    movingDistanceFilterMeters: 15,
-    stationaryInterval: Duration(minutes: 2),
-    stationaryDistanceFilterMeters: 75,
-    mockLocationPolicy: MockLocationPolicy.flag,
-  ),
-);
-
-await tracking.pauseTrack(trackId: trackId);
-
-// This may happen the next day or after a new FieldTrackingClient is created.
-await tracking.resumeTrack(trackId);
-
-await tracking.completeTrack(trackId: trackId);
+  tracking.pointStream.listen((point) {
+    print(
+      'point=${point.sequence} accepted=${point.accepted} '
+      'mock=${point.mockAssessment.name}',
+    );
+  });
+}
 ```
 
-Commands are serialized and scoped to a track ID. Optional `operationId`
-values make pause and completion retries idempotent. A completed track is no
-longer resumable.
-
-### Export
+Request permission from a user-initiated action and handle the staged flow.
+Return without starting until the normalized state confirms Always/background
+access:
 
 ```dart
-final result = await tracking.exportTrack(
-  trackId: trackId,
-  format: TrackExportFormat.gpx,
-  fileName: 'morning-field-route',
+Future<bool> preparePermissions() async {
+  final state = await tracking.permissions(request: true);
+
+  if (state.canTrackInBackground) return true;
+
+  if (state.canRequestBackground) {
+    // Show an explanation. Require another explicit user action to call this
+    // function again for the Android 10/iOS Always elevation request.
+    return false;
+  }
+
+  if (state.requiresSettings ||
+      !state.preciseLocation ||
+      !state.notificationGranted ||
+      state.location == LocationPermissionLevel.deniedForever) {
+    // Explain the exact setting before navigating away from the app. Recheck
+    // permissions after the application resumes from Settings.
+    await tracking.openAppSettings();
+    return false;
+  }
+
+  throw StateError(state.message ?? 'Background location is unavailable.');
+}
+```
+
+Start, pause, resume, and complete a track:
+
+```dart
+String? activeTrackId;
+
+Future<void> startTrip() async {
+  if (!await preparePermissions()) return;
+
+  try {
+    activeTrackId = await tracking.startTrack(
+      userId: 'user-42',
+      organizationId: 'organization-7',
+      patrolId: 'shift-2026-08-15', // Optional application metadata.
+      config: const TrackingConfig(
+        movingInterval: Duration(seconds: 15),
+        movingDistanceFilterMeters: 15,
+        stationaryInterval: Duration(minutes: 2),
+        stationaryDistanceFilterMeters: 75,
+        mockLocationPolicy: MockLocationPolicy.flag,
+        androidNotificationTitle: 'Trip recording is active',
+        androidNotificationText: 'Tap to return to the app',
+      ),
+    );
+  } on TrackingPermissionException catch (error) {
+    final state = error.state;
+    if (state.requiresSettings) {
+      await tracking.openAppSettings();
+    }
+    rethrow;
+  }
+}
+
+Future<void> pauseTrip() async {
+  final id = activeTrackId;
+  if (id == null) return;
+  await tracking.pauseTrack(
+    trackId: id,
+    reason: 'user_paused',
+  );
+}
+
+Future<void> resumeTrip() async {
+  final id = activeTrackId;
+  if (id == null) return;
+  await tracking.resumeTrack(id);
+}
+
+Future<String?> completeTrip() async {
+  final id = activeTrackId;
+  if (id == null) return null;
+  await tracking.completeTrack(
+    trackId: id,
+    reason: 'user_completed',
+  );
+  activeTrackId = null;
+  return id;
+}
+```
+
+Commands are serialized and scoped to a track ID. For a command that may be
+retried, supply one stable, unique `operationId` for that logical pause or
+completion. Do not reuse it for a later, separate pause. A completed track
+cannot be resumed.
+
+When `startTrack()` finds the existing active track, it reconciles and returns
+that track instead of creating a duplicate. When it finds the latest paused or
+interrupted track, it resumes that track. To begin a genuinely new session,
+complete the previous track first.
+
+## Recommended UI state
+
+Drive controls from `TrackerStatus.lifecycle` rather than maintaining a second
+independent native-state flag.
+
+| Lifecycle | Enable |
+|---|---|
+| `idle` | Start |
+| `starting` | Complete |
+| `tracking` | Pause, Complete |
+| `paused` | Resume, Complete |
+| `interrupted` or `failed` | Resume, Complete |
+| `stopping` | No repeated command |
+
+`watchCurrentTrack()` emits the stored active, paused, or interrupted track and
+is useful for restoring UI state after an app restart:
+
+```dart
+final currentTrackSubscription = tracking.watchCurrentTrack().listen((track) {
+  activeTrackId = track?.id;
+});
+```
+
+## Reading tracks and route geometry
+
+The package stores points because timestamps, accuracy, activity, mock
+evidence, validation results, and upload state are point-level facts. It exposes
+segments so the application can render the stored route as line geometry.
+
+```dart
+final tracks = await tracking.listTracks();
+final bundle = await tracking.loadTrackBundle(tracks.first.id);
+
+final routeSegments = bundle.segments
+    .map(
+      (segment) => segment.points
+          .where((point) => point.accepted)
+          .map((point) => (point.latitude, point.longitude))
+          .toList(growable: false),
+    )
+    .where((coordinates) => coordinates.isNotEmpty)
+    .toList(growable: false);
+```
+
+You can draw each item in `routeSegments` as a separate polyline. This avoids
+connecting the location before a pause to the location after a resume.
+
+Map rendering is deliberately not a package dependency. The example app shows
+how to display recorded tracks with `maplibre_gl` and the OpenFreeMap Liberty
+street style; applications can use MapLibre, Google Maps, Apple MapKit, or any
+other renderer.
+
+## Exporting a completed route
+
+Ask the user for a name, then pass the selected format and name to
+`exportTrack()`. The correct extension is added or repaired automatically.
+
+```dart
+Future<TrackExportResult> exportCompletedTrip({
+  required String trackId,
+  required String userEnteredName,
+  required TrackExportFormat format,
+}) {
+  return tracking.exportTrack(
+    trackId: trackId,
+    format: format,
+    fileName: userEnteredName,
+  );
+}
+
+final completedTrackId = await completeTrip();
+if (completedTrackId == null) return;
+
+final result = await exportCompletedTrip(
+  trackId: completedTrackId,
+  userEnteredName: 'warehouse-inspection-route',
+  format: TrackExportFormat.geoJson,
 );
 
 print(result.path);
+print('${result.pointCount} points in ${result.segmentCount} segments');
+```
 
-// Remove the plaintext artifact when it is no longer needed.
+The default destination is:
+
+- Android: `Download/flutter_background_location`;
+- iOS: the app's `Documents/flutter_background_location` directory, or the
+  platform-provided downloads directory when available.
+
+Android 10 and later use MediaStore and do not need broad storage permission.
+For Android 9 and earlier, public Downloads access follows legacy Android
+storage rules; use an application-approved storage flow or inject a custom
+`ExportFileWriter` when supporting those releases.
+
+If a file already exists, the package adds `_1`, `_2`, and so on. Export files
+are plaintext and may reveal sensitive routes. Delete temporary exports after
+sharing:
+
+```dart
 await tracking.deleteExport(result);
 ```
 
-Completed tracks export by default. To create an explicit point-in-time
-snapshot of an active or paused track, pass
-`TrackExportOptions(allowIncompleteTrackSnapshot: true)`.
+Completed tracks export by default. An explicit point-in-time snapshot of an
+active or paused track requires opt-in:
 
-Exports are written to a user-visible folder by default:
-`Download/flutter_background_location` on Android and
-`Documents/flutter_background_location` on iOS. Pass `fileName` to let the user
-name the export; the package adds or corrects the `.geojson`, `.kml`, or `.gpx`
-extension for the selected format.
+```dart
+const options = TrackExportOptions(
+  allowIncompleteTrackSnapshot: true,
+  includeGeoJsonPointFeatures: true,
+);
+```
 
-While tracking, the package stores point-level evidence so it can keep
-timestamps, mock-location signals, activity, accuracy, pause gaps, and upload
-state. Completed GeoJSON exports are route-first: one continuous route exports
-as a `LineString`, and multiple completed route segments export as a
-`MultiLineString`. Segments with fewer than two accepted points are omitted from
-GeoJSON route geometry because a GeoJSON line cannot contain one point. Set
-`TrackExportOptions(includeGeoJsonPointFeatures: true)` when you also need the
-individual point features for diagnostics. KML emits single-point segments as a
-Point, and GPX preserves the one-point `<trkseg>`. Rejected rows with invalid
-or non-finite coordinates can be included for diagnostics, but are never
-inserted into route geometry.
+### Export geometry
+
+- GeoJSON uses a `LineString` for one drawable segment and a
+  `MultiLineString` for multiple segments.
+- GeoJSON segments with fewer than two accepted coordinates are omitted from
+  line geometry. Optional point features can preserve them for diagnostics.
+- KML writes a line per multi-point segment and a point for a one-fix segment.
+- GPX writes one `<trkseg>` per stored segment, including one-fix segments.
+- Rejected points can be included as diagnostics but never enter route
+  geometry when their coordinates are invalid or non-finite.
+
+## Retaining track history
+
+The default policy keeps one logical session through active, paused, resumed,
+and completed states. Older track rows are deleted only when the next track is
+created:
+
+```dart
+final tracking = FieldTrackingClient(
+  configuration: const FieldTrackingConfiguration(
+    recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
+  ),
+);
+```
+
+Keep a local history when your product needs a recorded-track list:
+
+```dart
+const FieldTrackingConfiguration(
+  recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+);
+```
+
+Retention is selected when the client is created. Do not dispose and recreate
+the client while native tracking is active.
+
+## Tracking configuration
+
+Defaults are conservative starting points, not universal recommendations.
+
+| Option | Default | Purpose |
+|---|---:|---|
+| `movingInterval` | 15 seconds | Requested interval while moving |
+| `movingDistanceFilterMeters` | 15 m | Minimum moving displacement |
+| `stationaryInterval` | 2 minutes | Requested interval while stationary |
+| `stationaryDistanceFilterMeters` | 75 m | Minimum stationary displacement |
+| `maximumAcceptedAccuracyMeters` | 60 m | Reject fixes with poorer reported accuracy |
+| `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
+| `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
+| `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |
+| `stationaryConfidenceThreshold` | 75 | Minimum still confidence |
+| `movingConfidenceThreshold` | 60 | Minimum movement confidence |
+| `movingConfirmationCount` | 2 | Movement events required to exit stationary mode |
+| `activityRecognitionInterval` | 10 seconds | Requested native activity update interval |
+| `mockLocationPolicy` | `flag` | Allow, flag, or reject detected mock fixes |
+| `largeGapThreshold` | 5 minutes | Flag long gaps between accepted fixes |
+| `batchPointCount` | 25 | Point threshold for an optional uploader |
+| `batchMaxAge` | 2 minutes | Time threshold for an optional uploader |
+
+Operating systems may batch, delay, coalesce, or skip callbacks. Shortening an
+interval does not guarantee that frequency and can materially increase battery
+use.
+
+## Activity and battery behavior
+
+Native motion APIs report the best available activity class. They do not prove
+that the device owner is a driver, passenger, or rider. Cycling is the closest
+standard two-wheeler signal; a motorcycle or scooter commonly appears as
+`inVehicle`, not `onBicycle`.
+
+The plugin enters the stationary profile only after sustained, confident still
+activity plus low GPS displacement. It returns to moving mode after movement
+evidence or sufficient displacement. If activity permission or reliable motion
+evidence is unavailable, it remains on the moving profile.
+
+Battery results depend on the device, OS version, OEM policy, satellite and
+network conditions, route, screen use, and configuration. Measure route
+fidelity and battery drain together on the same devices your users carry.
 
 ## Mock-location interpretation
 
-The API intentionally reports:
+Every point exposes `mockAssessment`:
 
-- `detected`: the OS marked this exact fix as mocked/simulated.
-- `notDetected`: the OS signal was available and was clear.
-- `unavailable`: the signal was not available for this exact fix.
+- `detected`: the operating system marked this exact fix as mocked or
+  simulated;
+- `notDetected`: the signal was available and clear for this fix;
+- `unavailable`: the signal was unavailable for this fix.
 
-`notDetected` does **not** prove a location is genuine. Rooted/jailbroken
-devices, external accessories, RF/GNSS spoofing, or other techniques may evade
-platform signals. Android uses `Location.isMock` (or the legacy mock-provider
-flag). iOS uses `CLLocation.sourceInformation.isSimulatedBySoftware` when
-available on that exact iOS 15+ fix.
+Android uses `Location.isMock` or the legacy mock-provider flag. On iOS 15 and
+later, the plugin reads `CLLocation.sourceInformation.isSimulatedBySoftware`.
 
-Choose `MockLocationPolicy.allow`, `flag`, or `reject`. Rejected fixes remain in
-the database for diagnostics but do not contribute to route geometry or
-distance.
+`notDetected` is evidence, not proof that a coordinate is genuine. Rooted or
+jailbroken devices, external accessories, GNSS/RF spoofing, and other methods
+may evade platform signals. Do not use this value as the sole fraud or safety
+decision.
 
-## Activity interpretation and battery use
+## Optional upload integration
 
-Activity recognition is best-effort device context, not proof that the user is
-the driver, passenger, or rider. Standard Android/iOS motion APIs distinguish
-cycling from a general motorized vehicle but do not reliably distinguish a
-motorcycle or scooter from a car. Motorized two-wheelers may therefore appear
-as `inVehicle`.
+The plugin does not choose an HTTP client or backend protocol. Supply a
+`TrackUploader` when you want durable ordered batches:
 
-Entering stationary mode requires sustained high-confidence still activity and
-low displacement across multiple acceptable GPS fixes. If that corroboration,
-motion permission, or the motion source is unavailable, location tracking stays
-on the conservative moving profile. Battery consumption depends on the device,
-OS, signal conditions, route, accuracy, intervals, OEM policy, and
-screen/network activity. Tune `TrackingConfig` only after same-device route
-fidelity and battery-control tests.
+```dart
+final tracking = FieldTrackingClient(
+  uploader: MyTrackUploader(),
+);
 
-## Platform lifecycle limits
+class MyTrackUploader implements IdempotentTrackCompletionUploader {
+  @override
+  Future<TrackUploadAcknowledgement> uploadPoints(
+    TrackUploadBatch batch,
+  ) async {
+    // POST batch.toMap() using your authenticated API client.
+    // Make batch.idempotencyKey unique on the server.
+    return TrackUploadAcknowledgement(
+      acceptedThroughSequence: batch.lastSequence,
+    );
+  }
+
+  @override
+  Future<void> completeTrack(Track track) async {
+    await completeTrackIdempotently(
+      track: track,
+      idempotencyKey: track.id,
+    );
+  }
+
+  @override
+  Future<void> completeTrackIdempotently({
+    required Track track,
+    required String idempotencyKey,
+  }) async {
+    // Send an idempotent completion request to your backend.
+  }
+}
+```
+
+Accepted points remain in a SQLite outbox until acknowledged. Retries use
+persisted leases, bounded batches, exponential backoff, jitter, and stable
+idempotency keys. Your server must still enforce idempotency and sequence
+semantics.
+
+## Lifecycle limits
 
 | Scenario | Android | iOS |
 |---|---|---|
-| Normal background / screen lock | Foreground-service support | Core Location background mode |
+| Normal background or screen lock | Foreground-service support | Core Location background mode |
 | Removed from recent apps | Usually continues; OEM-dependent | App-switcher force-quit stops tracking |
-| OS process termination | Best-effort service/session recovery | Standard continuous updates resume only after the app launches |
-| System-settings Force stop | Cannot be bypassed | N/A |
-| Reboot | Best-effort restoration; device/OEM test required | The app must be launched to restart this tracker |
+| OS process termination | Best-effort service/session recovery | Continuous updates resume only after the app launches |
+| Android Force stop | Cannot be bypassed | Not applicable |
+| Reboot | Best-effort restoration; OEM-dependent | The app must be launched to restart this tracker |
 
-Never describe one test simply as “force-close.” Test backgrounding, screen
-lock, recent-task removal, OS process death, user force-stop/force-quit, and
-reboot separately.
+Test backgrounding, screen lock, recent-task removal, OS process death,
+force-stop/force-quit, permission changes, and reboot as separate scenarios.
 
-## Storage and privacy
+## Storage, security, and privacy
 
-SQLite is the source of truth. Points are stored one row at a time before an
-optional upload, and resume creates a separate segment while preserving the
-global point sequence. Each platform also keeps an acknowledgement-based native
-handoff journal so a captured fix is not lost between native delivery and the
-Dart database commit. Android places it in the app's no-backup directory; iOS
-uses Application Support with backup exclusion and file protection. Both have
-explicit safety bounds and stop capture visibly instead of silently evicting
-unacknowledged fixes.
+SQLite is the route source of truth. A native acknowledgement-based journal
+also protects fixes captured before Dart commits them. Native rows are removed
+only after the Dart database write succeeds.
 
-Ordinary `sqflite` storage and the native SQLite handoff journals are **not
-SQLCipher-encrypted**. iOS file protection does not replace an application-level
-encrypted database. If the threat model requires database encryption, inject an
-approved `TrackRepository` implementation and validate its secure key lifecycle
-before production use.
+The default SQLite stores are not SQLCipher-encrypted. iOS file protection does
+not replace application-level database encryption. Inject an approved
+`TrackRepository` if your threat model requires encrypted route storage and
+validate its key lifecycle independently.
 
-GeoJSON, KML, and GPX files are plaintext and can reveal sensitive routes. The
-host app should show the destination before sharing, avoid logging coordinates,
-apply a retention policy, and call `deleteExport` after the artifact is no
-longer needed.
+Host applications should:
 
-By default, `FieldTrackingConfiguration.recordRetentionPolicy` is
-`TrackRecordRetentionPolicy.keepLatestOnly`. That keeps the current session
-through pause, resume, and completion, then removes older track rows only when a
-new track starts. Set `TrackRecordRetentionPolicy.keepAll` to keep every
-recorded track in SQLite.
+- show an explicit in-app tracking indicator;
+- explain why background and motion access are needed;
+- avoid logging coordinates or export contents;
+- apply a documented retention policy;
+- protect uploader authentication and transport;
+- delete plaintext exports after use;
+- provide a clear way to pause and complete tracking.
 
-SQLite entries named `sqlite_autoindex_*` are internal indexes created for
-`PRIMARY KEY` and `UNIQUE` constraints, such as unique point sequences and
-upload outbox idempotency keys. They are not extra schemas and they are not
-created once per tracking session.
+Entries named `sqlite_autoindex_*` are SQLite's internal indexes for primary
+key and unique constraints. They are not extra schemas and are not created once
+per tracking session.
 
-## Example and validation
+## Disposing the client
 
-See [`example/lib/main.dart`](example/lib/main.dart) for start, pause, resume,
-complete, permission recovery, status display, and export calls.
+Cancel your stream subscriptions and dispose the client only after the active
+track has been paused or completed:
 
-Automated tests cover validation, mock policy, motion hysteresis, durable
-lifecycle recovery, pending-fix replay and acknowledgement, transactional
-sequence allocation across independent SQLite connections, rejected-point
-distance exclusion, overnight segmentation, uploader concurrency, and
-independent JSON/XML parsing of every export format. Production acceptance
-still requires multi-hour real-device, offline, permission-downgrade, OEM,
-low-power, reboot/process, route-fidelity, and battery-control testing.
+```dart
+await statusSubscription.cancel();
+await pointSubscription.cancel();
+await activitySubscription.cancel();
+await tracking.dispose();
+```
+
+`dispose()` deliberately throws while native tracking is active so the host
+does not silently detach from a live session.
+
+## Common issues
+
+### `TrackingPermissionException`
+
+Inspect `exception.state`. Check location services, precise location,
+notification permission, `requiresSettings`, and `canRequestBackground`.
+
+### `tracking_already_active` or `already_tracking`
+
+Use one client and one active track. Initialize first, restore state from
+`statusStream` or `watchCurrentTrack()`, and do not call native start methods
+directly. The high-level `startTrack()` method reconciles an existing active or
+paused session.
+
+### Export says only completed tracks are allowed
+
+Complete the track before exporting, or explicitly set
+`allowIncompleteTrackSnapshot: true` when a snapshot is intentional.
+
+### No activity classification
+
+Activity permission is separate from location permission. The route can still
+record, but adaptive stationary detection stays conservative when motion data
+is unavailable.
+
+### Export is missing a pause-to-resume connection
+
+This is expected. Every resume creates a new segment so exports and map views
+do not draw a false straight line across the pause gap.
+
+## Example application
+
+See [`example/lib/main.dart`](example/lib/main.dart) for a complete Material
+example with:
+
+- staged permission recovery;
+- Start, Pause, Resume, and Complete button states;
+- configurable retention policy;
+- live status, activity, and point data;
+- recorded-track history;
+- GeoJSON, KML, and GPX naming/export;
+- MapLibre route display with a street-map style.
+
+## Production checklist
+
+- Use product-specific permission and notification text.
+- Review App Store and Google Play background-location requirements.
+- Test on physical Android and iOS devices; simulators are insufficient.
+- Measure multi-hour route fidelity and battery drain.
+- Test offline capture and later upload recovery.
+- Test denied, revoked, reduced-accuracy, and disabled-service states.
+- Test OEM battery restrictions and Android reboot restoration.
+- Test iOS backgrounding and user force-quit separately.
+- Validate every export in an independent GeoJSON/XML reader.
+- Perform a privacy and security review before collecting real user routes.
+
+---
+
+## 🥟 Support this project
+
+> **Did this plugin save you development time or help your application?**
+> Your support helps fund maintenance, platform updates, testing on real
+> devices, and new features for the Flutter community.
+
+<p align="center">
+  <a href="https://buymemomo.com/firantey">
+    <img
+      src="https://img.shields.io/badge/BUY_ME_A_MOMO-SUPPORT_FIRANTEY-FF6B35?style=for-the-badge&amp;labelColor=7C2D12"
+      alt="Support Firantey on Buy Me a MOMO"
+      height="44"
+    />
+  </a>
+</p>
+
+<p align="center">
+  <strong>💛 One plate of MOMO helps keep this plugin maintained and improving.</strong>
+</p>
+
+**Support link:** [buymemomo.com/firantey](https://buymemomo.com/firantey)
+
+## License
+
+See [`LICENSE`](LICENSE).

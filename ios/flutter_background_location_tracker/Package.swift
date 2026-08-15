@@ -4,14 +4,14 @@
 import PackageDescription
 
 let package = Package(
-  name: "flutter_background_location",
+  name: "flutter_background_location_tracker",
   platforms: [
     .iOS("13.0")
   ],
   products: [
     .library(
-      name: "flutter-background-location",
-      targets: ["flutter_background_location"]
+      name: "flutter-background-location-tracker",
+      targets: ["flutter_background_location_tracker"]
     )
   ],
   dependencies: [
@@ -19,7 +19,7 @@ let package = Package(
   ],
   targets: [
     .target(
-      name: "flutter_background_location",
+      name: "flutter_background_location_tracker",
       dependencies: [
         .product(name: "FlutterFramework", package: "FlutterFramework")
       ],
