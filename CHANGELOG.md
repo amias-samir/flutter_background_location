@@ -1,3 +1,7 @@
+## 0.1.1
+- Update documentation
+- Update dart file conventions
+
 ## 0.1.0
 
 - Added native Android foreground-service and iOS Core Location tracking.
