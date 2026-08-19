@@ -6,8 +6,10 @@ This app demonstrates:
 - Start, Pause, Resume, and Complete lifecycle controls;
 - live status, activity, motion, mock-location, and point evidence;
 - latest-only and keep-all track retention;
-- recorded-track history and MapLibre street-map route display;
-- user-named GeoJSON, KML, and GPX export.
+- recorded-track history with per-route actions;
+- MapLibre street-map route display;
+- user-named GeoJSON, KML, and GPX export;
+- confirmed deletion of a selected completed route.
 
 ## Run the example
 
@@ -195,6 +197,32 @@ If Start remains disabled or throws `TrackingPermissionException`, check:
 
 Permissions can be revoked while the app is installed. Recheck them before
 every start or resume and after returning from system settings.
+
+## Recorded route actions
+
+Each item under **Recorded tracks** has an overflow menu with these actions:
+
+- **Export GeoJSON**, **Export KML**, and **Export GPX** ask for an editable
+  file name and export that selected route;
+- **View on map** opens the selected route on the MapLibre street map and
+  preserves pause/resume segments as separate lines;
+- **Delete** shows a confirmation dialog and permanently removes the selected
+  route, its segments, points, health events, lifecycle operations, pending
+  commands, and upload-outbox records through SQLite foreign-key cascades.
+
+Export actions are enabled after a route is completed. Delete is enabled only
+for terminal routes (completed or failed). Active, paused, interrupted,
+starting, and stopping routes remain protected so the UI cannot orphan a
+native tracking session or remove a route that can still be resumed.
+
+The same deletion operation is available to host applications:
+
+```dart
+await tracking.deleteTrack(completedTrackId);
+```
+
+Deletion is permanent. Export or upload a route first when it must be retained
+outside the local database.
 
 ---
 

@@ -178,6 +178,12 @@ abstract interface class TrackRepository {
   Future<TrackPoint> appendPoint(PointWriteRequest request);
   Future<Track?> getTrack(String trackId);
   Future<List<Track>> listTracks();
+
+  /// Permanently deletes a completed or failed track and its related data.
+  ///
+  /// Implementations must reject deletion of a track that can still be
+  /// active, paused, or resumed.
+  Future<void> deleteTrack(String trackId);
   Future<void> deleteTracksExcept(Set<String> retainedTrackIds);
   Future<Track?> findActiveTrack();
   Future<Track?> findLatestPausedTrack();

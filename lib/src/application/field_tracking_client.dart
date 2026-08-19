@@ -56,6 +56,7 @@ abstract interface class FieldTracking {
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
   });
+  Future<void> deleteTrack(String trackId);
   Future<TrackBundle> loadTrackBundle(String trackId);
 }
 
@@ -1211,6 +1212,15 @@ class FieldTrackingClient implements FieldTracking {
   Future<List<Track>> listTracks() async {
     await initialize();
     return _store.listTracks();
+  }
+
+  @override
+  Future<void> deleteTrack(String trackId) async {
+    await initialize();
+    await _serializeCommand(() async {
+      await _pointTail;
+      await _store.deleteTrack(trackId);
+    });
   }
 
   @override

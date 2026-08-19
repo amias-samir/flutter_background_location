@@ -402,6 +402,57 @@ void main() {
     await client.dispose();
   });
 
+  test('deleteTrack removes a selected completed route', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = FieldTrackingClient(
+      configuration: const FieldTrackingConfiguration(
+        recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+      ),
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final trackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    await client.completeTrack(trackId: trackId);
+
+    await client.deleteTrack(trackId);
+
+    expect(await client.getTrack(trackId), isNull);
+    expect(await client.listTracks(), isEmpty);
+    await client.dispose();
+  });
+
+  test('deleteTrack does not remove an active route', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = FieldTrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final trackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+
+    await expectLater(client.deleteTrack(trackId), throwsStateError);
+
+    expect((await client.getTrack(trackId))!.status, TrackStatus.active);
+    expect(tracker.running, isTrue);
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
   test('startTrack resumes an interrupted current track', () async {
     final harness = RepositoryHarness();
     await harness.initialize();

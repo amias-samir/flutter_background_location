@@ -781,6 +781,25 @@ final class SqliteTrackRepository
   }
 
   @override
+  Future<void> deleteTrack(String trackId) async {
+    await _db.transaction((transaction) async {
+      final track = await _requiredTrack(transaction, trackId);
+      if (!track.isTerminal) {
+        throw StateError(
+          'Only completed or failed tracks can be deleted. '
+          'Track $trackId is ${track.status.name}.',
+        );
+      }
+      await transaction.delete(
+        'tracks',
+        where: 'id = ?',
+        whereArgs: <Object?>[trackId],
+      );
+    });
+    await _emitCurrentTrack();
+  }
+
+  @override
   Future<void> deleteTracksExcept(Set<String> retainedTrackIds) async {
     await _db.transaction((transaction) async {
       if (retainedTrackIds.isEmpty) {

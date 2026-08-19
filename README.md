@@ -535,6 +535,20 @@ const FieldTrackingConfiguration(
 Retention is selected when the client is created. Do not dispose and recreate
 the client while native tracking is active.
 
+### Deleting a selected recorded route
+
+Delete an individual completed or failed route with:
+
+```dart
+await tracking.deleteTrack(trackId);
+```
+
+The SQLite foreign-key relationships cascade the deletion to the route's
+segments, points, health events, lifecycle operations, pending commands, and
+upload-outbox rows. Active, paused, interrupted, starting, and stopping tracks
+are rejected because they may still be running or resumable. This operation is
+permanent, so export or upload the route first when another copy is required.
+
 ## Tracking configuration
 
 Defaults are conservative starting points, not universal recommendations.

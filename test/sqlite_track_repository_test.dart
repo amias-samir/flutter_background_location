@@ -135,6 +135,39 @@ void main() {
     expect(retainedBundle.segments.single.points, hasLength(1));
   });
 
+  test('deleteTrack removes the selected terminal track and child rows',
+      () async {
+    final trackId = await harness.createActiveTrack(trackId: 'delete-me');
+    await harness.append(
+      trackId: trackId,
+      latitude: 27.7,
+      longitude: 85.3,
+    );
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+
+    await harness.repository.deleteTrack(trackId);
+
+    expect(await harness.repository.getTrack(trackId), isNull);
+    expect(await harness.repository.listTracks(), isEmpty);
+    await expectLater(
+      harness.repository.loadTrackBundle(trackId),
+      throwsStateError,
+    );
+  });
+
+  test('deleteTrack rejects a route that can still be resumed', () async {
+    final trackId = await harness.createActiveTrack(trackId: 'keep-paused');
+    await harness.repository.pauseTrack(trackId, reason: 'later');
+
+    await expectLater(
+      harness.repository.deleteTrack(trackId),
+      throwsStateError,
+    );
+
+    expect((await harness.repository.getTrack(trackId))!.status,
+        TrackStatus.paused);
+  });
+
   test('current track stream replays its latest state to new listeners',
       () async {
     final trackId = await harness.createActiveTrack(trackId: 'stream-track');

@@ -244,7 +244,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   Future<void> _export(TrackExportFormat format) async {
     final trackId = _trackId ?? _completedTrackId;
     if (trackId == null) return;
-    final fileName = await _askExportFileName(format);
+    await _exportTrack(trackId, format);
+  }
+
+  Future<void> _exportTrack(String trackId, TrackExportFormat format) async {
+    final fileName = await _askExportFileName(trackId, format);
     if (fileName == null) return;
     await _run(() async {
       final result = await _tracking.exportTrack(
@@ -262,15 +266,55 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     });
   }
 
-  Future<String?> _askExportFileName(TrackExportFormat format) async {
-    final trackId = _trackId;
+  Future<String?> _askExportFileName(
+    String trackId,
+    TrackExportFormat format,
+  ) async {
     final date = DateTime.now().toUtc().toIso8601String().split('T').first;
-    final initialFileName = 'track_${date}_${trackId ?? 'export'}';
+    final initialFileName = 'track_${date}_$trackId';
     return showDialog<String>(
       context: context,
       builder: (context) =>
           _ExportNameDialog(format: format, initialFileName: initialFileName),
     );
+  }
+
+  Future<void> _deleteTrack(Track track) async {
+    if (!track.isTerminal) return;
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Delete recorded route?'),
+            content: Text(
+              'This permanently deletes track ${track.id} and all of its '
+              'stored segments and points. Export it first if you need a '
+              'copy.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return;
+
+    await _run(() async {
+      await _tracking.deleteTrack(track.id);
+      await _refreshTracks();
+      if (!mounted) return;
+      setState(() {
+        if (_completedTrackId == track.id) _completedTrackId = null;
+        _message = 'Deleted recorded route ${track.id}.';
+      });
+    });
   }
 
   @override
@@ -373,6 +417,8 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
             tracks: _tracks,
             onRefresh: _busy ? null : _refreshTracks,
             onViewMap: _busy ? null : _viewTrackOnMap,
+            onExport: _busy ? null : _exportTrack,
+            onDelete: _busy ? null : _deleteTrack,
           ),
           if (_busy) ...<Widget>[
             const SizedBox(height: 16),
@@ -491,11 +537,16 @@ class _RecordedTracksSection extends StatelessWidget {
     required this.tracks,
     required this.onRefresh,
     required this.onViewMap,
+    required this.onExport,
+    required this.onDelete,
   });
 
   final List<Track> tracks;
   final Future<void> Function()? onRefresh;
   final Future<void> Function(Track track)? onViewMap;
+  final Future<void> Function(String trackId, TrackExportFormat format)?
+  onExport;
+  final Future<void> Function(Track track)? onDelete;
 
   @override
   Widget build(BuildContext context) => Column(
@@ -528,15 +579,94 @@ class _RecordedTracksSection extends StatelessWidget {
             child: ListTile(
               title: Text(_trackTitle(track)),
               subtitle: Text(_trackSubtitle(track)),
-              trailing: IconButton(
-                tooltip: 'View route on map',
-                onPressed: onViewMap == null ? null : () => onViewMap!(track),
-                icon: const Icon(Icons.map_outlined),
+              trailing: PopupMenuButton<_RecordedTrackAction>(
+                tooltip: 'Route actions',
+                enabled:
+                    onViewMap != null || onExport != null || onDelete != null,
+                onSelected: (action) => _performAction(action, track),
+                itemBuilder: (context) =>
+                    <PopupMenuEntry<_RecordedTrackAction>>[
+                      _menuItem(
+                        action: _RecordedTrackAction.exportGeoJson,
+                        icon: Icons.data_object,
+                        label: 'Export GeoJSON',
+                        enabled:
+                            track.status == TrackStatus.completed &&
+                            onExport != null,
+                      ),
+                      _menuItem(
+                        action: _RecordedTrackAction.exportKml,
+                        icon: Icons.language,
+                        label: 'Export KML',
+                        enabled:
+                            track.status == TrackStatus.completed &&
+                            onExport != null,
+                      ),
+                      _menuItem(
+                        action: _RecordedTrackAction.exportGpx,
+                        icon: Icons.route,
+                        label: 'Export GPX',
+                        enabled:
+                            track.status == TrackStatus.completed &&
+                            onExport != null,
+                      ),
+                      _menuItem(
+                        action: _RecordedTrackAction.viewMap,
+                        icon: Icons.map_outlined,
+                        label: 'View on map',
+                        enabled: onViewMap != null,
+                      ),
+                      const PopupMenuDivider(),
+                      _menuItem(
+                        action: _RecordedTrackAction.delete,
+                        icon: Icons.delete_outline,
+                        label: 'Delete',
+                        enabled: track.isTerminal && onDelete != null,
+                        destructive: true,
+                      ),
+                    ],
+                icon: const Icon(Icons.more_vert),
               ),
             ),
           ),
         ),
     ],
+  );
+
+  void _performAction(_RecordedTrackAction action, Track track) {
+    switch (action) {
+      case _RecordedTrackAction.exportGeoJson:
+        unawaited(onExport?.call(track.id, TrackExportFormat.geoJson));
+      case _RecordedTrackAction.exportKml:
+        unawaited(onExport?.call(track.id, TrackExportFormat.kml));
+      case _RecordedTrackAction.exportGpx:
+        unawaited(onExport?.call(track.id, TrackExportFormat.gpx));
+      case _RecordedTrackAction.viewMap:
+        unawaited(onViewMap?.call(track));
+      case _RecordedTrackAction.delete:
+        unawaited(onDelete?.call(track));
+    }
+  }
+
+  static PopupMenuItem<_RecordedTrackAction> _menuItem({
+    required _RecordedTrackAction action,
+    required IconData icon,
+    required String label,
+    required bool enabled,
+    bool destructive = false,
+  }) => PopupMenuItem<_RecordedTrackAction>(
+    value: action,
+    enabled: enabled,
+    child: Row(
+      children: <Widget>[
+        Icon(icon, color: destructive ? Colors.red : null),
+        const SizedBox(width: 12),
+        Text(
+          label,
+          style: destructive ? const TextStyle(color: Colors.red) : null,
+        ),
+      ],
+    ),
   );
 
   static String _trackTitle(Track track) {
@@ -565,6 +695,14 @@ class _RecordedTracksSection extends StatelessWidget {
         '${local.minute.toString().padLeft(2, '0')}';
     return '$date $time';
   }
+}
+
+enum _RecordedTrackAction {
+  exportGeoJson,
+  exportKml,
+  exportGpx,
+  viewMap,
+  delete,
 }
 
 class TrackMapPage extends StatelessWidget {

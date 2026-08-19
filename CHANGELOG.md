@@ -1,6 +1,9 @@
 ## 0.1.1
 - Update documentation
 - Update dart file conventions
+- Added safe selected-route deletion for completed and failed tracks.
+- Added recorded-route overflow actions for GeoJSON/KML/GPX export, MapLibre
+  viewing, and confirmed deletion in the example app.
 
 ## 0.1.0
 
