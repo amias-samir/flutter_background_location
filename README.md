@@ -44,7 +44,7 @@ Add the package to your application:
 
 ```yaml
 dependencies:
-  flutter_background_location_tracker: ^0.1.0
+  flutter_background_location_tracker: ^0.1.2
 ```
 
 Then run:
@@ -251,6 +251,31 @@ authorization](https://developer.apple.com/documentation/corelocation/requesting
 [background location updates](https://developer.apple.com/documentation/corelocation/handling-location-updates-in-the-background),
 and [`NSMotionUsageDescription`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsmotionusagedescription).
 
+#### Active, paused, and terminated behavior
+
+The native location service runs only while a route is active:
+
+| Route state | Android | iOS |
+|---|---|---|
+| Active | Foreground service and location/activity requests run | `CLLocationManager` runs; iOS 17+ also holds a `CLBackgroundActivitySession` |
+| Paused | Requests, notification, and service stop; the route remains resumable | Location, motion, and background-activity sessions stop; the route remains resumable |
+| Resumed | A foreground service and native requests start again | Location, motion, and a new background-activity session start again |
+| Completed | Native capture and the service stop, and native active-session state is cleared | All native updates/sessions stop, and native active-session state is cleared |
+
+Putting an active app in the background or locking the screen is not a pause.
+With Always + Precise authorization and `UIBackgroundModes/location`, the
+active iOS manager continues collecting and journals fixes even if Flutter is
+temporarily suspended. The native manager is process-scoped, so rebuilding a
+Flutter engine or scene does not label the route interrupted.
+
+User force-quit is different from minimizing. iOS stops standard continuous
+location updates when the user swipes the app away, and an application cannot
+override that decision. After a later launch, the plugin reports the route as
+interrupted and requires an explicit resume; it never silently marks that route
+complete. See Apple's [`startUpdatingLocation()`
+documentation](https://developer.apple.com/documentation/corelocation/cllocationmanager/startupdatinglocation())
+and [`CLBackgroundActivitySession`](https://developer.apple.com/documentation/corelocation/clbackgroundactivitysession-3mzv3).
+
 ## Quick start
 
 Keep one `TrackingClient` for the lifetime of the tracking feature. Call
@@ -330,6 +355,7 @@ Future<void> startTrip() async {
       organizationId: 'organization-7',
       routeId: 'Morning delivery route',
       config: const TrackingConfig(
+        accuracy: TrackingAccuracy.high,
         movingInterval: Duration(seconds: 15),
         movingDistanceFilterMeters: 15,
         stationaryInterval: Duration(minutes: 2),
@@ -555,10 +581,41 @@ permanent, so export or upload the route first when another copy is required.
 
 ## Tracking configuration
 
-Defaults are conservative starting points, not universal recommendations.
+Use the `accuracy` preset for a complete battery/precision profile. `high` is
+the default and preserves the package's original sampling behavior:
+
+```dart
+const balanced = TrackingConfig(accuracy: TrackingAccuracy.medium);
+
+const customized = TrackingConfig(
+  accuracy: TrackingAccuracy.low,
+  locationAccuracy: TrackingAccuracy.high,
+  movingInterval: Duration(seconds: 20),
+  movingDistanceFilterMeters: 10,
+);
+```
+
+Individual values take precedence over the preset. In `customized`, the native
+provider uses high accuracy and the moving interval/filter use the supplied
+values, while stationary values still come from the low profile.
+
+| Preset | Moving interval | Moving filter | Native request | Stationary interval | Stationary filter | Accepted accuracy |
+|---|---:|---:|---|---:|---:|---:|
+| `low` | 60 seconds | 50 m | Low power / 100 m | 5 minutes | 200 m | 200 m |
+| `medium` | 30 seconds | 25 m | Balanced / nearest 10 m | 3 minutes | 100 m | 100 m |
+| `high` (default) | 15 seconds | 15 m | High / best | 2 minutes | 75 m | 60 m |
+| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 25 m | 20 m |
+
+Android and iOS translate the native request to the closest platform accuracy;
+the table shows Android/iOS terminology. Presets are starting points, not
+callback guarantees or universal recommendations. The accepted-accuracy column
+is the preset's `maximumAcceptedAccuracyMeters`; it is available directly as,
+for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 
 | Option | Default | Purpose |
 |---|---:|---|
+| `accuracy` | `high` | Supplies all preset sampling and accepted-accuracy values |
+| `locationAccuracy` | Same as `accuracy` | Overrides only Android/iOS native request accuracy |
 | `movingInterval` | 15 seconds | Requested interval while moving |
 | `movingDistanceFilterMeters` | 15 m | Minimum moving displacement |
 | `stationaryInterval` | 2 minutes | Requested interval while stationary |
@@ -577,8 +634,8 @@ Defaults are conservative starting points, not universal recommendations.
 | `batchMaxAge` | 2 minutes | Time threshold for an optional uploader |
 
 Operating systems may batch, delay, coalesce, or skip callbacks. Shortening an
-interval does not guarantee that frequency and can materially increase battery
-use.
+interval does not guarantee that frequency. `precised` can materially increase
+battery use and should be enabled only when dense route geometry is necessary.
 
 ## Activity and battery behavior
 
@@ -662,9 +719,12 @@ semantics.
 
 | Scenario | Android | iOS |
 |---|---|---|
-| Normal background or screen lock | Foreground-service support | Core Location background mode |
-| Removed from recent apps | Usually continues; OEM-dependent | App-switcher force-quit stops tracking |
-| OS process termination | Best-effort service/session recovery | Continuous updates resume only after the app launches |
+| Normal background or screen lock while active | Continues in the foreground service | Continues with Core Location background mode; iOS 17+ background-activity session is held |
+| Route paused | Service and native requests are stopped | Location, motion, and background-activity sessions are stopped |
+| Route resumed | Service and requests are recreated | Location, motion, and background-activity sessions are recreated |
+| Route completed | Service, notification, and native requests are stopped | All native updates and sessions are invalidated |
+| Removed from recent apps | Usually continues; OEM-dependent | Swiping away is a user force-quit and stops tracking |
+| OS process termination | Best-effort service/session recovery | Route is retained as interrupted and can be explicitly resumed after launch |
 | Android Force stop | Cannot be bypassed | Not applicable |
 | Reboot | Best-effort restoration; OEM-dependent | The app must be launched to restart this tracker |
 

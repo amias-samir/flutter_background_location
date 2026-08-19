@@ -460,6 +460,17 @@ class FlutterBackgroundLocationPlugin :
         }
         val reason = arguments?.get("reason") as? String
             ?: "user_stopped"
+
+        // A paused route has no running LocationTrackingService. Completing it
+        // is a persisted state transition and must not start an idle foreground
+        // service merely to stop it again.
+        if (stateStore.isPaused) {
+            stateStore.stop(reason)
+            stateStore.emitCurrentStatus()
+            result.success(stateStore.statusMap())
+            return
+        }
+
         stateStore.markState(TrackingStateStore.STATE_STOPPING, stateStore.profile)
         stateStore.emitCurrentStatus()
         val intent = Intent(applicationContext, LocationTrackingService::class.java).apply {

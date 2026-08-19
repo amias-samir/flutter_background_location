@@ -1,5 +1,13 @@
 ## 0.1.2
 
+- Added low, medium, high (default), and precised tracking-accuracy presets,
+  with typed native-accuracy control and per-value sampling overrides.
+- Made Android service restart policy active-route-only, with full teardown on
+  pause/completion and clean recreation on resume.
+- Made the iOS capture manager process-scoped so Flutter engine/scene rebuilds
+  do not interrupt an active route.
+- Added an iOS 17+ `CLBackgroundActivitySession` for active background capture
+  and invalidate it on pause/completion.
 - Standardized the public API on `TrackingClient`, `Tracking`, and
   `TrackingConfiguration`.
 - Replaced patrol metadata with normalized, timestamp-suffixed route IDs and a

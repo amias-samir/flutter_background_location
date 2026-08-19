@@ -34,6 +34,12 @@ The retention selector starts with **Keep all** selected. Every completed route
 therefore remains in the recorded-route list until the user deletes it or
 changes the selector to **Latest only** before starting a new route.
 
+The example starts routes with `TrackingAccuracy.precised` and then overrides
+the moving distance, interval, and accepted-accuracy values to demonstrate the
+configuration precedence rules. Host apps can normally use the default
+`TrackingAccuracy.high`, select `low`/`medium` for longer battery life, or use
+`precised` only when dense geometry is required.
+
 ## Android permission setup
 
 The plugin's Android manifest is merged into the example app automatically.
@@ -195,6 +201,21 @@ authorization](https://developer.apple.com/documentation/corelocation/requesting
 [`requestAlwaysAuthorization()`](https://developer.apple.com/documentation/corelocation/cllocationmanager/requestalwaysauthorization()),
 [background updates](https://developer.apple.com/documentation/corelocation/handling-location-updates-in-the-background),
 and [`NSMotionUsageDescription`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsmotionusagedescription).
+
+### iOS background lifecycle test
+
+Start a route on a physical device, lock the screen or return to the Home
+Screen, travel far enough to produce fixes, and then reopen the app. An active
+route continues through normal backgrounding. Pausing stops native location and
+motion capture; Resume creates those sessions again; Complete stops and clears
+them.
+
+Do not treat swiping the app away as a background/minimize test. That gesture is
+a user force-quit: iOS stops standard continuous updates and does not let an app
+restart them behind the user's decision. On the next launch, the route is shown
+as interrupted so the user can explicitly resume it. On iOS 17 and later the
+plugin uses `CLBackgroundActivitySession` while the route is active; this session
+is invalidated on Pause and Complete.
 
 ## Permission troubleshooting
 

@@ -200,6 +200,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         organizationId: 'example-organization',
         routeId: routeIdentifier,
         config: const TrackingConfig(
+          accuracy: TrackingAccuracy.precised,
           mockLocationPolicy: MockLocationPolicy.flag,
           movingDistanceFilterMeters: 2,
           movingInterval: Duration(seconds: 5),

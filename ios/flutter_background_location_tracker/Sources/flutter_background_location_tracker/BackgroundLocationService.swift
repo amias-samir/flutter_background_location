@@ -96,6 +96,8 @@ private enum TrackingProfile: String {
 }
 
 final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
+  static let shared = BackgroundLocationService()
+
   weak var delegate: BackgroundLocationServiceDelegate?
 
   private enum PersistenceKey {
@@ -129,6 +131,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var movingEvidence = 0
   private var journalPendingCount: Int?
   private var journalFailureMessage: String?
+  // Stored as AnyObject so this package can keep its iOS 13 deployment target
+  // while using CLBackgroundActivitySession on iOS 17 and later.
+  private var backgroundActivitySession: AnyObject?
 
   init(
     userDefaults: UserDefaults = .standard,
@@ -280,6 +285,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     emitStatus()
 
     configureLocationManager(for: .moving)
+    startBackgroundActivitySessionIfNeeded()
     startMotionUpdatesIfPossible()
     locationManager.startUpdatingLocation()
 
@@ -345,6 +351,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     self.configuration = configuration
     if lifecycle == .tracking {
       configureLocationManager(for: profile)
+      if configuration.allowBackgroundLocationUpdates {
+        startBackgroundActivitySessionIfNeeded()
+      } else {
+        stopBackgroundActivitySession()
+      }
     }
     persistState()
     emitStatus(message: "configuration_updated")
@@ -368,6 +379,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "lifecycle": lifecycle.rawValue,
       "isTracking": lifecycle == .tracking || lifecycle == .starting,
       "isPaused": lifecycle == .paused,
+      "nativeServiceActive": lifecycle == .tracking || lifecycle == .starting,
+      "backgroundActivitySessionActive": backgroundActivitySession != nil,
       "trackingProfile": profile.rawValue,
       "samplingProfile": profile == .stationary ? "stationary" : "moving",
       "batteryMode": profile == .stationary ? "stationary" : "moving",
@@ -556,6 +569,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   private func stopNativeUpdates() {
     locationManager.stopUpdatingLocation()
+    locationManager.allowsBackgroundLocationUpdates = false
+    if #available(iOS 11.0, *) {
+      locationManager.showsBackgroundLocationIndicator = false
+    }
+    stopBackgroundActivitySession()
     motionManager?.stopActivityUpdates()
     motionManager = nil
     stationaryTransitionWorkItem?.cancel()
@@ -565,6 +583,26 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     lastReliableLocation = nil
     stationaryReferenceLocation = nil
     resetStationaryCandidate()
+  }
+
+  private func startBackgroundActivitySessionIfNeeded() {
+    guard configuration.allowBackgroundLocationUpdates,
+      backgroundActivitySession == nil
+    else {
+      return
+    }
+    if #available(iOS 17.0, *) {
+      backgroundActivitySession = CLBackgroundActivitySession()
+    }
+  }
+
+  private func stopBackgroundActivitySession() {
+    if #available(iOS 17.0, *),
+      let session = backgroundActivitySession as? CLBackgroundActivitySession
+    {
+      session.invalidate()
+    }
+    backgroundActivitySession = nil
   }
 
   private func handle(_ activity: CMMotionActivity) {

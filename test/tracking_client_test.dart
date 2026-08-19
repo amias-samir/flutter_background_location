@@ -366,6 +366,39 @@ void main() {
     await client.dispose();
   });
 
+  test('native capture runs only while the route is active', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final trackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    expect(tracker.running, isTrue);
+    expect(tracker.starts, <String>[trackId]);
+
+    await client.pauseTrack(trackId: trackId);
+    expect(tracker.running, isFalse);
+    expect(tracker.pauses, <String>[trackId]);
+
+    await client.resumeTrack(trackId);
+    expect(tracker.running, isTrue);
+    expect(tracker.starts, <String>[trackId, trackId]);
+
+    await client.completeTrack(trackId: trackId);
+    expect(tracker.running, isFalse);
+    expect(tracker.stops, <String>[trackId]);
+    expect(client.currentStatus.lifecycle, TrackerLifecycle.idle);
+    await client.dispose();
+  });
+
   test('startTrack keeps all track history by default', () async {
     final harness = RepositoryHarness();
     await harness.initialize();

@@ -9,7 +9,10 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
   static let activityChannelName = "flutter_background_location/activity"
   static let statusChannelName = "flutter_background_location/status"
 
-  private let service = BackgroundLocationService()
+  // Core Location capture must outlive any Flutter engine or scene instance.
+  // Recreating this object while a route is active stops CLLocationManager and
+  // incorrectly turns a normal background transition into an interruption.
+  private let service = BackgroundLocationService.shared
   private let methodChannel: FlutterMethodChannel
   private let locationStreamHandler = FlutterBackgroundEventStreamHandler()
   private let activityStreamHandler = FlutterBackgroundEventStreamHandler()

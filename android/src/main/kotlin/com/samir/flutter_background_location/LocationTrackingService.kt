@@ -98,17 +98,35 @@ class LocationTrackingService : Service() {
             failCapture("Unable to start background tracking: ${error.message.orEmpty()}")
         }
 
-        return START_STICKY
+        return if (shouldRemainStarted()) {
+            START_STICKY
+        } else {
+            // Pause, completion, invalid commands, and failed starts must not
+            // leave Android with permission to recreate an idle service.
+            START_NOT_STICKY
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // The foreground service is deliberately not stopped when the task is
-        // removed from Recents. START_STICKY and the persisted logical state
-        // allow Android to recreate it where the OS/OEM permits.
+        if (!shouldRemainStarted()) {
+            removeForegroundNotification()
+            stopSelf()
+        }
+        // Active capture deliberately survives removal from Recents.
+        // START_STICKY and persisted logical state let Android recreate it
+        // where the OS/OEM permits.
         super.onTaskRemoved(rootIntent)
     }
+
+    private fun shouldRemainStarted(): Boolean =
+        TrackingServiceLifecycle.shouldRemainStarted(
+            captureStarted = captureStarted,
+            trackingEnabled = stateStore.trackingEnabled,
+            isPaused = stateStore.isPaused,
+            hasTrackId = stateStore.activeTrackId != null,
+        )
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(stationaryTransition)
@@ -174,6 +192,8 @@ class LocationTrackingService : Service() {
 
     private fun restoreTrack() {
         if (!stateStore.trackingEnabled || stateStore.isPaused || stateStore.activeTrackId == null) {
+            stopCapture()
+            removeForegroundNotification()
             stopSelf()
             return
         }
@@ -217,6 +237,8 @@ class LocationTrackingService : Service() {
 
     private fun receiveActivity(intent: Intent) {
         if (!stateStore.trackingEnabled || stateStore.isPaused) {
+            stopCapture()
+            removeForegroundNotification()
             stopSelf()
             return
         }
@@ -314,7 +336,8 @@ class LocationTrackingService : Service() {
             configuration.movingDistanceFilterMeters
         }
         val priority = when (configuration.desiredAccuracy.lowercase()) {
-            "best", "high", "navigation" -> Priority.PRIORITY_HIGH_ACCURACY
+            "best", "high", "navigation", "precise", "precised" ->
+                Priority.PRIORITY_HIGH_ACCURACY
             "low", "lowpower", "low_power" -> Priority.PRIORITY_LOW_POWER
             "passive" -> Priority.PRIORITY_PASSIVE
             else -> Priority.PRIORITY_BALANCED_POWER_ACCURACY

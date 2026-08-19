@@ -193,7 +193,7 @@ struct TrackingConfiguration {
       return defaultValue
     }
     switch name.replacingOccurrences(of: "_", with: "").lowercased() {
-    case "bestfornavigation", "navigation":
+    case "bestfornavigation", "navigation", "precise", "precised":
       return kCLLocationAccuracyBestForNavigation
     case "best", "high":
       return kCLLocationAccuracyBest
