@@ -79,7 +79,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 2,
+        version: 3,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -95,7 +95,7 @@ final class SqliteTrackRepository
         id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
-        patrol_id TEXT,
+        route_id TEXT,
         status TEXT NOT NULL,
         started_at TEXT NOT NULL,
         paused_at TEXT,
@@ -269,6 +269,20 @@ final class SqliteTrackRepository
       ''');
       await _createUploadOutboxSchema(database);
     }
+    if (oldVersion < 3) {
+      final trackColumns = await database.rawQuery(
+        'PRAGMA table_info(tracks)',
+      );
+      final names = trackColumns.map((row) => row['name']).toSet();
+      if (!names.contains('route_id')) {
+        await database.execute('ALTER TABLE tracks ADD COLUMN route_id TEXT');
+      }
+      if (names.contains('patrol_id')) {
+        await database.execute(
+          'UPDATE tracks SET route_id = patrol_id WHERE route_id IS NULL',
+        );
+      }
+    }
   }
 
   static Future<void> _createUploadOutboxSchema(
@@ -306,7 +320,7 @@ final class SqliteTrackRepository
   Future<String> createTrack({
     required String userId,
     required String organizationId,
-    String? patrolId,
+    String? routeId,
     required TrackingConfig config,
     String? requestedTrackId,
   }) async {
@@ -332,7 +346,7 @@ final class SqliteTrackRepository
         'id': trackId,
         'organization_id': organizationId,
         'user_id': userId,
-        'patrol_id': patrolId,
+        'route_id': routeId,
         'status': TrackStatus.starting.name,
         'started_at': _timestamp(now),
         'next_sequence': 1,

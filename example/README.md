@@ -3,6 +3,8 @@
 This app demonstrates:
 
 - Android and iOS background-location permission recovery;
+- route-identifier entry when starting, with whitespace normalization and a
+  unique UTC date-time suffix;
 - Start, Pause, Resume, and Complete lifecycle controls;
 - live status, activity, motion, mock-location, and point evidence;
 - latest-only and keep-all track retention;
@@ -20,6 +22,17 @@ flutter run
 
 Use a physical device for background, screen-lock, activity, mock-signal, OEM,
 and battery tests. Simulator/emulator success is not production validation.
+
+When **Start** is pressed, the example asks for a route identifier. The plugin
+normalizes whitespace to underscores and adds a UTC timestamp suffix before
+storing it as `Track.routeId`; for example, `Morning delivery route` becomes
+`Morning_delivery_route_20260819_091530_123456`. Recorded-route cards and
+default export names use this readable identifier while the internal track ID
+continues to manage lifecycle operations.
+
+The retention selector starts with **Keep all** selected. Every completed route
+therefore remains in the recorded-route list until the user deletes it or
+changes the selector to **Latest only** before starting a new route.
 
 ## Android permission setup
 

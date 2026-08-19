@@ -1,4 +1,15 @@
+## 0.1.2
+
+- Standardized the public API on `TrackingClient`, `Tracking`, and
+  `TrackingConfiguration`.
+- Replaced patrol metadata with normalized, timestamp-suffixed route IDs and a
+  schema version 3 migration that preserves legacy values.
+- Added route-identifier entry to the example Start flow.
+- Changed the default route-retention policy and example selection to
+  `keepAll`.
+
 ## 0.1.1
+
 - Update documentation
 - Update dart file conventions
 - Added safe selected-route deletion for completed and failed tracks.

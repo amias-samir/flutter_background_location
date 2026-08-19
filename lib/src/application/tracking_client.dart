@@ -23,7 +23,7 @@ import '../upload/tracking_batch_uploader.dart';
 import 'motion_gate.dart';
 import 'position_validator.dart';
 
-abstract interface class FieldTracking {
+abstract interface class Tracking {
   Stream<TrackerStatus> get statusStream;
   Stream<ActivitySnapshot> get activityStream;
   Stream<TrackPoint> get pointStream;
@@ -35,7 +35,7 @@ abstract interface class FieldTracking {
   Future<String> startTrack({
     required String userId,
     required String organizationId,
-    String? patrolId,
+    String? routeId,
     String? requestedTrackId,
     TrackingConfig? config,
   });
@@ -60,9 +60,9 @@ abstract interface class FieldTracking {
   Future<TrackBundle> loadTrackBundle(String trackId);
 }
 
-class FieldTrackingClient implements FieldTracking {
-  FieldTrackingClient({
-    this.configuration = const FieldTrackingConfiguration(),
+class TrackingClient implements Tracking {
+  TrackingClient({
+    this.configuration = const TrackingConfiguration(),
     TrackerAdapter? trackerAdapter,
     TrackRepository? repository,
     ExportFileWriter? exportFileWriter,
@@ -74,7 +74,7 @@ class FieldTrackingClient implements FieldTracking {
         _uploader = uploader,
         _clock = clock ?? _utcNow;
 
-  final FieldTrackingConfiguration configuration;
+  final TrackingConfiguration configuration;
   final TrackerAdapter _tracker;
   TrackRepository? _repository;
   ExportFileWriter? _exportFileWriter;
@@ -346,7 +346,7 @@ class FieldTrackingClient implements FieldTracking {
   Future<String> startTrack({
     required String userId,
     required String organizationId,
-    String? patrolId,
+    String? routeId,
     String? requestedTrackId,
     TrackingConfig? config,
   }) async {
@@ -395,7 +395,7 @@ class FieldTrackingClient implements FieldTracking {
       final trackId = await _store.createTrack(
         userId: userId,
         organizationId: organizationId,
-        patrolId: patrolId,
+        routeId: routeId == null ? null : createRouteId(routeId, _clock()),
         config: selectedConfig,
         requestedTrackId: requestedTrackId,
       );
@@ -1245,7 +1245,7 @@ class FieldTrackingClient implements FieldTracking {
   }
 
   void _ensureNotDisposed() {
-    if (_disposed) throw StateError('FieldTrackingClient is disposed.');
+    if (_disposed) throw StateError('TrackingClient is disposed.');
   }
 
   Future<void> dispose() async {
@@ -1269,4 +1269,4 @@ class FieldTrackingClient implements FieldTracking {
   }
 }
 
-typedef FlutterBackgroundLocation = FieldTrackingClient;
+typedef FlutterBackgroundLocation = TrackingClient;

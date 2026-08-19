@@ -211,7 +211,7 @@ void main() {
           capturedMotionState: MotionState.moving,
         ),
       ]);
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -251,7 +251,7 @@ void main() {
     final tracker = _FakeTracker()
       ..running = true
       ..nativeTrackId = activeTrack;
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -281,7 +281,7 @@ void main() {
     final tracker = _FakeTracker()
       ..running = true
       ..nativeTrackId = trackId;
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -316,7 +316,7 @@ void main() {
     final harness = RepositoryHarness();
     await harness.initialize();
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -340,43 +340,37 @@ void main() {
     await client.dispose();
   });
 
-  test('startTrack keeps only the latest track by default', () async {
+  test('startTrack normalizes and timestamps a supplied route ID', () async {
     final harness = RepositoryHarness();
     await harness.initialize();
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
     );
     await client.initialize();
 
-    final firstTrackId = await client.startTrack(
+    final trackId = await client.startTrack(
       userId: 'user',
       organizationId: 'org',
-    );
-    await client.completeTrack(trackId: firstTrackId);
-    final secondTrackId = await client.startTrack(
-      userId: 'user',
-      organizationId: 'org',
+      routeId: '  Morning   delivery route  ',
     );
 
-    expect(await harness.repository.getTrack(firstTrackId), isNull);
-    expect((await harness.repository.listTracks()).map((track) => track.id),
-        <String>[secondTrackId]);
-
-    await client.completeTrack(trackId: secondTrackId);
+    expect(
+      (await client.getTrack(trackId))!.routeId,
+      'Morning_delivery_route_20260720_080000_000000',
+    );
+    await client.completeTrack(trackId: trackId);
     await client.dispose();
   });
 
-  test('startTrack can keep all track history', () async {
+  test('startTrack keeps all track history by default', () async {
     final harness = RepositoryHarness();
     await harness.initialize();
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
-      configuration: const FieldTrackingConfiguration(
-        recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
-      ),
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -402,12 +396,46 @@ void main() {
     await client.dispose();
   });
 
+  test('startTrack can keep only the latest track when configured', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      configuration: const TrackingConfiguration(
+        recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
+      ),
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final firstTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    await client.completeTrack(trackId: firstTrackId);
+    final secondTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+
+    expect(await harness.repository.getTrack(firstTrackId), isNull);
+    expect(
+      (await harness.repository.listTracks()).map((track) => track.id),
+      <String>[secondTrackId],
+    );
+
+    await client.completeTrack(trackId: secondTrackId);
+    await client.dispose();
+  });
+
   test('deleteTrack removes a selected completed route', () async {
     final harness = RepositoryHarness();
     await harness.initialize();
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
-      configuration: const FieldTrackingConfiguration(
+    final client = TrackingClient(
+      configuration: const TrackingConfiguration(
         recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
       ),
       trackerAdapter: tracker,
@@ -433,7 +461,7 @@ void main() {
     final harness = RepositoryHarness();
     await harness.initialize();
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -462,7 +490,7 @@ void main() {
       reason: 'native_stopped',
     );
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -491,7 +519,7 @@ void main() {
     final tracker = _FakeTracker()
       ..running = true
       ..nativeTrackId = trackId;
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -520,7 +548,7 @@ void main() {
       ..running = true
       ..nativeTrackId = trackId
       ..failNextPauseAfterStopping = true;
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -560,7 +588,7 @@ void main() {
     final tracker = _FakeTracker()
       ..running = true
       ..nativeTrackId = trackId;
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -591,7 +619,7 @@ void main() {
         reason: 'notification_paused',
         timestamp: harness.now,
       );
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -626,7 +654,7 @@ void main() {
     final tracker = _FakeTracker()
       ..running = true
       ..nativeTrackId = trackId;
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),
@@ -669,7 +697,7 @@ void main() {
     final trackId = await harness.createActiveTrack(trackId: 'status-track');
     await harness.repository.pauseTrack(trackId, reason: 'overnight');
     final tracker = _FakeTracker();
-    final client = FieldTrackingClient(
+    final client = TrackingClient(
       trackerAdapter: tracker,
       repository: harness.repository,
       exportFileWriter: _MemoryWriter(),

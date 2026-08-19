@@ -156,7 +156,7 @@ abstract interface class TrackRepository {
   Future<String> createTrack({
     required String userId,
     required String organizationId,
-    String? patrolId,
+    String? routeId,
     required TrackingConfig config,
     String? requestedTrackId,
   });

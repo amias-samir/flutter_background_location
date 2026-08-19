@@ -1,6 +1,6 @@
 library;
 
-export 'src/application/field_tracking_client.dart';
+export 'src/application/tracking_client.dart';
 export 'src/domain/activity_snapshot.dart';
 export 'src/domain/capability_report.dart';
 export 'src/domain/export_models.dart';

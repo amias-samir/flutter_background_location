@@ -23,7 +23,7 @@ final class Track {
     required this.segmentCount,
     required this.nextSequence,
     required this.config,
-    this.patrolId,
+    this.routeId,
     this.pausedAt,
     this.resumedAt,
     this.endedAt,
@@ -39,7 +39,7 @@ final class Track {
   final String id;
   final String userId;
   final String organizationId;
-  final String? patrolId;
+  final String? routeId;
   final TrackStatus status;
   final DateTime startedAt;
   final DateTime? pausedAt;
@@ -75,7 +75,7 @@ final class Track {
       id: row['id']! as String,
       userId: row['user_id']! as String,
       organizationId: row['organization_id']! as String,
-      patrolId: row['patrol_id'] as String?,
+      routeId: row['route_id'] as String?,
       status: TrackStatus.values.byName(row['status']! as String),
       startedAt: date('started_at')!,
       pausedAt: date('paused_at'),
@@ -99,3 +99,22 @@ final class Track {
 }
 
 typedef TrackSummary = Track;
+
+/// Creates a readable route ID with whitespace normalized and a UTC suffix.
+String createRouteId(String identifier, DateTime startedAt) {
+  final normalized = identifier.trim().replaceAll(RegExp(r'\s+'), '_');
+  if (normalized.isEmpty) {
+    throw ArgumentError.value(
+      identifier,
+      'identifier',
+      'Route identifier must not be empty.',
+    );
+  }
+  final utc = startedAt.toUtc();
+  String digits(int value, int width) => value.toString().padLeft(width, '0');
+  final suffix = '${digits(utc.year, 4)}${digits(utc.month, 2)}'
+      '${digits(utc.day, 2)}_${digits(utc.hour, 2)}'
+      '${digits(utc.minute, 2)}${digits(utc.second, 2)}_'
+      '${digits(utc.millisecond, 3)}${digits(utc.microsecond, 3)}';
+  return '${normalized}_$suffix';
+}

@@ -147,11 +147,11 @@ final class TrackingConfig {
 }
 
 /// Package-level storage and export configuration.
-final class FieldTrackingConfiguration {
-  const FieldTrackingConfiguration({
+final class TrackingConfiguration {
+  const TrackingConfiguration({
     this.databaseName = 'flutter_background_location.sqlite',
     this.exportDirectoryName = 'flutter_background_location',
-    this.recordRetentionPolicy = TrackRecordRetentionPolicy.keepLatestOnly,
+    this.recordRetentionPolicy = TrackRecordRetentionPolicy.keepAll,
     this.defaultTrackingConfig = const TrackingConfig(),
     this.maximumUploadBatchPointCount = 100,
     this.maximumUploadBatchBytes = 256 * 1024,

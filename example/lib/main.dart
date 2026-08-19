@@ -36,9 +36,9 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   final List<StreamSubscription<Object?>> _subscriptions =
       <StreamSubscription<Object?>>[];
 
-  late FieldTrackingClient _tracking;
+  late TrackingClient _tracking;
   TrackRecordRetentionPolicy _retentionPolicy =
-      TrackRecordRetentionPolicy.keepLatestOnly;
+      TrackRecordRetentionPolicy.keepAll;
   TrackerStatus _status = const TrackerStatus(lifecycle: TrackerLifecycle.idle);
   ActivitySnapshot _activity = const ActivitySnapshot.unknown();
   TrackPoint? _lastPoint;
@@ -55,8 +55,8 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     unawaited(_initialize());
   }
 
-  FieldTrackingClient _createTrackingClient() => FieldTrackingClient(
-    configuration: FieldTrackingConfiguration(
+  TrackingClient _createTrackingClient() => TrackingClient(
+    configuration: TrackingConfiguration(
       recordRetentionPolicy: _retentionPolicy,
     ),
   );
@@ -180,28 +180,41 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     }
   }
 
-  Future<void> _start() => _run(() async {
+  Future<void> _start() async {
     if (_trackId != null &&
         (_status.lifecycle == TrackerLifecycle.paused ||
             _status.lifecycle == TrackerLifecycle.interrupted ||
             _status.lifecycle == TrackerLifecycle.failed)) {
-      await _tracking.resumeTrack(_trackId!);
-      await _refreshTracks();
+      await _run(() async {
+        await _tracking.resumeTrack(_trackId!);
+        await _refreshTracks();
+      });
       return;
     }
-    _trackId = await _tracking.startTrack(
-      userId: 'example-user',
-      organizationId: 'example-organization',
-      config: const TrackingConfig(
-        mockLocationPolicy: MockLocationPolicy.flag,
-        movingDistanceFilterMeters: 2,
-        movingInterval: Duration(seconds: 5),
-        maximumAcceptedAccuracyMeters: 20,
-      ),
-    );
-    _completedTrackId = null;
-    await _refreshTracks();
-  });
+
+    final routeIdentifier = await _askRouteIdentifier();
+    if (routeIdentifier == null || !mounted) return;
+    await _run(() async {
+      _trackId = await _tracking.startTrack(
+        userId: 'example-user',
+        organizationId: 'example-organization',
+        routeId: routeIdentifier,
+        config: const TrackingConfig(
+          mockLocationPolicy: MockLocationPolicy.flag,
+          movingDistanceFilterMeters: 2,
+          movingInterval: Duration(seconds: 5),
+          maximumAcceptedAccuracyMeters: 20,
+        ),
+      );
+      _completedTrackId = null;
+      await _refreshTracks();
+    });
+  }
+
+  Future<String?> _askRouteIdentifier() => showDialog<String>(
+    context: context,
+    builder: (context) => const _RouteIdentifierDialog(),
+  );
 
   Future<void> _pause() => _run(() async {
     await _tracking.pauseTrack(trackId: _trackId, reason: 'example_pause');
@@ -428,6 +441,67 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       ),
     );
   }
+}
+
+class _RouteIdentifierDialog extends StatefulWidget {
+  const _RouteIdentifierDialog();
+
+  @override
+  State<_RouteIdentifierDialog> createState() => _RouteIdentifierDialogState();
+}
+
+class _RouteIdentifierDialogState extends State<_RouteIdentifierDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  bool get _canStart => _controller.text.trim().isNotEmpty;
+
+  void _submit() {
+    if (!_canStart) return;
+    Navigator.of(context).pop(_controller.text.trim());
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Route identifier'),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        TextField(
+          controller: _controller,
+          autofocus: true,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(
+            labelText: 'Route ID',
+            hintText: 'Morning delivery route',
+          ),
+          onChanged: (_) => setState(() {}),
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Whitespace is replaced with underscores and a UTC date-time suffix '
+          'is added automatically to keep the route ID unique.',
+        ),
+      ],
+    ),
+    actions: <Widget>[
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: _canStart ? _submit : null,
+        child: const Text('Start tracking'),
+      ),
+    ],
+  );
 }
 
 class _ExportNameDialog extends StatefulWidget {
@@ -671,7 +745,7 @@ class _RecordedTracksSection extends StatelessWidget {
 
   static String _trackTitle(Track track) {
     final started = _formatDateTime(track.startedAt);
-    return '${track.status.name} ${track.id} • $started';
+    return '${track.status.name} ${track.routeId ?? track.id} • $started';
   }
 
   static String _trackSubtitle(Track track) {
@@ -708,7 +782,7 @@ enum _RecordedTrackAction {
 class TrackMapPage extends StatelessWidget {
   const TrackMapPage({super.key, required this.tracking, required this.track});
 
-  final FieldTrackingClient tracking;
+  final TrackingClient tracking;
   final Track track;
 
   @override

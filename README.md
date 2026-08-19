@@ -253,17 +253,15 @@ and [`NSMotionUsageDescription`](https://developer.apple.com/documentation/bundl
 
 ## Quick start
 
-Keep one `FieldTrackingClient` for the lifetime of the tracking feature. Call
+Keep one `TrackingClient` for the lifetime of the tracking feature. Call
 `initialize()` before reading stored tracks or issuing commands.
 
 ```dart
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
-final tracking = FieldTrackingClient(
-  configuration: const FieldTrackingConfiguration(
-    // The default. Older tracks are removed only when a new track starts.
-    recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
-  ),
+final tracking = TrackingClient(
+  // keepAll is the default retention policy.
+  configuration: const TrackingConfiguration(),
 );
 
 Future<void> initializeTracking() async {
@@ -330,7 +328,7 @@ Future<void> startTrip() async {
     activeTrackId = await tracking.startTrack(
       userId: 'user-42',
       organizationId: 'organization-7',
-      patrolId: 'shift-2026-08-15', // Optional application metadata.
+      routeId: 'Morning delivery route',
       config: const TrackingConfig(
         movingInterval: Duration(seconds: 15),
         movingDistanceFilterMeters: 15,
@@ -376,6 +374,14 @@ Future<String?> completeTrip() async {
   return id;
 }
 ```
+
+`routeId` is optional application metadata. When supplied, the client trims
+the value, replaces every whitespace run with `_`, and appends a UTC timestamp
+with microsecond precision. For example, `Morning delivery route` becomes a
+value such as `Morning_delivery_route_20260819_091530_123456`. The stored value
+is available as `Track.routeId`, appears in route exports, and is used in the
+default export filename. The database's internal `Track.id` remains an
+independent lifecycle key.
 
 Commands are serialized and scoped to a track ID. For a command that may be
 retried, supply one stable, unique `operationId` for that logical pause or
@@ -512,23 +518,21 @@ const options = TrackExportOptions(
 
 ## Retaining track history
 
-The default policy keeps one logical session through active, paused, resumed,
-and completed states. Older track rows are deleted only when the next track is
-created:
+The default `keepAll` policy retains every recorded route so it remains
+available in track history:
 
 ```dart
-final tracking = FieldTrackingClient(
-  configuration: const FieldTrackingConfiguration(
-    recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
-  ),
+const TrackingConfiguration(
+  recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
 );
 ```
 
-Keep a local history when your product needs a recorded-track list:
+Choose `keepLatestOnly` when the product should discard older routes as soon as
+a new route starts:
 
 ```dart
-const FieldTrackingConfiguration(
-  recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+const TrackingConfiguration(
+  recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
 );
 ```
 
@@ -615,7 +619,7 @@ The plugin does not choose an HTTP client or backend protocol. Supply a
 `TrackUploader` when you want durable ordered batches:
 
 ```dart
-final tracking = FieldTrackingClient(
+final tracking = TrackingClient(
   uploader: MyTrackUploader(),
 );
 

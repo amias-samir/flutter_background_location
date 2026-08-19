@@ -402,8 +402,7 @@ void main() {
     expect(bundle.track.totalDistanceMeters, lessThan(300));
   });
 
-  test('migrates a legacy version 1 database to the durable outbox schema',
-      () async {
+  test('migrates a legacy version 1 database to the current schema', () async {
     final directory = await Directory.systemTemp.createTemp('fbl-migration-');
     final databasePath = '${directory.path}/legacy.sqlite';
     final legacy = await databaseFactoryFfi.openDatabase(
@@ -447,15 +446,69 @@ void main() {
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
     final columns = await inspected.rawQuery('PRAGMA table_info(track_points)');
+    final trackColumns = await inspected.rawQuery('PRAGMA table_info(tracks)');
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 2);
+    expect(version, 3);
     expect(
       tables.map((row) => row['name']),
       containsAll(<String>['pending_tracking_commands', 'upload_outbox']),
     );
     expect(columns.map((row) => row['name']), contains('native_event_id'));
+    expect(trackColumns.map((row) => row['name']), contains('route_id'));
+  });
+
+  test('migrates legacy patrol metadata to route ID', () async {
+    final directory = await Directory.systemTemp.createTemp('fbl-route-id-');
+    final databasePath = '${directory.path}/legacy.sqlite';
+    final legacy = await databaseFactoryFfi.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(
+        version: 2,
+        onCreate: (database, version) async {
+          await database.execute('''
+            CREATE TABLE tracks (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              paused_at TEXT,
+              patrol_id TEXT
+            )
+          ''');
+          await database.insert('tracks', <String, Object?>{
+            'id': 'legacy-track',
+            'status': TrackStatus.completed.name,
+            'started_at': DateTime.utc(2026, 7, 20).toIso8601String(),
+            'patrol_id': 'legacy-patrol',
+          });
+        },
+      ),
+    );
+    await legacy.close();
+
+    final migrated = SqliteTrackRepository(
+      path: databasePath,
+      databaseFactoryOverride: databaseFactoryFfi,
+      singleInstance: false,
+    );
+    await migrated.initialize();
+    await migrated.close();
+
+    final inspected = await databaseFactoryFfi.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    final rows = await inspected.query(
+      'tracks',
+      columns: <String>['route_id'],
+      where: 'id = ?',
+      whereArgs: <Object?>['legacy-track'],
+    );
+    await inspected.close();
+    await directory.delete(recursive: true);
+
+    expect(rows.single['route_id'], 'legacy-patrol');
   });
 }
 

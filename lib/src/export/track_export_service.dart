@@ -23,6 +23,7 @@ abstract interface class ExportFileWriter {
   Future<void> delete(String path);
 }
 
+
 /// Writes exports to a user-visible folder.
 ///
 /// Android uses MediaStore so files appear in
@@ -298,7 +299,7 @@ final class TrackExportService {
       },
       nest: () {
         builder.element('Document', nest: () {
-          builder.element('name', nest: 'Track ${bundle.track.id}');
+          builder.element('name', nest: _trackName(bundle.track));
           for (var index = 0; index < segmentPoints.length; index += 1) {
             final points = segmentPoints[index];
             if (points.length >= 2) {
@@ -361,14 +362,14 @@ final class TrackExportService {
       },
       nest: () {
         builder.element('metadata', nest: () {
-          builder.element('name', nest: 'Track ${bundle.track.id}');
+          builder.element('name', nest: _trackName(bundle.track));
           builder.element(
             'time',
             nest: _formatTime(bundle.track.startedAt, options),
           );
         });
         builder.element('trk', nest: () {
-          builder.element('name', nest: 'Track ${bundle.track.id}');
+          builder.element('name', nest: _trackName(bundle.track));
           for (final points in segmentPoints) {
             builder.element('trkseg', nest: () {
               for (final point in points) {
@@ -462,6 +463,7 @@ final class TrackExportService {
   static Map<String, Object?> _trackProperties(Track track) =>
       <String, Object?>{
         'trackId': track.id,
+        'routeId': track.routeId,
         'startedAt': track.startedAt.toUtc().toIso8601String(),
         'completedAt': track.endedAt?.toUtc().toIso8601String(),
         'status': track.status.name,
@@ -542,7 +544,10 @@ final class TrackExportService {
   ) {
     final date =
         bundle.track.startedAt.toUtc().toIso8601String().split('T').first;
-    final safeId = bundle.track.id.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final safeId = (bundle.track.routeId ?? bundle.track.id).replaceAll(
+      RegExp(r'[^A-Za-z0-9_-]'),
+      '_',
+    );
     return TrackExportArtifact(
       trackId: bundle.track.id,
       format: format,
@@ -553,6 +558,9 @@ final class TrackExportService {
       segmentCount: segments.length,
     );
   }
+
+  static String _trackName(Track track) =>
+      track.routeId == null ? 'Track ${track.id}' : 'Route ${track.routeId}';
 }
 
 String resolveExportFileName({
