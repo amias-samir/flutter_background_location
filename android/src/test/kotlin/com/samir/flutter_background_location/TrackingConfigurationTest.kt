@@ -13,7 +13,7 @@ class TrackingConfigurationTest {
                 "movingDistanceFilterMeters" to 5,
                 "stationaryIntervalMs" to 30_000,
                 "stationaryDistanceFilterMeters" to 15,
-                "maximumAcceptedAccuracyMeters" to 10,
+                "maximumAcceptedAccuracyMeters" to 15,
             ),
         )
 
@@ -22,7 +22,7 @@ class TrackingConfigurationTest {
         assertEquals(5f, configuration.movingDistanceFilterMeters)
         assertEquals(30_000L, configuration.stationaryIntervalMs)
         assertEquals(15f, configuration.stationaryDistanceFilterMeters)
-        assertEquals(10.0, configuration.maximumAcceptedAccuracyMeters, 0.0)
+        assertEquals(15.0, configuration.maximumAcceptedAccuracyMeters, 0.0)
     }
 
     @Test

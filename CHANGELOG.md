@@ -1,13 +1,15 @@
 ## Unreleased
 
+- Refreshed the example with clearer session, lifecycle, configuration, and
+  recorded-route cards, plus a confirmed owner-conflict recovery prompt.
 - Expanded integration-focused Dartdoc coverage and simplified the README's
   setup flow and core API reference.
 - Retuned all accuracy presets toward higher fidelity: `low` now matches the
   former medium profile, `medium` matches the former high profile, default
   `high` uses navigation accuracy with a 10-second moving interval, and
-  `precised` accepts 10 m accuracy with a 15 m stationary filter. The example
+  `precised` accepts 15 m accuracy with a 15 m stationary filter. The example
   now explains the battery cost and can open Android battery settings from an
-  explicit user action. New epochs record preset-definition version 2.
+  explicit user action. New epochs record preset-definition version 3.
 - Added the awaited owner-bound `TrackingClient.open`/`TrackingController`
   facade, owner-scoped history/upload behavior, opaque foreign-capture recovery,
   and durable native command leases on Android and iOS.

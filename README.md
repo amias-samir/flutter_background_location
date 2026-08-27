@@ -917,7 +917,7 @@ values, while stationary values still come from the low profile.
 | `low` | 30 seconds | 25 m | Balanced / nearest 10 m | 3 minutes | 100 m | 100 m |
 | `medium` | 15 seconds | 15 m | High / best | 2 minutes | 75 m | 60 m |
 | `high` (default) | 10 seconds | 5 m | High / navigation | 30 seconds | 25 m | 20 m |
-| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 15 m | 10 m |
+| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 15 m | 15 m |
 
 Android and iOS translate the native request to the closest platform accuracy;
 the table shows Android/iOS terminology. Presets are starting points, not

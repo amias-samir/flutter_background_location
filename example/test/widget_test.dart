@@ -40,7 +40,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(DropdownButtonFormField<TrackingAccuracy>));
+    final accuracySelector = find.byType(
+      DropdownButtonFormField<TrackingAccuracy>,
+    );
+    await tester.ensureVisible(accuracySelector);
+    await tester.pumpAndSettle();
+    await tester.tap(accuracySelector);
     await tester.pumpAndSettle();
     await tester.tap(find.text('precised').last);
     await tester.pumpAndSettle();
@@ -58,7 +63,13 @@ void main() {
       ),
       isTrue,
     );
-    expect(find.widgetWithText(OutlinedButton, 'Battery settings'), findsOne);
+    final batterySettings = find.widgetWithText(
+      OutlinedButton,
+      'Battery settings',
+    );
+    await tester.ensureVisible(batterySettings);
+    await tester.pumpAndSettle();
+    expect(batterySettings, findsOne);
   });
 
   testWidgets('start asks for a non-empty route identifier', (tester) async {

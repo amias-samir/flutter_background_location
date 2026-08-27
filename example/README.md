@@ -11,6 +11,8 @@ This app demonstrates:
 - live status, activity, motion, mock-location, and point evidence;
 - latest-only and keep-all track retention;
 - recorded-track history with per-route actions;
+- owner-conflict recovery that pauses and preserves a previous owner’s local
+  capture after explicit confirmation;
 - MapLibre street-map route display;
 - user-named GeoJSON, KML, and GPX export;
 - confirmed deletion of a selected completed route.
@@ -49,6 +51,12 @@ continues to manage lifecycle operations.
 The retention selector starts with **Keep all** selected. Every completed route
 therefore remains in the recorded-route list until the user deletes it or
 changes the selector to **Latest only** before starting a new route.
+
+If a different signed-in owner previously left a live route on this device,
+the example shows **Pause other session**. After confirmation, it stops that
+route’s local background capture and preserves it as paused. It does not delete
+points, complete the route, reveal the other owner, or control tracking on
+another device.
 
 The example defaults to `TrackingAccuracy.high`. Developers can select
 `low`/`medium` for less frequent sampling, while `precised` is an explicit

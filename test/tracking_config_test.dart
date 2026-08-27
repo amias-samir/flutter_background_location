@@ -45,7 +45,7 @@ void main() {
         5,
         Duration(seconds: 30),
         15,
-        10.0,
+        15.0,
         TrackingAccuracy.precised,
       ),
     };

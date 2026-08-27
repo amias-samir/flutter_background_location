@@ -3,7 +3,7 @@ import 'tracking_config.dart';
 /// Versions attached to each immutable policy epoch.
 abstract final class TrackingPolicyVersions {
   /// Version of the predefined [TrackingAccuracy] values.
-  static const int presetDefinition = 2;
+  static const int presetDefinition = 3;
 
   /// Version of the point acceptance/rejection policy.
   static const int qualityPolicy = 1;

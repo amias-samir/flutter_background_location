@@ -25,15 +25,28 @@ class TrackingExampleApp extends StatelessWidget {
   final ExampleTrackingControllerFactory? controllerFactory;
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    debugShowCheckedModeBanner: false,
-    title: 'Background location tracker',
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-      useMaterial3: true,
-    ),
-    home: TrackingExamplePage(controllerFactory: controllerFactory),
-  );
+  Widget build(BuildContext context) {
+    final colors = ColorScheme.fromSeed(
+      seedColor: const Color(0xFF00796B),
+      brightness: Brightness.light,
+    );
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Background location tracker',
+      theme: ThemeData(
+        colorScheme: colors,
+        scaffoldBackgroundColor: colors.surfaceContainerLowest,
+        appBarTheme: AppBarTheme(
+          backgroundColor: colors.surfaceContainerLowest,
+          foregroundColor: colors.onSurface,
+          elevation: 0,
+          scrolledUnderElevation: 1,
+        ),
+        useMaterial3: true,
+      ),
+      home: TrackingExamplePage(controllerFactory: controllerFactory),
+    );
+  }
 }
 
 class TrackingExamplePage extends StatefulWidget {
@@ -253,17 +266,47 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     await _refreshTracks();
   });
 
-  Future<void> _resolveOwnerConflict() => _run(() async {
+  Future<void> _resolveOwnerConflict() async {
     final token = _session?.blockerRecoveryToken;
     if (token == null) return;
-    await _tracking!.resolveOwnerConflict(
-      OwnerConflictResolutionRequest(
-        conflictToken: token,
-        operationId: DateTime.now().microsecondsSinceEpoch.toString(),
-        confirmed: true,
-      ),
-    );
-  });
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            icon: const Icon(Icons.manage_accounts_outlined),
+            title: const Text('Pause another owner’s route?'),
+            content: const Text(
+              'A route started for a different owner is still collecting '
+              'locations on this device. Continuing will stop its local '
+              'background capture and preserve the route as paused. No '
+              'recorded points will be deleted.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(context, true),
+                icon: const Icon(Icons.pause_rounded),
+                label: const Text('Pause route'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+    await _run(() async {
+      await _tracking!.resolveOwnerConflict(
+        OwnerConflictResolutionRequest(
+          conflictToken: token,
+          operationId: DateTime.now().microsecondsSinceEpoch.toString(),
+          confirmed: true,
+        ),
+      );
+      await _refreshTracks();
+    });
+  }
 
   Future<void> _exportTrack(String trackId, TrackExportFormat format) async {
     final name = await showDialog<String>(
@@ -407,108 +450,127 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final tracking = _tracking;
     final actions = _session?.allowedActions;
     final canConfigure = !_busy && _session?.currentTrack == null;
+    final hasOwnerConflict = _session?.blockerCode == 'owner_scope_conflict';
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Background location tracker'),
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Location tracker'),
+            Text(
+              'Background route example',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w400),
+            ),
+          ],
+        ),
         actions: <Widget>[
           IconButton(
             tooltip: 'Setup doctor',
             onPressed: _busy || tracking == null ? null : _showDiagnostics,
             icon: const Icon(Icons.health_and_safety_outlined),
           ),
+          const SizedBox(width: 8),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: <Widget>[
-          TrackingStatusCard(session: _session),
-          if (_message != null) ...<Widget>[
-            const SizedBox(height: 8),
-            SelectableText(_message!),
-          ],
-          const SizedBox(height: 16),
-          TrackingConfigurationControls(
-            retention: _retention,
-            accuracy: _accuracy,
-            enabled: canConfigure,
-            onRetentionChanged: _changeRetention,
-            onAccuracyChanged: _changeAccuracy,
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              FilledButton(
-                onPressed: !_busy && actions?.canStartNew == true
-                    ? _start
-                    : null,
-                child: const Text('Start'),
-              ),
-              FilledButton.tonal(
-                onPressed: !_busy && actions?.canPause == true ? _pause : null,
-                child: const Text('Pause'),
-              ),
-              FilledButton.tonal(
-                onPressed: !_busy && actions?.canResume == true
-                    ? _resume
-                    : null,
-                child: const Text('Resume'),
-              ),
-              OutlinedButton(
-                onPressed: !_busy && actions?.canComplete == true
-                    ? _complete
-                    : null,
-                child: const Text('Complete'),
-              ),
-              OutlinedButton(
-                onPressed:
-                    !_busy && _session?.blockerCode == 'owner_scope_conflict'
-                    ? _resolveOwnerConflict
-                    : null,
-                child: const Text('Stop foreign capture'),
-              ),
-              OutlinedButton(
-                onPressed: _busy || tracking == null
-                    ? null
-                    : () => tracking.openSettings(
-                        TrackingSettingsDestination.application,
-                      ),
-                child: const Text('App settings'),
-              ),
-              if (_accuracy == TrackingAccuracy.precised)
-                OutlinedButton(
-                  onPressed: _busy || tracking == null
-                      ? null
-                      : _openBatteryOptimizationSettings,
-                  child: const Text('Battery settings'),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 900),
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+              children: <Widget>[
+                TrackingStatusCard(session: _session),
+                if (_message != null) ...<Widget>[
+                  const SizedBox(height: 12),
+                  _MessageCard(message: _message!),
+                ],
+                if (hasOwnerConflict) ...<Widget>[
+                  const SizedBox(height: 12),
+                  OwnerConflictCard(
+                    onResolve: _busy ? null : _resolveOwnerConflict,
+                  ),
+                ],
+                const SizedBox(height: 12),
+                TrackingConfigurationControls(
+                  retention: _retention,
+                  accuracy: _accuracy,
+                  enabled: canConfigure,
+                  onRetentionChanged: _changeRetention,
+                  onAccuracyChanged: _changeAccuracy,
                 ),
-            ],
+                const SizedBox(height: 12),
+                TrackingActionPanel(
+                  canStart: !_busy && actions?.canStartNew == true,
+                  canPause: !_busy && actions?.canPause == true,
+                  canResume: !_busy && actions?.canResume == true,
+                  canComplete: !_busy && actions?.canComplete == true,
+                  settingsEnabled: !_busy && tracking != null,
+                  showBatterySettings: _accuracy == TrackingAccuracy.precised,
+                  onStart: _start,
+                  onPause: _pause,
+                  onResume: _resume,
+                  onComplete: _complete,
+                  onAppSettings: () => tracking!.openSettings(
+                    TrackingSettingsDestination.application,
+                  ),
+                  onBatterySettings: _openBatteryOptimizationSettings,
+                ),
+
+                const SizedBox(height: 12),
+                RecordedTracksSection(
+                  tracks: _tracks,
+                  hasMore: _historyHasMore,
+                  onRefresh: _busy ? null : _refreshTracks,
+                  onLoadMore: _busy ? null : () => _refreshTracks(append: true),
+                  onViewMap: _busy || tracking == null
+                      ? null
+                      : (track) async {
+                          await Navigator.push<void>(
+                            context,
+                            MaterialPageRoute<void>(
+                              builder: (_) => TrackMapPage(
+                                tracking: tracking,
+                                track: track,
+                              ),
+                            ),
+                          );
+                        },
+                  onExport: _busy ? null : _exportTrack,
+                  onDelete: _busy ? null : _deleteTrack,
+                ),
+                if (_busy) ...<Widget>[
+                  const SizedBox(height: 16),
+                  const LinearProgressIndicator(),
+                ],
+              ],
+            ),
           ),
-          const SizedBox(height: 16),
-          RecordedTracksSection(
-            tracks: _tracks,
-            hasMore: _historyHasMore,
-            onRefresh: _busy ? null : _refreshTracks,
-            onLoadMore: _busy ? null : () => _refreshTracks(append: true),
-            onViewMap: _busy || tracking == null
-                ? null
-                : (track) async {
-                    await Navigator.push<void>(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) =>
-                            TrackMapPage(tracking: tracking, track: track),
-                      ),
-                    );
-                  },
-            onExport: _busy ? null : _exportTrack,
-            onDelete: _busy ? null : _deleteTrack,
-          ),
-          if (_busy) ...<Widget>[
-            const SizedBox(height: 16),
-            const LinearProgressIndicator(),
-          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MessageCard extends StatelessWidget {
+  const _MessageCard({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.secondaryContainer.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.info_outline_rounded, color: colors.onSecondaryContainer),
+          const SizedBox(width: 10),
+          Expanded(child: SelectableText(message)),
         ],
       ),
     );

@@ -32,7 +32,7 @@ enum TrackingAccuracy {
   /// Uses navigation-grade native accuracy and accepts up to 20 metres.
   high,
 
-  /// Requests the densest navigation updates and accepts up to 10 metres.
+  /// Requests the densest navigation updates and accepts up to 15 metres.
   precised;
 
   /// Maximum horizontal accuracy accepted by this predefined profile.
@@ -44,7 +44,7 @@ enum TrackingAccuracy {
         TrackingAccuracy.low => 100,
         TrackingAccuracy.medium => 60,
         TrackingAccuracy.high => 20,
-        TrackingAccuracy.precised => 10,
+        TrackingAccuracy.precised => 15,
       };
 
   /// Parses persisted/native values while accepting the grammatically common
@@ -192,7 +192,7 @@ final class TrackingConfig {
                 : accuracy == TrackingAccuracy.medium
                     ? 60
                     : accuracy == TrackingAccuracy.precised
-                        ? 10
+                        ? 15
                         : 20),
         assert(movingDistanceFilterMeters == null ||
             movingDistanceFilterMeters >= 0),

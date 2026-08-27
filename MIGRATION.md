@@ -13,13 +13,15 @@ values are intentionally more accuracy-focused. `low` now uses the former
 `medium` profile, `medium` uses the former `high` profile, and default `high`
 uses navigation-grade accuracy with a 10-second moving interval. `precised`
 keeps its 5-second moving interval while tightening its stationary filter to
-15 m and accepted accuracy to 10 m.
+15 m. Its accepted accuracy is now 15 m, which reduces avoidable rejected fixes
+under partial sky visibility while remaining stricter than `high` at 20 m.
 
 Applications that depend on the older battery-oriented values should pass
 explicit intervals, distance filters, native `locationAccuracy`, and
 `maximumAcceptedAccuracyMeters`. Explicit values continue to take precedence
-over the preset. New configuration epochs record preset-definition version 2,
-so exported diagnostics can distinguish routes created with the retuned table.
+over the preset. New configuration epochs record preset-definition version 3,
+so exported diagnostics can distinguish this profile from the earlier 10 m
+`precised` acceptance threshold.
 
 ## Legacy client to owner-bound controller
 
