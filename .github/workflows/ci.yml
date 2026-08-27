@@ -58,7 +58,10 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          # AGP 9 resolves maplibre_gl with Java source level 21. Using JDK 17
+          # fails during :maplibre_gl:compileDebugJavaWithJavac before the
+          # example application is compiled.
+          java-version: "21"
       - name: Install package dependencies
         run: flutter pub get
       - name: Install example dependencies
