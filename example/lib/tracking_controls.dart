@@ -20,7 +20,9 @@ class TrackingStatusCard extends StatelessWidget {
             ),
             Text('Route: ${value?.currentTrack?.routeId ?? 'none'}'),
             Text('Activity: ${value?.activity.type.value ?? 'unknown'}'),
-            Text('Activity Confidence: ${value?.activity.confidence ?? 'unknown'}'),
+            Text(
+              'Activity Confidence: ${value?.activity.confidence ?? 'unknown'}',
+            ),
             Text('Fix state: ${value?.fixState.name ?? 'idle'}'),
             Text('Last sequence: ${value?.lastPoint?.sequence ?? 'none'}'),
             Text(
