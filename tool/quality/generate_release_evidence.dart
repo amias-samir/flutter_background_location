@@ -3,6 +3,7 @@ import 'dart:io';
 
 const _requirementsPath = 'tool/quality/requirements.yaml';
 const _defaultOutputPath = 'build/quality/release_evidence.json';
+const _ignoredMaintainerDocsPrefix = 'plugin_documents/';
 
 void main(List<String> arguments) {
   final outputPath = _readOutputPath(arguments);
@@ -24,6 +25,13 @@ void main(List<String> arguments) {
       );
     }
     for (final evidence in workPackage.evidence) {
+      if (evidence.startsWith(_ignoredMaintainerDocsPrefix)) {
+        missingEvidence.add(
+          '${workPackage.id}: ignored maintainer evidence cannot be used in '
+          'CI: $evidence',
+        );
+        continue;
+      }
       if (!FileSystemEntity.isFileSync(evidence) &&
           !FileSystemEntity.isDirectorySync(evidence)) {
         missingEvidence.add('${workPackage.id}: $evidence');

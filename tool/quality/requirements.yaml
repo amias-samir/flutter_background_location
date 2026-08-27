@@ -61,7 +61,6 @@ work_packages:
       - android/src/main/AndroidManifest.xml
       - README.md
       - example/README.md
-      - plugin_documents/PLATFORM_IMPLEMENTATION.md
   - id: R1-03
     phase: R1
     title: Foreground-first Android service and serial journal coordinator
@@ -558,8 +557,6 @@ work_packages:
       - example/README.md
       - MIGRATION.md
       - CONTRIBUTING.md
-      - plugin_documents/detailed_plugin_details.md
-      - plugin_documents/implementation_plan_of_detailed_plugin_details.md
   - id: X1-04
     phase: X1
     title: Signed release evidence and RC hardening

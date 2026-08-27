@@ -2,6 +2,7 @@ import 'dart:io';
 
 const _path = 'tool/quality/requirements.yaml';
 const _errorCodePath = 'tool/quality/error_codes.yaml';
+const _ignoredMaintainerDocsPrefix = 'plugin_documents/';
 
 void main() {
   final file = File(_path);
@@ -37,6 +38,15 @@ void main() {
   }
 
   final errors = <String>[];
+  for (final line in lines) {
+    final trimmed = line.trim();
+    if (trimmed.startsWith('- $_ignoredMaintainerDocsPrefix')) {
+      errors.add(
+        'Evidence must be available in a clean checkout; replace ignored '
+        '${trimmed.substring(2)} with a tracked package artifact.',
+      );
+    }
+  }
   if (!hasCompatibility) {
     errors.add('Missing compatibility section.');
   }
