@@ -1,5 +1,6 @@
 import 'package:flutter_background_location_tracker/src/application/position_validator.dart';
 import 'package:flutter_background_location_tracker/src/domain/activity_snapshot.dart';
+import 'package:flutter_background_location_tracker/src/domain/fix_quality.dart';
 import 'package:flutter_background_location_tracker/src/domain/location_sample.dart';
 import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracker_status.dart';
@@ -268,6 +269,49 @@ void main() {
 
       expect(result.accepted, isTrue);
       expect(result.qualityFlags & TrackPointQualityFlag.largeGap, isNot(0));
+    });
+
+    test('versioned policy separates geometry from motion eligibility', () {
+      final decision = const FixQualityPolicy(config).evaluate(
+        sample: sample(accuracy: 0),
+        previous: null,
+        now: now,
+      );
+
+      expect(decision.acceptedForGeometry, isTrue);
+      expect(decision.acceptedForMotionEvidence, isFalse);
+      expect(decision.issues, contains(FixQualityIssue.zeroAccuracy));
+      expect(decision.policyVersion, greaterThan(0));
+    });
+
+    test('receipt-time evidence distinguishes stale and future fixes', () {
+      final stale = const FixQualityPolicy(config).evaluate(
+        sample: LocationSample(
+          latitude: 27.7,
+          longitude: 85.3,
+          horizontalAccuracy: 5,
+          capturedAt: now,
+          providerTimeDeltaMsAtReceipt: 600000,
+        ),
+        previous: null,
+        now: now,
+      );
+      final future = const FixQualityPolicy(config).evaluate(
+        sample: LocationSample(
+          latitude: 27.7,
+          longitude: 85.3,
+          horizontalAccuracy: 5,
+          capturedAt: now,
+          providerTimeDeltaMsAtReceipt: -180000,
+        ),
+        previous: null,
+        now: now,
+      );
+
+      expect(stale.issues, contains(FixQualityIssue.staleTimestamp));
+      expect(stale.acceptedForGeometry, isFalse);
+      expect(future.issues, contains(FixQualityIssue.futureTimestamp));
+      expect(future.acceptedForGeometry, isFalse);
     });
   });
 }

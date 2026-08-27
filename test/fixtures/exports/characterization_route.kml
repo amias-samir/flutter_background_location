@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Track characterization-route</name>
+    <ExtendedData>
+      <Data name="geometrySource">
+        <value>raw</value>
+      </Data>
+    </ExtendedData>
+    <Placemark>
+      <name>Segment 1</name>
+      <ExtendedData>
+        <Data name="segmentNumber">
+          <value>1</value>
+        </Data>
+        <Data name="pointCount">
+          <value>2</value>
+        </Data>
+      </ExtendedData>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>85.3000000,27.7000000,0 85.3000000,27.7000000,0</coordinates>
+      </LineString>
+    </Placemark>
+    <Placemark>
+      <name>Segment 2</name>
+      <ExtendedData>
+        <Data name="segmentNumber">
+          <value>2</value>
+        </Data>
+        <Data name="pointCount">
+          <value>2</value>
+        </Data>
+      </ExtendedData>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>85.4000000,27.8000000,0 85.4000000,27.8000000,0</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>

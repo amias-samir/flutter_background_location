@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import '../domain/track.dart';
 import '../domain/track_point.dart';
+import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
 import 'track_uploader.dart';
 
@@ -28,6 +29,7 @@ final class TrackingBatchUploader {
     UploadJitterSource? jitter,
     UploadRetryTimerFactory? retryTimerFactory,
     String? leaseOwner,
+    this.owner,
   })  : _outbox = repository is UploadOutboxRepository
             ? repository as UploadOutboxRepository
             : throw ArgumentError.value(
@@ -61,6 +63,7 @@ final class TrackingBatchUploader {
   final UploadJitterSource _jitter;
   final UploadRetryTimerFactory _retryTimerFactory;
   final String _leaseOwner;
+  final TrackingOwner? owner;
   final Map<String, Future<void>> _drains = <String, Future<void>>{};
   final Map<String, Timer> _retryTimers = <String, Timer>{};
   bool _disposed = false;
@@ -78,7 +81,15 @@ final class TrackingBatchUploader {
 
   /// Discovers unfinished point and completion work, including after restart.
   Future<void> tryDrainAll() async {
-    final trackIds = await _outbox.pendingUploadTrackIds();
+    final scope = owner;
+    final trackIds = scope == null
+        ? await _outbox.pendingUploadTrackIds()
+        : _outbox is OwnerScopedUploadOutboxRepository
+            ? await (_outbox as OwnerScopedUploadOutboxRepository)
+                .pendingUploadTrackIdsForOwner(scope)
+            : throw StateError(
+                'Owner-bound upload requires an owner-scoped outbox.',
+              );
     Object? firstError;
     StackTrace? firstStackTrace;
     await Future.wait(
@@ -117,6 +128,10 @@ final class TrackingBatchUploader {
     while (true) {
       final track = await repository.getTrack(trackId);
       if (track == null) return;
+      final scope = owner;
+      if (scope != null && !scope.owns(track)) {
+        throw StateError('Upload work is outside the bound owner scope.');
+      }
       final configuredPointCount = track.config.batchPointCount;
       final pointLimit = math.min(maximumPointCount, configuredPointCount);
       final lease = await _outbox.leaseNextUpload(

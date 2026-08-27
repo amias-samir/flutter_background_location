@@ -26,6 +26,10 @@ offline GeoJSON, KML, and GPX export.
 - User-defined export names and collision-safe file creation.
 - Optional application-supplied uploader with durable retry state.
 - Streams and plain Dart models with no state-management dependency.
+- Optional immutable derived geometry with explicit raw/derived map and export
+  selection.
+- Opt-in, versioned adaptive battery policy with shadow mode and host fidelity
+  bounds.
 
 ## Platform support
 
@@ -59,6 +63,56 @@ Import the public library:
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 ```
 
+## 60-second integration
+
+Create exactly one application-scoped controller for the signed-in owner. The
+controller initializes storage/native state before it is returned, replays the
+current session to new listeners, and keeps normal reads owner-scoped.
+
+```dart
+late final TrackingController tracking;
+late final StreamSubscription<TrackingSessionSnapshot> sessionSubscription;
+
+Future<void> configureTracking() async {
+  const owner = TrackingOwner(
+    userId: 'signed-in-user',
+    organizationId: 'workspace-id',
+  );
+  tracking = await TrackingClient.open(owner: owner);
+  sessionSubscription = tracking.sessionStream.listen((session) {
+    // Drive every lifecycle button from session.allowedActions.
+    print('${session.status.lifecycle}: ${session.currentTrack?.routeId}');
+  });
+}
+
+Future<void> startRoute() async {
+  final readiness = await tracking.checkReadiness();
+  if (!readiness.canStart) {
+    // From this visible button gesture, present readiness.nextAction.
+    // Permission actions use requestNextPermission(); Settings actions use
+    // openSettings(...). Recheck readiness before calling Start again.
+    return;
+  }
+  await tracking.startNewTrack(
+    const TrackStartRequest(
+      owner: TrackingOwner(
+        userId: 'signed-in-user',
+        organizationId: 'workspace-id',
+      ),
+      routeId: 'Morning delivery route',
+      config: TrackingConfig(accuracy: TrackingAccuracy.high),
+    ),
+  );
+}
+
+Future<void> stopUsingTracking() async {
+  await sessionSubscription.cancel();
+  await tracking.dispose(); // Pause or Complete an active route first.
+}
+```
+
+The complete staged permission flow and platform declarations follow below.
+
 ## Platform configuration
 
 ### Android
@@ -87,7 +141,9 @@ your build customizes manifest merging:
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application>
         <service
@@ -276,21 +332,44 @@ complete. See Apple's [`startUpdatingLocation()`
 documentation](https://developer.apple.com/documentation/corelocation/cllocationmanager/startupdatinglocation())
 and [`CLBackgroundActivitySession`](https://developer.apple.com/documentation/corelocation/clbackgroundactivitysession-3mzv3).
 
-## Quick start
+For applications that accept reduced, OS-controlled sampling in exchange for
+best-effort process relaunch, opt into the distinct significant-change mode:
 
-Keep one `TrackingClient` for the lifetime of the tracking feature. Call
-`initialize()` before reading stored tracks or issuing commands.
+```dart
+const config = TrackingConfig(
+  iosTerminationRecoveryMode:
+      IosTerminationRecoveryMode.significantChange,
+);
+```
+
+This mode is not equivalent to continuous GPS. On a relaunch it preserves the
+same track identity, reports `recoveredFromTermination`, and labels the
+possible missing interval instead of inventing points. The default
+`IosTerminationRecoveryMode.interrupted` keeps continuous tracking semantics
+and requires manual Resume after termination. User force-quit remains
+non-recoverable in both modes until the user opens the app. A host that creates
+its Flutter engine lazily can call
+`FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` from its iOS
+Core Location launch path before attaching UI. Physical qualification is still
+required for every supported device/OS bucket before making a recovery claim.
+
+## Detailed integration guide
+
+Prefer one awaited, owner-bound `TrackingController` for the application
+lifetime. The legacy constructor remains available for existing integrations.
 
 ```dart
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
-final tracking = TrackingClient(
-  // keepAll is the default retention policy.
-  configuration: const TrackingConfiguration(),
-);
+late final TrackingController tracking;
 
 Future<void> initializeTracking() async {
-  await tracking.initialize();
+  tracking = await TrackingClient.open(
+    owner: const TrackingOwner(
+      userId: 'user-42',
+      organizationId: 'organization-7',
+    ),
+  );
 
   tracking.statusStream.listen((status) {
     print('state=${status.lifecycle.name} track=${status.trackId}');
@@ -311,35 +390,118 @@ Future<void> initializeTracking() async {
 }
 ```
 
-Request permission from a user-initiated action and handle the staged flow.
-Return without starting until the normalized state confirms Always/background
-access:
+Use the replaying session snapshot to drive lifecycle buttons:
+
+```dart
+final sessionSubscription = tracking.sessionStream.listen((session) {
+  startButton.enabled = session.allowedActions.canStartNew;
+  pauseButton.enabled = session.allowedActions.canPause;
+  resumeButton.enabled = session.allowedActions.canResume;
+  completeButton.enabled = session.allowedActions.canComplete;
+});
+```
+
+Check readiness without prompting, then request only the next permission step
+from a user-initiated action. Return without starting until the normalized state
+confirms Always/background access:
 
 ```dart
 Future<bool> preparePermissions() async {
-  final state = await tracking.permissions(request: true);
+  final readiness = await tracking.checkReadiness();
+  if (readiness.canStart) return true;
 
-  if (state.canTrackInBackground) return true;
-
-  if (state.canRequestBackground) {
-    // Show an explanation. Require another explicit user action to call this
-    // function again for the Android 10/iOS Always elevation request.
-    return false;
+  switch (readiness.nextAction) {
+    case TrackingReadinessAction.requestForegroundLocation:
+    case TrackingReadinessAction.requestBackgroundLocation:
+    case TrackingReadinessAction.requestNotification:
+    case TrackingReadinessAction.requestActivityRecognition:
+      await tracking.requestNextPermission();
+      return false;
+    case TrackingReadinessAction.explainBackgroundLocation:
+      // Show your explanation first. On the user's next affirmative gesture:
+      await tracking.acknowledgeReadinessEducation(
+        'background_location_explanation_required',
+      );
+      return false;
+    case TrackingReadinessAction.openAppSettings:
+    case TrackingReadinessAction.enableLocationServices:
+    case TrackingReadinessAction.enablePreciseLocation:
+      await tracking.openSettings(TrackingSettingsDestination.application);
+      return false;
+    case TrackingReadinessAction.none:
+      return true;
+    case TrackingReadinessAction.unsupported:
+    case TrackingReadinessAction.unknown:
+      throw StateError('Background tracking is unavailable on this device.');
   }
-
-  if (state.requiresSettings ||
-      !state.preciseLocation ||
-      !state.notificationGranted ||
-      state.location == LocationPermissionLevel.deniedForever) {
-    // Explain the exact setting before navigating away from the app. Recheck
-    // permissions after the application resumes from Settings.
-    await tracking.openAppSettings();
-    return false;
-  }
-
-  throw StateError(state.message ?? 'Background location is unavailable.');
 }
 ```
+
+The older `permissions(request: true)` helper remains available for existing
+apps, but new integrations should prefer `checkReadiness()` plus
+`requestNextPermission()` so permission prompts stay staged and user-driven.
+
+For device setup screens and diagnostics:
+
+```dart
+final diagnostics = tracking as TrackingDiagnosticsController;
+final battery = await diagnostics.batteryOptimizationState();
+if (battery.supported && !battery.isIgnoringBatteryOptimizations) {
+  await tracking.openSettings(
+    TrackingSettingsDestination.batteryOptimization,
+  );
+}
+
+final health = diagnostics.currentHealth; // no coordinates included
+final doctor = await diagnostics.runSetupDoctor();
+final supportReport = await diagnostics.createSupportReport();
+// supportReport.toRedactedMap() excludes coordinates, route/owner IDs,
+// filenames, command tokens, and raw native exception payloads.
+```
+
+If a readiness action needs the host to show its own explanation, do not open
+Settings or request another permission automatically. Let the user tap the next
+button.
+
+Read recorded-route summaries without loading every point:
+
+```dart
+final firstPage = await tracking.listTrackPage(
+  TrackQuery(
+    statuses: const <TrackStatus>{TrackStatus.completed},
+    limit: 25,
+  ),
+);
+
+for (final route in firstPage.items) {
+  print('${route.routeId ?? route.id}: ${route.acceptedPointCount} points');
+}
+```
+
+If a previous signed-in owner left a live native capture, the owner-bound
+session exposes `owner_scope_conflict` and an opaque one-use recovery token,
+never the foreign route or owner identity. After an explicit warning/confirmation
+gesture, preserve that capture as paused before allowing the new owner to start:
+
+```dart
+final blocked = tracking.currentSession;
+final token = blocked.blockerRecoveryToken;
+if (blocked.blockerCode == 'owner_scope_conflict' && token != null) {
+  final hostPersistedOperationId =
+      'owner-conflict-${DateTime.now().microsecondsSinceEpoch}';
+  // Persist this ID until the confirmation attempt reaches a terminal result.
+  await tracking.resolveOwnerConflict(
+    OwnerConflictResolutionRequest(
+      conflictToken: token,
+      operationId: hostPersistedOperationId,
+      confirmed: true,
+    ),
+  );
+}
+```
+
+`hostPersistedOperationId` must be a stable idempotency key generated and kept
+by the host for that confirmation attempt.
 
 Start, pause, resume, and complete a track:
 
@@ -350,26 +512,34 @@ Future<void> startTrip() async {
   if (!await preparePermissions()) return;
 
   try {
-    activeTrackId = await tracking.startTrack(
-      userId: 'user-42',
-      organizationId: 'organization-7',
-      routeId: 'Morning delivery route',
-      config: const TrackingConfig(
-        accuracy: TrackingAccuracy.high,
-        movingInterval: Duration(seconds: 15),
-        movingDistanceFilterMeters: 15,
-        stationaryInterval: Duration(minutes: 2),
-        stationaryDistanceFilterMeters: 75,
-        mockLocationPolicy: MockLocationPolicy.flag,
-        androidNotificationTitle: 'Trip recording is active',
-        androidNotificationText: 'Tap to return to the app',
+    final result = await tracking.startOrRecoverTrack(
+      const TrackStartRequest(
+        owner: TrackingOwner(
+          userId: 'user-42',
+          organizationId: 'organization-7',
+        ),
+        routeId: 'Morning delivery route',
+        config: TrackingConfig(
+          accuracy: TrackingAccuracy.high,
+          movingInterval: Duration(seconds: 15),
+          movingDistanceFilterMeters: 15,
+          stationaryInterval: Duration(minutes: 2),
+          stationaryDistanceFilterMeters: 75,
+          mockLocationPolicy: MockLocationPolicy.flag,
+          androidNotificationTitle: 'Trip recording is active',
+          androidNotificationText: 'Tap to return to the app',
+        ),
       ),
     );
-  } on TrackingPermissionException catch (error) {
-    final state = error.state;
-    if (state.requiresSettings) {
-      await tracking.openAppSettings();
-    }
+    activeTrackId = result.trackId;
+  } on TrackingNotReadyException {
+    // Re-run preparePermissions() from the next user gesture.
+    rethrow;
+  } on TrackingConflictException {
+    // A same-owner route is already active/resumable. Show Resume/Complete.
+    rethrow;
+  } on TrackingOwnershipException {
+    // Another account/owner has unresolved local tracking state.
     rethrow;
   }
 }
@@ -414,10 +584,11 @@ retried, supply one stable, unique `operationId` for that logical pause or
 completion. Do not reuse it for a later, separate pause. A completed track
 cannot be resumed.
 
-When `startTrack()` finds the existing active track, it reconciles and returns
-that track instead of creating a duplicate. When it finds the latest paused or
-interrupted track, it resumes that track. To begin a genuinely new session,
-complete the previous track first.
+Use `startOrRecoverTrack()` when a Start button should safely recover the same
+owner's active, paused, or interrupted route. Use `startNewTrack()` when the
+user explicitly wants a fresh route; it throws `active_track_conflict` if
+anything resumable already exists. The legacy `startTrack()` wrapper remains
+available for older apps and keeps its start-or-recover behavior.
 
 ## Recommended UI state
 
@@ -427,7 +598,7 @@ independent native-state flag.
 | Lifecycle | Enable |
 |---|---|
 | `idle` | Start |
-| `starting` | Complete |
+| `starting` | No repeated command |
 | `tracking` | Pause, Complete |
 | `paused` | Resume, Complete |
 | `interrupted` or `failed` | Resume, Complete |
@@ -449,8 +620,8 @@ evidence, validation results, and upload state are point-level facts. It exposes
 segments so the application can render the stored route as line geometry.
 
 ```dart
-final tracks = await tracking.listTracks();
-final bundle = await tracking.loadTrackBundle(tracks.first.id);
+final page = await tracking.listTrackPage(TrackQuery(limit: 25));
+final bundle = await tracking.loadTrackBundle(page.items.first.id);
 
 final routeSegments = bundle.segments
     .map(
@@ -471,7 +642,88 @@ how to display recorded tracks with `maplibre_gl` and the OpenFreeMap Liberty
 street style; applications can use MapLibre, Google Maps, Apple MapKit, or any
 other renderer.
 
+### Optional derived geometry
+
+Raw point coordinates are immutable. To create a separately versioned,
+post-capture smoothed route, use the additive geometry capability:
+
+```dart
+final geometry = tracking as TrackingGeometryController;
+final run = await geometry.deriveGeometry(
+  completedTrackId,
+  request: const DerivedGeometryRequest(
+    name: 'display_smoothing',
+    algorithmVersion: '1',
+    smoothingFactor: 0.35,
+  ),
+);
+
+final mapBundle = await geometry.loadTrackGeometry(
+  completedTrackId,
+  geometry: TrackGeometrySelection.derived(run.id),
+);
+```
+
+Each run stores its algorithm, version, configuration, source snapshot,
+optional map-data provenance, and derivation time. Smoothing restarts at every
+pause/resume segment. Deleting a run deletes only derived rows; loading raw
+geometry after deletion returns the original route unchanged. Hosts can add a
+separate map-matching integration by implementing the repository capability;
+no proprietary map service is required by this package.
+
 ## Exporting a completed route
+
+For long or densely sampled routes, prefer the bounded V2 exporter. Reuse the
+same initialized repository supplied to `TrackingClient`; do not open a second
+database owner solely for export.
+
+```dart
+final exporter = TrackExportServiceV2(
+  repository: repository,
+  owner: const TrackingOwner(
+    userId: 'signed-in-user',
+    organizationId: 'organization',
+  ),
+);
+final operation = await exporter.exportTrackV2(
+  TrackExportRequest(
+    trackId: completedTrackId,
+    format: TrackExportFormat.gpx,
+    fileName: 'warehouse inspection',
+  ),
+);
+final progress = operation.progress.listen((value) {
+  print('${value.pointsWritten} points, ${value.bytesWritten} bytes');
+});
+try {
+  final exported = await operation.result;
+  print(exported.destination.contentUri ??
+      exported.destination.localFilePath);
+
+  final shareFile = await exporter.prepareExportForSharing(exported);
+  try {
+    // Pass shareFile.path to the host application's sharing package.
+  } finally {
+    await shareFile.delete();
+  }
+} finally {
+  await progress.cancel();
+}
+```
+
+To export a completed derived run, set
+`TrackExportOptions(geometry: TrackGeometrySelection.derived(run.id))`. The V2
+GeoJSON/KML/GPX output labels its source as `derived:<run-id>`. Raw remains the
+default and is labeled `raw`. Derived exports intentionally reject
+`includeRejectedPoints`, because rejected points have no derived coordinates.
+
+On Android 10+, `contentUri` is the reopenable MediaStore handle and
+`displayPath` is informational only. On iOS and pre-scoped-storage Android,
+`localFilePath` is present instead. Exactly one of those two access handles is
+set. The package adds no sharing dependency.
+
+The compatibility exporter below materializes a complete route and returns its
+legacy required `path`. Keep it for existing integrations and bounded routes.
 
 Ask the user for a name, then pass the selected format and name to
 `exportTrack()`. The correct extension is added or repaired automatically.
@@ -510,8 +762,11 @@ The default destination is:
 
 Android 10 and later use MediaStore and do not need broad storage permission.
 For Android 9 and earlier, public Downloads access follows legacy Android
-storage rules; use an application-approved storage flow or inject a custom
-`ExportFileWriter` when supporting those releases.
+storage rules. The plugin manifest declares `WRITE_EXTERNAL_STORAGE` only up to
+API 28, and the default writer returns `export_storage_permission_required`
+unless the host has already requested that permission from the user's explicit
+Export action. If you do not want to request legacy storage permission, inject a
+custom `ExportFileWriter` for those releases.
 
 If a file already exists, the package adds `_1`, `_2`, and so on. Export files
 are plaintext and may reveal sensitive routes. Delete temporary exports after
@@ -541,6 +796,46 @@ const options = TrackExportOptions(
 - GPX writes one `<trkseg>` per stored segment, including one-fix segments.
 - Rejected points can be included as diagnostics but never enter route
   geometry when their coordinates are invalid or non-finite.
+
+### Abort, delete, and erase are different operations
+
+`Complete` retains a successful route. The additive `TrackingPrivacyService`
+keeps destructive/exceptional actions explicit and owner-scoped:
+
+| Action | Route record | Native journal | Upload outbox | Managed exports |
+|---|---|---|---|---|
+| Abort | Retained as cancelled audit route | Selected track cleared | Removed | Retained |
+| Delete | Terminal route removed | Selected track cleared | Removed | Explicit choice |
+| Erase | Selected route removed | Selected track cleared | Removed | Removed when managed |
+
+Construct it with the same initialized repository, tracker adapter, owner, and
+V2 export service used by the application-scoped tracking owner:
+
+```dart
+final privacy = TrackingPrivacyService(
+  repository: repository,
+  tracker: trackerAdapter,
+  owner: currentOwner,
+  managedExports: exporter,
+);
+
+await privacy.abortCurrentTrack(
+  const AbortTrackRequest(reason: 'operator_cancelled'),
+);
+
+await privacy.deleteRecordedTrack(
+  DeleteTrackRequest(
+    trackId: selectedTrack.id,
+    deleteManagedExports: true,
+    confirmed: true, // Set only after explicit host UI confirmation.
+  ),
+);
+```
+
+Retry a command with the same optional `operationId` for idempotent recovery.
+Erase is logical deletion across package-managed storage; SQLite and flash
+hardware do not provide a physical secure-erasure guarantee, and the package
+cannot remove a route file copied by another application or user.
 
 ## Retaining track history
 
@@ -632,6 +927,7 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 | `largeGapThreshold` | 5 minutes | Flag long gaps between accepted fixes |
 | `batchPointCount` | 25 | Point threshold for an optional uploader |
 | `batchMaxAge` | 2 minutes | Time threshold for an optional uploader |
+| `iosTerminationRecoveryMode` | `interrupted` | Standard/manual recovery or opt-in significant-change relaunch semantics |
 
 Operating systems may batch, delay, coalesce, or skip callbacks. Shortening an
 interval does not guarantee that frequency. `precised` can materially increase
@@ -652,6 +948,50 @@ evidence is unavailable, it remains on the moving profile.
 Battery results depend on the device, OS version, OEM policy, satellite and
 network conditions, route, screen use, and configuration. Measure route
 fidelity and battery drain together on the same devices your users carry.
+
+### Bounded adaptive policy
+
+Adaptive changes are disabled unless the host constructs a versioned policy.
+The default policy mode is `shadow`: it reports a proposed profile without
+changing native capture. Fidelity bounds cap every interval/filter and the
+engine always preserves the static configuration's
+`maximumAcceptedAccuracyMeters` and `mockLocationPolicy`.
+
+```dart
+final engine = AdaptiveBatteryPolicyEngine(
+  staticConfig: const TrackingConfig(accuracy: TrackingAccuracy.high),
+  policy: const AdaptiveBatteryPolicy(
+    version: 1,
+    mode: AdaptiveBatteryMode.shadow,
+    bounds: AdaptiveFidelityBounds(
+      leastAccurateProfile: TrackingAccuracy.medium,
+      maximumMovingInterval: Duration(seconds: 30),
+      maximumMovingDistanceFilterMeters: 25,
+      maximumStationaryInterval: Duration(minutes: 3),
+      maximumStationaryDistanceFilterMeters: 100,
+    ),
+  ),
+);
+final coordinator = AdaptiveTrackingCoordinator(
+  controller: tracking as TrackingConfigurationController,
+  engine: engine,
+);
+final decision = await coordinator.observe(
+  AdaptiveBatteryObservation(
+    observedAt: DateTime.now(),
+    batteryPercent: batteryPercent,
+    charging: charging,
+    lowPowerMode: lowPowerMode,
+  ),
+);
+print(decision.toRedactedMap());
+```
+
+Move to `AdaptiveBatteryMode.apply` only after shadow traces and physical
+battery/route benchmarks justify it. Applied transitions use immutable runtime
+configuration epochs, minimum residence time, and a maximum transition rate.
+`disableAndRestore()` returns to the static policy through the same atomic
+epoch path.
 
 ## Mock-location interpretation
 
@@ -676,7 +1016,8 @@ The plugin does not choose an HTTP client or backend protocol. Supply a
 `TrackUploader` when you want durable ordered batches:
 
 ```dart
-final tracking = TrackingClient(
+final tracking = await TrackingClient.open(
+  owner: TrackingOwner(userId: userId, organizationId: organizationId),
   uploader: MyTrackUploader(),
 );
 
@@ -712,8 +1053,69 @@ class MyTrackUploader implements IdempotentTrackCompletionUploader {
 
 Accepted points remain in a SQLite outbox until acknowledged. Retries use
 persisted leases, bounded batches, exponential backoff, jitter, and stable
-idempotency keys. Your server must still enforce idempotency and sequence
-semantics.
+idempotency keys. Discovery and draining stay inside the bound owner scope.
+Your server must still enforce idempotency and sequence semantics.
+
+## Runtime configuration updates
+
+An active owner-bound controller also implements
+`TrackingConfigurationController`. Updates are validated, native producers are
+fenced, pending journal events are drained, and a new immutable epoch is
+activated before capture resumes:
+
+```dart
+final configurable = tracking as TrackingConfigurationController;
+final result = await configurable.updateTrackingConfig(
+  const TrackingConfig(accuracy: TrackingAccuracy.medium),
+);
+print('active configuration epoch: ${result.epoch.epochNumber}');
+```
+
+Individual `TrackingConfig` values continue to override only their matching
+preset values. Existing points remain associated with their original epoch.
+
+## Host application tests
+
+Testing utilities are deliberately kept out of the normal runtime import:
+
+```dart
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
+import 'package:flutter_background_location_tracker/flutter_background_location_tracker_testing.dart';
+
+final fake = FakeTrackingController(
+  owner: const TrackingOwner(userId: 'test-user', organizationId: 'test-org'),
+);
+```
+
+The testing library also provides `DeterministicTrackingClock`, synthetic
+walking/stationary routes, common permission fixtures,
+`TemporaryTrackRepositoryFixture`, a faultable `FakeTrackerAdapter`, a
+filesystem-free `FakeExportFileWriter`, and interrupted-session seeding. The
+fake supports deterministic ready → Start → point → Pause → Resume → Complete
+widget flows and records calls so tests can prove a readiness check did not
+prompt or start native capture. See `example/test/widget_test.dart`.
+
+### Provider, Riverpod, and Bloc
+
+Keep the controller application-scoped regardless of state framework. The
+package adds no dependency on any of them:
+
+```dart
+// Provider: create once above MaterialApp; do not auto-dispose while active.
+Provider<TrackingController>.value(value: tracking, child: const App());
+
+// Riverpod: expose the already-open owner-bound instance.
+final trackingProvider = Provider<TrackingController>((ref) => tracking);
+
+// Bloc: subscribe once, then translate package snapshots into app state.
+subscription = tracking.sessionStream.listen(
+  (session) => add(TrackingSessionChanged(session)),
+);
+```
+
+Widgets should render `session.allowedActions`; framework state must not invent
+a second lifecycle machine. Cancel UI subscriptions when widgets/blocs are
+disposed, but dispose the application controller only after Pause or Complete.
 
 ## Lifecycle limits
 
@@ -780,10 +1182,10 @@ notification permission, `requiresSettings`, and `canRequestBackground`.
 
 ### `tracking_already_active` or `already_tracking`
 
-Use one client and one active track. Initialize first, restore state from
-`statusStream` or `watchCurrentTrack()`, and do not call native start methods
-directly. The high-level `startTrack()` method reconciles an existing active or
-paused session.
+Use one application-scoped controller and drive the UI from `sessionStream`.
+Do not call native Start directly. Prefer `startOrRecoverTrack(...)` to reuse or
+resume the same owner's route; use `resolveOwnerConflict(...)` only after an
+explicit confirmation when the redacted blocker belongs to a previous owner.
 
 ### Export says only completed tracks are allowed
 

@@ -1,0 +1,45 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "trackId": "characterization-route",
+        "routeId": null,
+        "startedAt": "2026-07-20T08:00:00.000Z",
+        "completedAt": "2026-07-20T08:11:00.000Z",
+        "status": "completed",
+        "segmentCount": 2,
+        "acceptedPointCount": 4,
+        "rejectedPointCount": 1,
+        "distanceMeters": 0.0,
+        "geometrySource": "raw"
+      },
+      "geometry": {
+        "type": "MultiLineString",
+        "coordinates": [
+          [
+            [
+              85.3,
+              27.7
+            ],
+            [
+              85.3,
+              27.7
+            ]
+          ],
+          [
+            [
+              85.4,
+              27.8
+            ],
+            [
+              85.4,
+              27.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

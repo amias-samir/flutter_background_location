@@ -1,6 +1,11 @@
 import CoreLocation
 import Foundation
 
+enum IOSTerminationRecoveryMode: String {
+  case interrupted
+  case significantChange
+}
+
 struct TrackingConfiguration {
   let movingIntervalMs: Double
   let movingDistanceFilterMeters: Double
@@ -18,6 +23,7 @@ struct TrackingConfiguration {
   let stationaryConfidenceThreshold: Int
   let movingConfidenceThreshold: Int
   let movingConfirmationCount: Int
+  let terminationRecoveryMode: IOSTerminationRecoveryMode
 
   static let defaults = TrackingConfiguration(dictionary: [:])
 
@@ -96,6 +102,9 @@ struct TrackingConfiguration {
       minimum: 1,
       maximum: 20
     )
+    terminationRecoveryMode = IOSTerminationRecoveryMode(
+      rawValue: (dictionary["iosTerminationRecoveryMode"] as? String) ?? ""
+    ) ?? .interrupted
   }
 
   var dictionary: [String: Any] {
@@ -117,6 +126,7 @@ struct TrackingConfiguration {
       "stationaryConfidenceThreshold": stationaryConfidenceThreshold,
       "movingConfidenceThreshold": movingConfidenceThreshold,
       "movingConfirmationCount": movingConfirmationCount,
+      "iosTerminationRecoveryMode": terminationRecoveryMode.rawValue,
     ]
   }
 

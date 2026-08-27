@@ -6,12 +6,28 @@ This app demonstrates:
 - route-identifier entry when starting, with whitespace normalization and a
   unique UTC date-time suffix;
 - Start, Pause, Resume, and Complete lifecycle controls;
+- read-only readiness checks, staged permission-step requests, and replaying
+  session actions;
 - live status, activity, motion, mock-location, and point evidence;
 - latest-only and keep-all track retention;
 - recorded-track history with per-route actions;
 - MapLibre street-map route display;
 - user-named GeoJSON, KML, and GPX export;
 - confirmed deletion of a selected completed route.
+- a coordinate-free diagnostics/setup-doctor panel;
+- dependency injection through the public testing fake for widget tests.
+
+The example is split into copyable integration units:
+
+- `lib/main.dart` owns exactly one owner-bound `TrackingController` and the
+  staged readiness/lifecycle flow;
+- `lib/recorded_tracks_section.dart` contains paged route summaries and every
+  overflow action;
+- `lib/route_map_page.dart` renders pause-safe segments with MapLibre and the
+  OpenFreeMap Liberty street style;
+- `lib/tracking_controls.dart` contains session-driven controls, accuracy, and
+  retention UI;
+- `lib/tracking_dialogs.dart` contains route/export naming gestures.
 
 ## Run the example
 
@@ -34,11 +50,17 @@ The retention selector starts with **Keep all** selected. Every completed route
 therefore remains in the recorded-route list until the user deletes it or
 changes the selector to **Latest only** before starting a new route.
 
-The example starts routes with `TrackingAccuracy.precised` and then overrides
-the moving distance, interval, and accepted-accuracy values to demonstrate the
-configuration precedence rules. Host apps can normally use the default
-`TrackingAccuracy.high`, select `low`/`medium` for longer battery life, or use
-`precised` only when dense geometry is required.
+The example defaults to `TrackingAccuracy.high`. Developers can select
+`low`/`medium` for less frequent sampling, while `precised` is an explicit
+high-consumption choice and displays a battery warning. Individual
+`TrackingConfig` fields still override the selected preset.
+
+The example widget tests inject `FakeTrackingController` from
+`flutter_background_location_tracker_testing.dart`; they exercise interrupted
+restoration, every recorded-route overflow action, and pause-safe map segments
+without method channels, a device, or filesystem access. The public testing
+library also includes deterministic clocks, synthetic routes, permission
+fixtures, a temporary SQLite fixture, and faultable adapter/export doubles.
 
 ## Android permission setup
 
@@ -64,7 +86,9 @@ its merged release manifest if it uses custom manifest rules:
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application>
         <service
@@ -217,6 +241,17 @@ as interrupted so the user can explicitly resume it. On iOS 17 and later the
 plugin uses `CLBackgroundActivitySession` while the route is active; this session
 is invalidated on Pause and Complete.
 
+The example keeps the safe default
+`IosTerminationRecoveryMode.interrupted`. A host can explicitly choose
+`IosTerminationRecoveryMode.significantChange` in `TrackingConfig` when it
+accepts reduced, OS-controlled sampling in exchange for best-effort relaunch
+after some operating-system terminations. That mode records a possible gap and
+never synthesizes missing points. User force-quit remains non-recoverable until
+the app is opened. A lazily created Flutter engine must call the public iOS
+`FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` launch hook.
+Run the package's private-evidence validator before publishing any recovery
+claim; simulator success is not evidence.
+
 ## Permission troubleshooting
 
 If Start remains disabled or throws `TrackingPermissionException`, check:
@@ -230,7 +265,17 @@ If Start remains disabled or throws `TrackingPermissionException`, check:
   `Info.plist` keys.
 
 Permissions can be revoked while the app is installed. Recheck them before
-every start or resume and after returning from system settings.
+every start or resume and after returning from system settings. New host
+integrations should prefer `checkReadiness()`, `requestNextPermission()`,
+`openSettings(...)`, and `sessionStream` instead of duplicating permission and
+button-state rules in each page.
+
+For new app integrations, prefer `startOrRecoverTrack(TrackStartRequest(...))`
+for the main Start button. It recovers the same owner's active, paused, or
+interrupted route and returns a `TrackStartResult.disposition` explaining what
+happened. Use `startNewTrack(...)` only when the user intentionally wants a
+fresh route and you want an explicit `active_track_conflict` if a resumable
+route already exists.
 
 ## Recorded route actions
 
@@ -248,6 +293,12 @@ Export actions are enabled after a route is completed. Delete is enabled only
 for terminal routes (completed or failed). Active, paused, interrupted,
 starting, and stopping routes remain protected so the UI cannot orphan a
 native tracking session or remove a route that can still be resumed.
+
+On Android 10 and later, exports use MediaStore and do not need broad storage
+permission. On Android 9 and earlier, public Downloads export requires the
+legacy `WRITE_EXTERNAL_STORAGE` permission from the user's Export gesture; if it
+is missing, the native writer returns `export_storage_permission_required`
+without writing a partial file.
 
 The same deletion operation is available to host applications:
 

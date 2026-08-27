@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "minimumComparableRouteRuns": 5,
+  "minimumTerminationRecoveryRuns": 30,
+  "platforms": ["android", "ios"],
+  "presets": ["low", "medium", "high", "precised"],
+  "routeScenarios": [
+    "walking",
+    "cycling",
+    "vehicle",
+    "stationary",
+    "indoor",
+    "weak_signal",
+    "urban_canyon",
+    "intermittent_connectivity"
+  ],
+  "powerStates": [
+    "foreground",
+    "background",
+    "screen_locked",
+    "low_power",
+    "thermal_pressure"
+  ],
+  "iosRecoveryScenarios": [
+    "foreground",
+    "home",
+    "locked",
+    "suspended",
+    "process_termination",
+    "reboot",
+    "user_force_quit"
+  ],
+  "requiredMetricKeys": [
+    "distanceErrorMeanMeters",
+    "distanceErrorStdDevMeters",
+    "stationaryDriftMeanMeters",
+    "stationaryDriftStdDevMeters",
+    "firstFixMeanSeconds",
+    "longestCallbackGapSeconds",
+    "batteryMahPerHourMean",
+    "batteryMahPerHourStdDev",
+    "cpuSecondsPerHourMean",
+    "peakRssMbMean",
+    "wakeupsPerHourMean"
+  ],
+  "forbiddenKeyFragments": [
+    "latitude",
+    "longitude",
+    "coordinate",
+    "participant",
+    "authToken"
+  ]
+}

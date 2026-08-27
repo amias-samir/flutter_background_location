@@ -1,0 +1,255 @@
+{
+  "responses": {
+    "getCapabilities": {
+      "platform": "android",
+      "backgroundTracking": true,
+      "activityRecognition": true,
+      "mockDetection": true,
+      "pauseResume": true,
+      "adaptiveSampling": true,
+      "terminatedRecovery": true,
+      "rebootRestartBestEffort": true
+    },
+    "getPermissionStatus": {
+      "platform": "android",
+      "location": "always",
+      "locationServiceEnabled": true,
+      "preciseLocation": true,
+      "activityRecognitionGranted": true,
+      "notificationGranted": true,
+      "requiresSettings": false,
+      "canRequestBackground": false
+    },
+    "requestPermissions": {
+      "platform": "android",
+      "location": "always",
+      "locationServiceEnabled": true,
+      "preciseLocation": true,
+      "activityRecognitionGranted": true,
+      "notificationGranted": true,
+      "requiresSettings": false,
+      "canRequestBackground": false
+    },
+    "isTracking": true,
+    "getState": {
+      "lifecycle": "tracking",
+      "trackId": "track-1",
+      "lastPointAt": 1784534400000,
+      "motionState": "moving",
+      "samplingProfile": "moving",
+      "pendingUserAction": {
+        "actionId": "action-1",
+        "trackId": "track-1",
+        "action": "pause",
+        "reason": "notification_paused",
+        "timestamp": 1784534400000
+      }
+    },
+    "getLastLocation": {
+      "lat": 27.7,
+      "lon": 85.3,
+      "timestamp": 1784534400000,
+      "accuracy": 5,
+      "isMocked": false,
+      "mockDetectionAvailable": true,
+      "provider": "fused",
+      "eventId": "event-1",
+      "trackId": "track-1",
+      "activityType": "walking",
+      "activityConfidence": 80,
+      "activityTimestamp": 1784534400000,
+      "motionState": "moving"
+    },
+    "getPendingLocations": [
+      {
+        "lat": 27.7,
+        "lon": 85.3,
+        "timestamp": 1784534400000,
+        "accuracy": 5,
+        "isMocked": false,
+        "mockDetectionAvailable": true,
+        "provider": "fused",
+        "eventId": "event-1",
+        "trackId": "track-1",
+        "activityType": "walking",
+        "activityConfidence": 80,
+        "activityTimestamp": 1784534400000,
+        "motionState": "moving"
+      },
+      {
+        "lat": 27.8,
+        "lon": 85.4,
+        "timestamp": 1784534415000,
+        "accuracy": 7,
+        "isMocked": true,
+        "mockDetectionAvailable": true,
+        "mockEvidence": "test_provider",
+        "provider": "fused",
+        "eventId": "event-2",
+        "trackId": "track-1",
+        "activityType": "in_vehicle",
+        "activityConfidence": 90,
+        "activityTimestamp": 1784534415000,
+        "motionState": "moving"
+      }
+    ],
+    "openAppSettings": true
+  },
+  "expectedCalls": [
+    {
+      "method": "initialize",
+      "arguments": null
+    },
+    {
+      "method": "getCapabilities",
+      "arguments": null
+    },
+    {
+      "method": "getPermissionStatus",
+      "arguments": null
+    },
+    {
+      "method": "requestPermissions",
+      "arguments": null
+    },
+    {
+      "method": "startTracking",
+      "arguments": {
+        "trackId": "track-1",
+        "config": {
+          "accuracy": "high",
+          "desiredAccuracy": "high",
+          "movingDistanceFilterMeters": 15,
+          "movingIntervalMs": 15000,
+          "stationaryDistanceFilterMeters": 75,
+          "stationaryIntervalMs": 120000,
+          "maximumAcceptedAccuracyMeters": 60,
+          "maximumPlausibleSpeedMetersPerSecond": 70,
+          "stationaryConfirmationMs": 90000,
+          "stationaryProbeDisplacementMeters": 30,
+          "stationaryConfidenceThreshold": 75,
+          "movingConfidenceThreshold": 60,
+          "movingConfirmationCount": 2,
+          "activityRecognitionIntervalMs": 10000,
+          "mockLocationPolicy": "flag",
+          "batchPointCount": 25,
+          "batchMaxAgeMs": 120000,
+          "largeGapThresholdMs": 300000,
+          "firstFixTimeoutMs": 60000,
+          "notificationTitle": "Location tracking active",
+          "notificationText": "Recording your route"
+        }
+      }
+    },
+    {
+      "method": "pauseTracking",
+      "arguments": {
+        "trackId": "track-1"
+      }
+    },
+    {
+      "method": "resumeTracking",
+      "arguments": {
+        "trackId": "track-1",
+        "config": {
+          "accuracy": "high",
+          "desiredAccuracy": "high",
+          "movingDistanceFilterMeters": 15,
+          "movingIntervalMs": 15000,
+          "stationaryDistanceFilterMeters": 75,
+          "stationaryIntervalMs": 120000,
+          "maximumAcceptedAccuracyMeters": 60,
+          "maximumPlausibleSpeedMetersPerSecond": 70,
+          "stationaryConfirmationMs": 90000,
+          "stationaryProbeDisplacementMeters": 30,
+          "stationaryConfidenceThreshold": 75,
+          "movingConfidenceThreshold": 60,
+          "movingConfirmationCount": 2,
+          "activityRecognitionIntervalMs": 10000,
+          "mockLocationPolicy": "flag",
+          "batchPointCount": 25,
+          "batchMaxAgeMs": 120000,
+          "largeGapThresholdMs": 300000,
+          "firstFixTimeoutMs": 60000,
+          "notificationTitle": "Location tracking active",
+          "notificationText": "Recording your route"
+        }
+      }
+    },
+    {
+      "method": "stopTracking",
+      "arguments": {
+        "trackId": "track-1",
+        "reason": "fixture_done"
+      }
+    },
+    {
+      "method": "updateConfig",
+      "arguments": {
+        "trackId": "track-1",
+        "config": {
+          "accuracy": "high",
+          "desiredAccuracy": "high",
+          "movingDistanceFilterMeters": 15,
+          "movingIntervalMs": 15000,
+          "stationaryDistanceFilterMeters": 75,
+          "stationaryIntervalMs": 120000,
+          "maximumAcceptedAccuracyMeters": 60,
+          "maximumPlausibleSpeedMetersPerSecond": 70,
+          "stationaryConfirmationMs": 90000,
+          "stationaryProbeDisplacementMeters": 30,
+          "stationaryConfidenceThreshold": 75,
+          "movingConfidenceThreshold": 60,
+          "movingConfirmationCount": 2,
+          "activityRecognitionIntervalMs": 10000,
+          "mockLocationPolicy": "flag",
+          "batchPointCount": 25,
+          "batchMaxAgeMs": 120000,
+          "largeGapThresholdMs": 300000,
+          "firstFixTimeoutMs": 60000,
+          "notificationTitle": "Location tracking active",
+          "notificationText": "Recording your route"
+        }
+      }
+    },
+    {
+      "method": "isTracking",
+      "arguments": null
+    },
+    {
+      "method": "getState",
+      "arguments": null
+    },
+    {
+      "method": "getLastLocation",
+      "arguments": null
+    },
+    {
+      "method": "getState",
+      "arguments": null
+    },
+    {
+      "method": "getPendingLocations",
+      "arguments": null
+    },
+    {
+      "method": "acknowledgeLocations",
+      "arguments": {
+        "eventIds": [
+          "event-1",
+          "event-2"
+        ]
+      }
+    },
+    {
+      "method": "openAppSettings",
+      "arguments": null
+    },
+    {
+      "method": "acknowledgePendingUserAction",
+      "arguments": {
+        "actionId": "action-1"
+      }
+    }
+  ]
+}

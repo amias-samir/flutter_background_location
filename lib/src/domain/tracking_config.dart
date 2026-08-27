@@ -1,8 +1,19 @@
 import 'dart:convert';
 
+import 'tracking_error.dart';
+
 enum MockLocationPolicy { allow, flag, reject }
 
 enum TrackRecordRetentionPolicy { keepLatestOnly, keepAll }
+
+/// iOS behavior after operating-system process termination.
+///
+/// [interrupted] keeps normal continuous tracking and requires an explicit
+/// Resume after a terminated process is relaunched. [significantChange] opts
+/// into Core Location significant-change monitoring, which has reduced and
+/// OS-controlled sampling but can request relaunch. User force-quit remains a
+/// non-recoverable boundary until the app is opened again.
+enum IosTerminationRecoveryMode { interrupted, significantChange }
 
 /// A predefined sampling and native location-accuracy profile.
 ///
@@ -63,6 +74,47 @@ enum TrackingAccuracy {
   }
 }
 
+/// Fully resolved sampling and validation values for an accuracy profile.
+final class ResolvedTrackingAccuracy {
+  const ResolvedTrackingAccuracy({
+    required this.movingInterval,
+    required this.distanceFilterMeters,
+    required this.locationAccuracy,
+    required this.stationaryInterval,
+    required this.stationaryDistanceFilterMeters,
+    required this.maximumAcceptedAccuracyMeters,
+  });
+
+  final Duration movingInterval;
+  final int distanceFilterMeters;
+  final TrackingAccuracy locationAccuracy;
+  final Duration stationaryInterval;
+  final int stationaryDistanceFilterMeters;
+  final double maximumAcceptedAccuracyMeters;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ResolvedTrackingAccuracy &&
+          movingInterval == other.movingInterval &&
+          distanceFilterMeters == other.distanceFilterMeters &&
+          locationAccuracy == other.locationAccuracy &&
+          stationaryInterval == other.stationaryInterval &&
+          stationaryDistanceFilterMeters ==
+              other.stationaryDistanceFilterMeters &&
+          maximumAcceptedAccuracyMeters == other.maximumAcceptedAccuracyMeters;
+
+  @override
+  int get hashCode => Object.hash(
+        movingInterval,
+        distanceFilterMeters,
+        locationAccuracy,
+        stationaryInterval,
+        stationaryDistanceFilterMeters,
+        maximumAcceptedAccuracyMeters,
+      );
+}
+
 /// Sampling, validation, and battery policy for a tracking session.
 final class TrackingConfig {
   const TrackingConfig({
@@ -84,9 +136,19 @@ final class TrackingConfig {
     this.batchPointCount = 25,
     this.batchMaxAge = const Duration(minutes: 2),
     this.largeGapThreshold = const Duration(minutes: 5),
+    Duration? firstFixTimeout,
     this.androidNotificationTitle = 'Location tracking active',
     this.androidNotificationText = 'Recording your route',
-  })  : locationAccuracy = locationAccuracy ?? accuracy,
+    this.iosTerminationRecoveryMode = IosTerminationRecoveryMode.interrupted,
+  })  : firstFixTimeout = firstFixTimeout ??
+            (accuracy == TrackingAccuracy.low
+                ? const Duration(minutes: 3)
+                : accuracy == TrackingAccuracy.medium
+                    ? const Duration(minutes: 2)
+                    : accuracy == TrackingAccuracy.precised
+                        ? const Duration(seconds: 45)
+                        : const Duration(minutes: 1)),
+        locationAccuracy = locationAccuracy ?? accuracy,
         movingDistanceFilterMeters = movingDistanceFilterMeters ??
             (accuracy == TrackingAccuracy.low
                 ? 50
@@ -164,8 +226,141 @@ final class TrackingConfig {
   final int batchPointCount;
   final Duration batchMaxAge;
   final Duration largeGapThreshold;
+  final Duration firstFixTimeout;
   final String androidNotificationTitle;
   final String androidNotificationText;
+  final IosTerminationRecoveryMode iosTerminationRecoveryMode;
+
+  ResolvedTrackingAccuracy get resolvedAccuracy => ResolvedTrackingAccuracy(
+        movingInterval: movingInterval,
+        distanceFilterMeters: movingDistanceFilterMeters,
+        locationAccuracy: locationAccuracy,
+        stationaryInterval: stationaryInterval,
+        stationaryDistanceFilterMeters: stationaryDistanceFilterMeters,
+        maximumAcceptedAccuracyMeters: maximumAcceptedAccuracyMeters,
+      );
+
+  TrackingConfig copyWith({
+    TrackingAccuracy? accuracy,
+    TrackingAccuracy? locationAccuracy,
+    int? movingDistanceFilterMeters,
+    Duration? movingInterval,
+    int? stationaryDistanceFilterMeters,
+    Duration? stationaryInterval,
+    double? maximumAcceptedAccuracyMeters,
+    double? maximumPlausibleSpeedMetersPerSecond,
+    Duration? stationaryConfirmationDuration,
+    double? stationaryProbeDisplacementMeters,
+    int? stationaryConfidenceThreshold,
+    int? movingConfidenceThreshold,
+    int? movingConfirmationCount,
+    Duration? activityRecognitionInterval,
+    MockLocationPolicy? mockLocationPolicy,
+    int? batchPointCount,
+    Duration? batchMaxAge,
+    Duration? largeGapThreshold,
+    Duration? firstFixTimeout,
+    String? androidNotificationTitle,
+    String? androidNotificationText,
+    IosTerminationRecoveryMode? iosTerminationRecoveryMode,
+  }) =>
+      TrackingConfig(
+        accuracy: accuracy ?? this.accuracy,
+        locationAccuracy: locationAccuracy ?? this.locationAccuracy,
+        movingDistanceFilterMeters:
+            movingDistanceFilterMeters ?? this.movingDistanceFilterMeters,
+        movingInterval: movingInterval ?? this.movingInterval,
+        stationaryDistanceFilterMeters: stationaryDistanceFilterMeters ??
+            this.stationaryDistanceFilterMeters,
+        stationaryInterval: stationaryInterval ?? this.stationaryInterval,
+        maximumAcceptedAccuracyMeters:
+            maximumAcceptedAccuracyMeters ?? this.maximumAcceptedAccuracyMeters,
+        maximumPlausibleSpeedMetersPerSecond:
+            maximumPlausibleSpeedMetersPerSecond ??
+                this.maximumPlausibleSpeedMetersPerSecond,
+        stationaryConfirmationDuration: stationaryConfirmationDuration ??
+            this.stationaryConfirmationDuration,
+        stationaryProbeDisplacementMeters: stationaryProbeDisplacementMeters ??
+            this.stationaryProbeDisplacementMeters,
+        stationaryConfidenceThreshold:
+            stationaryConfidenceThreshold ?? this.stationaryConfidenceThreshold,
+        movingConfidenceThreshold:
+            movingConfidenceThreshold ?? this.movingConfidenceThreshold,
+        movingConfirmationCount:
+            movingConfirmationCount ?? this.movingConfirmationCount,
+        activityRecognitionInterval:
+            activityRecognitionInterval ?? this.activityRecognitionInterval,
+        mockLocationPolicy: mockLocationPolicy ?? this.mockLocationPolicy,
+        batchPointCount: batchPointCount ?? this.batchPointCount,
+        batchMaxAge: batchMaxAge ?? this.batchMaxAge,
+        largeGapThreshold: largeGapThreshold ?? this.largeGapThreshold,
+        firstFixTimeout: firstFixTimeout ?? this.firstFixTimeout,
+        androidNotificationTitle:
+            androidNotificationTitle ?? this.androidNotificationTitle,
+        androidNotificationText:
+            androidNotificationText ?? this.androidNotificationText,
+        iosTerminationRecoveryMode:
+            iosTerminationRecoveryMode ?? this.iosTerminationRecoveryMode,
+      );
+
+  void validate({String context = 'TrackingConfig'}) {
+    final errors = <String>[];
+    if (movingDistanceFilterMeters < 0) {
+      errors.add('movingDistanceFilterMeters must be zero or greater');
+    }
+    if (stationaryDistanceFilterMeters < 0) {
+      errors.add('stationaryDistanceFilterMeters must be zero or greater');
+    }
+    _positiveDuration(errors, 'movingInterval', movingInterval);
+    _positiveDuration(errors, 'stationaryInterval', stationaryInterval);
+    _positiveDuration(
+      errors,
+      'stationaryConfirmationDuration',
+      stationaryConfirmationDuration,
+    );
+    _positiveDuration(
+      errors,
+      'activityRecognitionInterval',
+      activityRecognitionInterval,
+    );
+    _positiveDuration(errors, 'batchMaxAge', batchMaxAge);
+    _positiveDuration(errors, 'largeGapThreshold', largeGapThreshold);
+    _positiveDuration(errors, 'firstFixTimeout', firstFixTimeout);
+    _positiveFiniteDouble(
+      errors,
+      'maximumAcceptedAccuracyMeters',
+      maximumAcceptedAccuracyMeters,
+    );
+    _positiveFiniteDouble(
+      errors,
+      'maximumPlausibleSpeedMetersPerSecond',
+      maximumPlausibleSpeedMetersPerSecond,
+    );
+    if (!stationaryProbeDisplacementMeters.isFinite ||
+        stationaryProbeDisplacementMeters < 0) {
+      errors.add('stationaryProbeDisplacementMeters must be finite and >= 0');
+    }
+    _percent(
+        errors, 'stationaryConfidenceThreshold', stationaryConfidenceThreshold);
+    _percent(errors, 'movingConfidenceThreshold', movingConfidenceThreshold);
+    if (movingConfirmationCount <= 0) {
+      errors.add('movingConfirmationCount must be greater than zero');
+    }
+    if (batchPointCount <= 0) {
+      errors.add('batchPointCount must be greater than zero');
+    }
+    if (androidNotificationTitle.trim().isEmpty) {
+      errors.add('androidNotificationTitle must not be empty');
+    }
+    if (androidNotificationText.trim().isEmpty) {
+      errors.add('androidNotificationText must not be empty');
+    }
+    if (errors.isEmpty) return;
+    throw TrackingConfigurationException(
+      code: 'invalid_configuration',
+      message: '$context is invalid: ${errors.join('; ')}.',
+    );
+  }
 
   Map<String, Object?> toMap() => <String, Object?>{
         'accuracy': accuracy.name,
@@ -189,8 +384,12 @@ final class TrackingConfig {
         'batchPointCount': batchPointCount,
         'batchMaxAgeMs': batchMaxAge.inMilliseconds,
         'largeGapThresholdMs': largeGapThreshold.inMilliseconds,
+        'firstFixTimeoutMs': firstFixTimeout.inMilliseconds,
         'notificationTitle': androidNotificationTitle,
         'notificationText': androidNotificationText,
+        if (iosTerminationRecoveryMode !=
+            IosTerminationRecoveryMode.interrupted)
+          'iosTerminationRecoveryMode': iosTerminationRecoveryMode.name,
       };
 
   String toJson() => jsonEncode(toMap());
@@ -245,10 +444,24 @@ final class TrackingConfig {
       largeGapThreshold: Duration(
         milliseconds: integer('largeGapThresholdMs') ?? 300000,
       ),
+      firstFixTimeout: Duration(
+        milliseconds: integer('firstFixTimeoutMs') ??
+            (accuracy == TrackingAccuracy.low
+                ? 180000
+                : accuracy == TrackingAccuracy.medium
+                    ? 120000
+                    : accuracy == TrackingAccuracy.precised
+                        ? 45000
+                        : 60000),
+      ),
       androidNotificationTitle:
           map['notificationTitle'] as String? ?? 'Location tracking active',
       androidNotificationText:
           map['notificationText'] as String? ?? 'Recording your route',
+      iosTerminationRecoveryMode: IosTerminationRecoveryMode.values.firstWhere(
+        (mode) => mode.name == map['iosTerminationRecoveryMode'],
+        orElse: () => IosTerminationRecoveryMode.interrupted,
+      ),
     );
   }
 
@@ -283,4 +496,82 @@ final class TrackingConfiguration {
   final Duration uploadInitialBackoff;
   final Duration uploadMaximumBackoff;
   final Duration uploadRecoveryInterval;
+
+  TrackingConfiguration copyWith({
+    String? databaseName,
+    String? exportDirectoryName,
+    TrackRecordRetentionPolicy? recordRetentionPolicy,
+    TrackingConfig? defaultTrackingConfig,
+    int? maximumUploadBatchPointCount,
+    int? maximumUploadBatchBytes,
+    Duration? uploadLeaseDuration,
+    Duration? uploadInitialBackoff,
+    Duration? uploadMaximumBackoff,
+    Duration? uploadRecoveryInterval,
+  }) =>
+      TrackingConfiguration(
+        databaseName: databaseName ?? this.databaseName,
+        exportDirectoryName: exportDirectoryName ?? this.exportDirectoryName,
+        recordRetentionPolicy:
+            recordRetentionPolicy ?? this.recordRetentionPolicy,
+        defaultTrackingConfig:
+            defaultTrackingConfig ?? this.defaultTrackingConfig,
+        maximumUploadBatchPointCount:
+            maximumUploadBatchPointCount ?? this.maximumUploadBatchPointCount,
+        maximumUploadBatchBytes:
+            maximumUploadBatchBytes ?? this.maximumUploadBatchBytes,
+        uploadLeaseDuration: uploadLeaseDuration ?? this.uploadLeaseDuration,
+        uploadInitialBackoff: uploadInitialBackoff ?? this.uploadInitialBackoff,
+        uploadMaximumBackoff: uploadMaximumBackoff ?? this.uploadMaximumBackoff,
+        uploadRecoveryInterval:
+            uploadRecoveryInterval ?? this.uploadRecoveryInterval,
+      );
+
+  void validate({String context = 'TrackingConfiguration'}) {
+    final errors = <String>[];
+    if (databaseName.trim().isEmpty) {
+      errors.add('databaseName must not be empty');
+    }
+    if (exportDirectoryName.trim().isEmpty) {
+      errors.add('exportDirectoryName must not be empty');
+    }
+    if (maximumUploadBatchPointCount <= 0) {
+      errors.add('maximumUploadBatchPointCount must be greater than zero');
+    }
+    if (maximumUploadBatchBytes <= 0) {
+      errors.add('maximumUploadBatchBytes must be greater than zero');
+    }
+    _positiveDuration(errors, 'uploadLeaseDuration', uploadLeaseDuration);
+    _positiveDuration(errors, 'uploadInitialBackoff', uploadInitialBackoff);
+    _positiveDuration(errors, 'uploadMaximumBackoff', uploadMaximumBackoff);
+    _positiveDuration(errors, 'uploadRecoveryInterval', uploadRecoveryInterval);
+    try {
+      defaultTrackingConfig.validate(context: '$context.defaultTrackingConfig');
+    } on TrackingConfigurationException catch (error) {
+      errors.add(error.message);
+    }
+    if (errors.isEmpty) return;
+    throw TrackingConfigurationException(
+      code: 'invalid_configuration',
+      message: '$context is invalid: ${errors.join('; ')}.',
+    );
+  }
+}
+
+void _positiveDuration(List<String> errors, String name, Duration value) {
+  if (value <= Duration.zero) {
+    errors.add('$name must be greater than zero');
+  }
+}
+
+void _positiveFiniteDouble(List<String> errors, String name, double value) {
+  if (!value.isFinite || value <= 0) {
+    errors.add('$name must be finite and greater than zero');
+  }
+}
+
+void _percent(List<String> errors, String name, int value) {
+  if (value < 0 || value > 100) {
+    errors.add('$name must be between 0 and 100');
+  }
 }

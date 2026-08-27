@@ -34,6 +34,8 @@ final class Track {
     this.endLatitude,
     this.endLongitude,
     this.completionReason,
+    this.terminalReasonCode,
+    this.sessionControlToken,
   });
 
   final String id;
@@ -57,6 +59,14 @@ final class Track {
   final double? endLatitude;
   final double? endLongitude;
   final String? completionReason;
+
+  /// Additive terminal classification such as `cancelled_by_host`.
+  final String? terminalReasonCode;
+
+  /// Opaque durable identity used to fence native lifecycle commands.
+  ///
+  /// This coordinates package engines; it is not an authentication token.
+  final String? sessionControlToken;
   final TrackingConfig config;
 
   bool get isResumable =>
@@ -93,6 +103,8 @@ final class Track {
       endLatitude: (row['end_lat'] as num?)?.toDouble(),
       endLongitude: (row['end_lon'] as num?)?.toDouble(),
       completionReason: row['completion_reason'] as String?,
+      terminalReasonCode: row['terminal_reason_code'] as String?,
+      sessionControlToken: row['session_control_token'] as String?,
       config: TrackingConfig.fromJson(row['configuration_json']! as String),
     );
   }

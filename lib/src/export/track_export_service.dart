@@ -9,8 +9,10 @@ import 'package:xml/xml.dart';
 
 import '../domain/activity_snapshot.dart';
 import '../domain/export_models.dart';
+import '../domain/derived_geometry.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
+import '../domain/tracking_error.dart';
 import '../storage/track_repository.dart';
 
 abstract interface class ExportFileWriter {
@@ -22,7 +24,6 @@ abstract interface class ExportFileWriter {
 
   Future<void> delete(String path);
 }
-
 
 /// Writes exports to a user-visible folder.
 ///
@@ -192,6 +193,12 @@ final class TrackExportService {
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
   }) async {
+    if (options.geometry is DerivedTrackGeometry) {
+      throw const TrackingStorageException(
+        code: 'derived_geometry_requires_v2_export',
+        message: 'Use owner-scoped exportTrackV2 for derived geometry.',
+      );
+    }
     final bundle = await repository.loadTrackBundle(trackId);
     if (bundle.track.status != TrackStatus.completed &&
         !options.allowIncompleteTrackSnapshot) {
@@ -230,7 +237,7 @@ final class TrackExportService {
     final features = <Map<String, Object?>>[
       <String, Object?>{
         'type': 'Feature',
-        'properties': _trackProperties(bundle.track),
+        'properties': _trackProperties(bundle.track, options),
         'geometry': _geoJsonRouteGeometry(lines),
       },
     ];
@@ -300,6 +307,13 @@ final class TrackExportService {
       nest: () {
         builder.element('Document', nest: () {
           builder.element('name', nest: _trackName(bundle.track));
+          builder.element('ExtendedData', nest: () {
+            builder.element(
+              'Data',
+              attributes: const <String, String>{'name': 'geometrySource'},
+              nest: () => builder.element('value', nest: 'raw'),
+            );
+          });
           for (var index = 0; index < segmentPoints.length; index += 1) {
             final points = segmentPoints[index];
             if (points.length >= 2) {
@@ -367,6 +381,7 @@ final class TrackExportService {
             'time',
             nest: _formatTime(bundle.track.startedAt, options),
           );
+          builder.element('desc', nest: 'raw');
         });
         builder.element('trk', nest: () {
           builder.element('name', nest: _trackName(bundle.track));
@@ -460,7 +475,10 @@ final class TrackExportService {
       point.longitude >= -180 &&
       point.longitude <= 180;
 
-  static Map<String, Object?> _trackProperties(Track track) =>
+  static Map<String, Object?> _trackProperties(
+    Track track,
+    TrackExportOptions options,
+  ) =>
       <String, Object?>{
         'trackId': track.id,
         'routeId': track.routeId,
@@ -471,6 +489,7 @@ final class TrackExportService {
         'acceptedPointCount': track.acceptedPointCount,
         'rejectedPointCount': track.rejectedPointCount,
         'distanceMeters': track.totalDistanceMeters,
+        'geometrySource': 'raw',
       };
 
   static Map<String, Object?> _pointProperties(

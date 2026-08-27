@@ -7,6 +7,7 @@ enum NativeLocationJournalError: LocalizedError {
   case capacity(current: Int, maximum: Int)
   case invalidEvent(String)
   case corruptEvent(String)
+  case invalidCursor
 
   var errorDescription: String? {
     switch self {
@@ -20,6 +21,8 @@ enum NativeLocationJournalError: LocalizedError {
       return "Location journal rejected an invalid event: \(message)"
     case .corruptEvent(let message):
       return "Location journal contains a corrupt event: \(message)"
+    case .invalidCursor:
+      return "The native location-journal cursor is invalid."
     }
   }
 
@@ -34,6 +37,144 @@ struct NativeLocationJournalAcknowledgement {
   let remaining: Int
 }
 
+struct NativeLocationJournalPage {
+  let events: [[String: Any]]
+  let nextCursor: String?
+  let hasMore: Bool
+  let encodedBytes: Int
+  let remainingCount: Int
+
+  var map: [String: Any] {
+    var values: [String: Any] = [
+      "events": events,
+      "hasMore": hasMore,
+      "encodedBytes": encodedBytes,
+      "remainingCount": remainingCount,
+    ]
+    if let nextCursor {
+      values["nextCursor"] = nextCursor
+    }
+    return values
+  }
+}
+
+/// Serializes all SQLite journal work away from the Core Location/main thread.
+final class NativeLocationJournalQueue {
+  private let journal: NativeLocationJournal
+  private let queue: DispatchQueue
+  private let callbackQueue: DispatchQueue
+
+  init(
+    journal: NativeLocationJournal,
+    callbackQueue: DispatchQueue = .main
+  ) {
+    self.journal = journal
+    self.callbackQueue = callbackQueue
+    queue = DispatchQueue(
+      label: "com.samir.flutter_background_location.native_location_journal",
+      qos: .utility
+    )
+  }
+
+  func prepare(completion: @escaping (Result<Int, Error>) -> Void) {
+    execute(completion: completion) {
+      try self.journal.prepare()
+    }
+  }
+
+  func ensureCapacityForCapture(completion: @escaping (Result<Int, Error>) -> Void) {
+    execute(completion: completion) {
+      try self.journal.ensureCapacityForCapture()
+    }
+  }
+
+  func append(
+    _ event: [String: Any],
+    completion: @escaping (Result<Int, Error>) -> Void
+  ) {
+    execute(completion: completion) {
+      try self.journal.append(event)
+    }
+  }
+
+  func pendingLocations(completion: @escaping (Result<[[String: Any]], Error>) -> Void) {
+    execute(completion: completion) {
+      try self.journal.pendingLocations()
+    }
+  }
+
+  func pendingLocationPage(
+    cursor: String?,
+    maxRecords: Int,
+    maxEncodedBytes: Int,
+    completion: @escaping (Result<NativeLocationJournalPage, Error>) -> Void
+  ) {
+    execute(completion: completion) {
+      try self.journal.pendingLocationPage(
+        cursor: cursor,
+        maxRecords: maxRecords,
+        maxEncodedBytes: maxEncodedBytes
+      )
+    }
+  }
+
+  func diagnostic(
+    performMaintenance: Bool,
+    completion: @escaping ([String: Any]) -> Void
+  ) {
+    queue.async { [callbackQueue] in
+      let diagnostic: [String: Any]
+      do {
+        diagnostic = try self.journal.diagnostic(
+          performMaintenance: performMaintenance
+        )
+      } catch {
+        diagnostic = NativeLocationJournal.failureDiagnostic(error)
+      }
+      callbackQueue.async {
+        completion(diagnostic)
+      }
+    }
+  }
+
+  func acknowledge(
+    eventIds: [String],
+    completion: @escaping (Result<NativeLocationJournalAcknowledgement, Error>) -> Void
+  ) {
+    execute(completion: completion) {
+      try self.journal.acknowledge(eventIds: eventIds)
+    }
+  }
+
+  func deleteTrack(
+    trackId: String,
+    completion: @escaping (Result<Int, Error>) -> Void
+  ) {
+    execute(completion: completion) {
+      try self.journal.deleteTrack(trackId: trackId)
+    }
+  }
+
+  /// Runs after all journal tasks enqueued before the call have completed.
+  func fence(completion: @escaping () -> Void) {
+    queue.async { [callbackQueue] in
+      callbackQueue.async(execute: completion)
+    }
+  }
+
+  private func execute<T>(
+    completion: @escaping (Result<T, Error>) -> Void,
+    operation: @escaping () throws -> T
+  ) {
+    queue.async { [callbackQueue] in
+      let result = Result(catching: operation)
+      callbackQueue.async {
+        completion(result)
+      }
+    }
+  }
+}
+
 /// Durable handoff between Core Location and Dart persistence.
 ///
 /// Rows are never aged out or evicted. They leave this database only after
@@ -44,7 +185,11 @@ final class NativeLocationJournal {
   private static let directoryName = "flutter_background_location"
   private static let databaseName = "pending_locations.sqlite3"
   private static let maximumPayloadBytes = 64 * 1_024
-  private static let maximumPageCount = 16_384  // 64 MiB with 4 KiB pages.
+  private static let maximumPageRecords = 250
+  // Leaves conservative headroom for StandardMessageCodec map/list keys.
+  private static let maximumPageBytes = 900 * 1_024
+  private static let requestedPageSize = 4_096
+  private static let maximumDatabaseBytes = 64 * 1_024 * 1_024
 
   private let fileManager: FileManager
   private var database: OpaquePointer?
@@ -53,6 +198,17 @@ final class NativeLocationJournal {
 
   init(fileManager: FileManager = .default) {
     self.fileManager = fileManager
+  }
+
+  static func failureDiagnostic(_ error: Error) -> [String: Any] {
+    [
+      "platform": "ios",
+      "healthy": false,
+      "opened": false,
+      "databaseName": databaseName,
+      "errorType": String(describing: type(of: error)),
+      "errorMessage": error.localizedDescription,
+    ]
   }
 
   deinit {
@@ -93,12 +249,24 @@ final class NativeLocationJournal {
         throw databaseError(operation: "configure busy timeout", code: timeoutCode)
       }
 
-      try execute("PRAGMA page_size = 4096")
+      try execute("PRAGMA page_size = \(Self.requestedPageSize)")
       try execute("PRAGMA auto_vacuum = INCREMENTAL")
       try execute("PRAGMA journal_mode = TRUNCATE")
       try execute("PRAGMA synchronous = FULL")
       try execute("PRAGMA temp_store = MEMORY")
-      try execute("PRAGMA max_page_count = \(Self.maximumPageCount)")
+      let pageSize = try queryPragmaInt("page_size")
+      guard pageSize > 0 else {
+        throw NativeLocationJournalError.database(
+          operation: "read page size",
+          code: SQLITE_MISUSE,
+          message: "SQLite returned an invalid page size."
+        )
+      }
+      let maximumPageCount = max(
+        1,
+        Self.maximumDatabaseBytes / Int(pageSize)
+      )
+      try execute("PRAGMA max_page_count = \(maximumPageCount)")
       try execute(
         """
         CREATE TABLE IF NOT EXISTS pending_locations (
@@ -272,6 +440,84 @@ final class NativeLocationJournal {
     return events
   }
 
+  func pendingLocationPage(
+    cursor: String?,
+    maxRecords: Int,
+    maxEncodedBytes: Int
+  ) throws -> NativeLocationJournalPage {
+    try prepare()
+    let afterSequence: Int64
+    if let cursor {
+      guard let parsed = Int64(cursor), parsed >= 0 else {
+        throw NativeLocationJournalError.invalidCursor
+      }
+      afterSequence = parsed
+    } else {
+      afterSequence = 0
+    }
+    let recordLimit = min(max(maxRecords, 1), Self.maximumPageRecords)
+    let byteLimit = min(
+      max(maxEncodedBytes, Self.maximumPayloadBytes),
+      Self.maximumPageBytes
+    )
+    let statement = try prepareStatement(
+      """
+      SELECT sequence, event_id, track_id, payload
+      FROM pending_locations
+      WHERE sequence > ?
+      ORDER BY sequence ASC
+      LIMIT ?
+      """,
+      operation: "prepare pending page query"
+    )
+    defer { sqlite3_finalize(statement) }
+    sqlite3_bind_int64(statement, 1, afterSequence)
+    sqlite3_bind_int64(statement, 2, Int64(recordLimit + 1))
+
+    var events: [[String: Any]] = []
+    events.reserveCapacity(recordLimit)
+    var encodedBytes = 0
+    var lastSequence = afterSequence
+    var hasMore = false
+    while true {
+      let stepCode = sqlite3_step(statement)
+      if stepCode == SQLITE_DONE { break }
+      guard stepCode == SQLITE_ROW else {
+        throw databaseError(operation: "read pending event page", code: stepCode)
+      }
+
+      let sequence = sqlite3_column_int64(statement, 0)
+      let event = try decodeEvent(
+        from: statement,
+        eventIdIndex: 1,
+        trackIdIndex: 2,
+        payloadIndex: 3
+      )
+      let payloadLength = Int(sqlite3_column_bytes(statement, 3))
+      if events.count >= recordLimit
+        || (!events.isEmpty && encodedBytes + payloadLength > byteLimit)
+      {
+        hasMore = true
+        break
+      }
+
+      events.append(event)
+      encodedBytes += payloadLength
+      lastSequence = sequence
+    }
+
+    let remaining = try queryCount(
+      after: events.isEmpty ? afterSequence : lastSequence
+    )
+    return NativeLocationJournalPage(
+      events: events,
+      nextCursor: events.isEmpty ? nil : String(lastSequence),
+      hasMore: hasMore || remaining > 0,
+      encodedBytes: encodedBytes,
+      remainingCount: remaining
+    )
+  }
+
   func acknowledge(eventIds: [String]) throws -> NativeLocationJournalAcknowledgement {
     try prepare()
     let uniqueEventIds = Array(Set(eventIds))
@@ -308,6 +554,59 @@ final class NativeLocationJournal {
         remaining: pendingCount
       )
     }
+  }
+
+  func deleteTrack(trackId: String) throws -> Int {
+    try prepare()
+    guard !trackId.isEmpty, trackId.utf8.count <= 512 else {
+      throw NativeLocationJournalError.invalidEvent("A valid trackId is required.")
+    }
+    return try transaction {
+      let statement = try prepareStatement(
+        "DELETE FROM pending_locations WHERE track_id = ?",
+        operation: "prepare track-scoped deletion"
+      )
+      defer { sqlite3_finalize(statement) }
+      try bind(trackId, to: statement, index: 1, operation: "bind track deletion")
+      let stepCode = sqlite3_step(statement)
+      guard stepCode == SQLITE_DONE else {
+        throw databaseError(operation: "delete track events", code: stepCode)
+      }
+      let deleted = Int(sqlite3_changes(requiredDatabase()))
+      pendingCount = max(0, pendingCount - deleted)
+      return deleted
+    }
+  }
+
+  func diagnostic(performMaintenance: Bool = false) throws -> [String: Any] {
+    try prepare()
+    let integrity = try quickCheck()
+    let pageSize = try queryPragmaInt("page_size")
+    let pageCount = try queryPragmaInt("page_count")
+    let freelistPages = min(
+      max(try queryPragmaInt("freelist_count"), 0),
+      max(pageCount, 0)
+    )
+    let livePages = max(pageCount - freelistPages, 0)
+    let pendingPayloadBytes = try queryPendingPayloadBytes()
+    return [
+      "platform": "ios",
+      "healthy": integrity == "ok",
+      "opened": true,
+      "databaseName": Self.databaseName,
+      "integrityCheck": integrity,
+      "stats": [
+        "pendingRows": pendingCount,
+        "pendingPayloadBytes": pendingPayloadBytes,
+        "pageSizeBytes": pageSize,
+        "pageCount": pageCount,
+        "freelistPages": freelistPages,
+        "livePages": livePages,
+        "liveDatabaseBytes": livePages * pageSize,
+        "maxPageCount": try queryPragmaInt("max_page_count"),
+        "maintenanceResult": performMaintenance ? "not_required" : "not_run",
+      ],
+    ]
   }
 
   private func journalFileURL() throws -> URL {
@@ -363,16 +662,23 @@ final class NativeLocationJournal {
   }
 
   private func verifyIntegrity() throws {
-    let statement = try prepareStatement("PRAGMA quick_check(1)", operation: "prepare quick check")
+    let result = try quickCheck()
+    guard result == "ok" else {
+      throw NativeLocationJournalError.corruptEvent("SQLite quick check returned: \(result)")
+    }
+  }
+
+  private func quickCheck() throws -> String {
+    let statement = try prepareStatement(
+      "PRAGMA quick_check(1)",
+      operation: "prepare quick check"
+    )
     defer { sqlite3_finalize(statement) }
     let stepCode = sqlite3_step(statement)
     guard stepCode == SQLITE_ROW, let resultText = sqlite3_column_text(statement, 0) else {
       throw databaseError(operation: "quick check", code: stepCode)
     }
-    let result = String(cString: resultText)
-    guard result == "ok" else {
-      throw NativeLocationJournalError.corruptEvent("SQLite quick check returned: \(result)")
-    }
+    return String(cString: resultText)
   }
 
   private func queryCount() throws -> Int {
@@ -386,6 +692,85 @@ final class NativeLocationJournal {
       throw databaseError(operation: "count", code: stepCode)
     }
     return Int(sqlite3_column_int64(statement, 0))
+  }
+
+  private func queryPendingPayloadBytes() throws -> Int64 {
+    let statement = try prepareStatement(
+      "SELECT COALESCE(SUM(length(payload)), 0) FROM pending_locations",
+      operation: "prepare pending payload bytes"
+    )
+    defer { sqlite3_finalize(statement) }
+    let stepCode = sqlite3_step(statement)
+    guard stepCode == SQLITE_ROW else {
+      throw databaseError(operation: "read pending payload bytes", code: stepCode)
+    }
+    return sqlite3_column_int64(statement, 0)
+  }
+
+  private func queryPragmaInt(_ name: String) throws -> Int64 {
+    let statement = try prepareStatement(
+      "PRAGMA \(name)",
+      operation: "prepare \(name) pragma"
+    )
+    defer { sqlite3_finalize(statement) }
+    let stepCode = sqlite3_step(statement)
+    guard stepCode == SQLITE_ROW else {
+      throw databaseError(operation: "read \(name) pragma", code: stepCode)
+    }
+    return sqlite3_column_int64(statement, 0)
+  }
+
+  private func queryCount(after sequence: Int64) throws -> Int {
+    let statement = try prepareStatement(
+      "SELECT COUNT(*) FROM pending_locations WHERE sequence > ?",
+      operation: "prepare count after sequence"
+    )
+    defer { sqlite3_finalize(statement) }
+    sqlite3_bind_int64(statement, 1, sequence)
+    let stepCode = sqlite3_step(statement)
+    guard stepCode == SQLITE_ROW else {
+      throw databaseError(operation: "count after sequence", code: stepCode)
+    }
+    return Int(sqlite3_column_int64(statement, 0))
+  }
+
+  private func decodeEvent(
+    from statement: OpaquePointer,
+    eventIdIndex: Int32,
+    trackIdIndex: Int32,
+    payloadIndex: Int32
+  ) throws -> [String: Any] {
+    guard let eventIdText = sqlite3_column_text(statement, eventIdIndex),
+      let trackIdText = sqlite3_column_text(statement, trackIdIndex),
+      let payloadBytes = sqlite3_column_blob(statement, payloadIndex)
+    else {
+      throw NativeLocationJournalError.corruptEvent("A required column is null.")
+    }
+    let payloadLength = Int(sqlite3_column_bytes(statement, payloadIndex))
+    guard payloadLength > 0, payloadLength <= Self.maximumPayloadBytes else {
+      throw NativeLocationJournalError.corruptEvent(
+        "Payload length \(payloadLength) is invalid."
+      )
+    }
+
+    let eventId = String(cString: eventIdText)
+    let trackId = String(cString: trackIdText)
+    let payload = Data(bytes: payloadBytes, count: payloadLength)
+    let decoded: Any
+    do {
+      decoded = try JSONSerialization.jsonObject(with: payload)
+    } catch {
+      throw NativeLocationJournalError.corruptEvent(error.localizedDescription)
+    }
+    guard let event = decoded as? [String: Any],
+      event["eventId"] as? String == eventId,
+      event["trackId"] as? String == trackId
+    else {
+      throw NativeLocationJournalError.corruptEvent(
+        "Payload identity does not match its journal row."
+      )
+    }
+    return event
   }
 
   private func transaction<T>(_ body: () throws -> T) throws -> T {

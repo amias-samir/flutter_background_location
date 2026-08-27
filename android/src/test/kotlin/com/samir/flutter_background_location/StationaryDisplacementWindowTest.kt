@@ -59,6 +59,18 @@ class StationaryDisplacementWindowTest {
         assertTrue(evidence.hasLowDisplacement(CONFIRMATION_MS, 30f))
     }
 
+    @Test
+    fun uncertaintyPreventsUnsupportedStationaryClaim() {
+        val evidence = StationaryDisplacementWindow()
+        evidence.begin(0L, StationaryGpsFix(0.0, 0.0, 0L, 20.0))
+        evidence.add(
+            StationaryGpsFix(0.00001, 0.0, CONFIRMATION_MS, 20.0),
+            CONFIRMATION_MS,
+        )
+
+        assertFalse(evidence.hasLowDisplacement(CONFIRMATION_MS, 30f))
+    }
+
     private fun fix(latitude: Double, timestamp: Long): StationaryGpsFix =
         StationaryGpsFix(latitude, 0.0, timestamp)
 

@@ -8,6 +8,7 @@ final class TrackingCapabilityReport {
     required this.adaptiveSampling,
     required this.terminatedRecovery,
     this.rebootRestartBestEffort = false,
+    this.terminationRecoveryModes = const <String>[],
   });
 
   final String platform;
@@ -21,6 +22,7 @@ final class TrackingCapabilityReport {
   /// This remains OS/OEM controlled even when true.
   final bool terminatedRecovery;
   final bool rebootRestartBestEffort;
+  final List<String> terminationRecoveryModes;
 
   factory TrackingCapabilityReport.fromMap(Map<Object?, Object?> map) =>
       TrackingCapabilityReport(
@@ -33,5 +35,9 @@ final class TrackingCapabilityReport {
         terminatedRecovery: map['terminatedRecovery'] as bool? ?? false,
         rebootRestartBestEffort:
             map['rebootRestartBestEffort'] as bool? ?? false,
+        terminationRecoveryModes: List<String>.unmodifiable(
+          (map['terminationRecoveryModes'] as List?)?.whereType<String>() ??
+              const <String>[],
+        ),
       );
 }

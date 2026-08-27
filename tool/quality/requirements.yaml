@@ -1,0 +1,575 @@
+schema_version: 1
+package: flutter_background_location_tracker
+compatibility:
+  dart_api: 1
+  native_protocol: 2
+  route_database_schema: 11
+  android_journal_schema: 2
+  ios_journal_schema: 1
+change_classifications:
+  additive: "Adds an API, payload key, schema object, test, or documentation without removing supported behavior."
+  behavior_tightening: "Narrows unsafe behavior while keeping the public symbol available."
+  deprecated: "Keeps a public symbol available while steering callers to a replacement."
+  breaking: "Requires source, binary, schema, or host configuration changes."
+work_packages:
+  - id: F0-01
+    phase: F0
+    title: Route/native/channel/export characterization fixtures
+    release_gate: unchanged baseline green
+    required_before: native lifecycle refactors
+    evidence:
+      - test/characterization_fixtures_test.dart
+      - test/fixtures/native_channel_v1.json
+      - test/fixtures/exports/characterization_route.geojson
+      - test/fixtures/exports/characterization_route.kml
+      - test/fixtures/exports/characterization_route.gpx
+  - id: F0-02
+    phase: F0
+    title: Traceability ledger and compatibility versions
+    release_gate: requirement to evidence mapping exists
+    required_before: multi-PR delivery
+    evidence:
+      - tool/quality/requirements.yaml
+  - id: F0-03
+    phase: F0
+    title: Deterministic CI skeleton
+    release_gate: package and platform baseline green
+    required_before: native lifecycle refactors
+    evidence:
+      - .github/workflows/ci.yml
+      - tool/quality/validate_requirements.dart
+  - id: F0-04
+    phase: F0
+    title: Pre-change physical route and battery baseline
+    release_gate: reproducible reference runs captured
+    required_before: capture quality changes
+    evidence_mode: physical_manual
+    evidence: []
+  - id: R1-01
+    phase: R1
+    title: Correct iOS required-reason privacy manifest
+    release_gate: archive privacy inspection has no missing declaration
+    required_before: next publication
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/PrivacyInfo.xcprivacy
+  - id: R1-02
+    phase: R1
+    title: Remove unused Android wake-lock permission
+    release_gate: merged manifest contains only exercised package permissions
+    required_before: next publication unless justified
+    evidence:
+      - android/src/main/AndroidManifest.xml
+      - README.md
+      - example/README.md
+      - plugin_documents/PLATFORM_IMPLEMENTATION.md
+  - id: R1-03
+    phase: R1
+    title: Foreground-first Android service and serial journal coordinator
+    release_gate: foreground timing, StrictMode, and commit-before-emit tests
+    required_before: 1.0
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+  - id: R1-04
+    phase: R1
+    title: Durable Android lifecycle state
+    release_gate: lifecycle death and boot restore tests
+    required_before: 1.0
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+  - id: R1-05
+    phase: R1
+    title: Clear native state when a paused route completes
+    release_gate: paused terminal-state matrix
+    required_before: 1.0
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+  - id: R1-06
+    phase: R1
+    title: Fence Activity Recognition registration
+    release_gate: stale registration and broadcast race tests
+    required_before: 1.0
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/ActivityRecognitionReceiver.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+  - id: R1-07
+    phase: R1
+    title: iOS serial journal and durable session generations
+    release_gate: Swift ordering and process-death tests
+    required_before: 1.0
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - lib/src/domain/native_tracking_protocol.dart
+  - id: R1-08
+    phase: R1
+    title: Active permission and provider prerequisite monitor
+    release_gate: physical downgrade smoke tests
+    required_before: 1.0
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - lib/src/domain/native_tracking_protocol.dart
+  - id: R1-09
+    phase: R1
+    title: Mismatched native-event quarantine
+    release_gate: zero acknowledge-before-persist violations
+    required_before: 1.0
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/domain/track_point.dart
+      - test/tracking_client_test.dart
+  - id: R1-10
+    phase: R1
+    title: API 21-28 public export support correction
+    release_gate: physical export and merged-manifest tests
+    required_before: next publication
+    evidence:
+      - android/src/main/AndroidManifest.xml
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - README.md
+      - example/README.md
+  - id: C1-01
+    phase: C1
+    title: Native protocol version and extensible capability codes
+    release_gate: mixed native and Dart goldens
+    required_before: new platform-channel capabilities
+    evidence:
+      - lib/src/domain/native_tracking_protocol.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - test/native_tracking_protocol_test.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+  - id: C1-02
+    phase: C1
+    title: Checked configuration and resolved preset values
+    release_gate: release-mode validation suite
+    required_before: ergonomic API foundation
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - test/tracking_config_test.dart
+      - test/tracking_client_test.dart
+  - id: C1-03
+    phase: C1
+    title: Typed errors and generated command/error registry
+    release_gate: sanitized error compatibility tests
+    required_before: ergonomic API foundation
+    evidence:
+      - lib/src/domain/tracking_error.dart
+      - tool/quality/error_codes.yaml
+      - tool/quality/validate_requirements.dart
+  - id: C1-04
+    phase: C1
+    title: Public model conventions and additive barrel policy
+    release_gate: API signature and model-isolation tests
+    required_before: public facade
+    evidence:
+      - lib/flutter_background_location_tracker.dart
+      - lib/flutter_background_location_tracker_advanced.dart
+      - test/public_api_compatibility_test.dart
+  - id: O1-03
+    phase: O1
+    title: Typed settings bridge and battery optimization capability
+    release_gate: settings intent and result tests
+    required_before: readiness flow
+    evidence:
+      - lib/src/domain/tracking_settings.dart
+      - lib/src/platform/tracker_adapter.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - lib/src/application/tracking_client.dart
+      - test/native_tracking_protocol_test.dart
+  - id: E1-READY
+    phase: E1
+    title: Typed read-only readiness and one-step permission flow
+    release_gate: permission matrix and mixed-version channel spy
+    required_before: owner-scoped facade
+    evidence:
+      - lib/src/domain/tracking_readiness.dart
+      - lib/src/platform/tracker_adapter.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+      - test/native_tracking_protocol_test.dart
+  - id: E1-OWN
+    phase: E1
+    title: Owner-scoped repository view, activation, upload, and retention
+    release_gate: interleaved-scope, TOCTOU, and concurrency tests
+    required_before: native command lease
+    evidence:
+      - lib/src/domain/tracking_start.dart
+      - lib/src/domain/tracking_error.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/upload/tracking_batch_uploader.dart
+      - test/tracking_client_test.dart
+      - test/sqlite_track_repository_test.dart
+      - README.md
+      - example/README.md
+  - id: O1-01
+    phase: O1
+    title: Basic coordinate-free health snapshot
+    release_gate: health boundary goldens
+    required_before: session snapshot
+    evidence:
+      - lib/src/domain/tracking_health.dart
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: E1-STATE
+    phase: E1
+    title: Replaying session, blocker, and action model
+    release_gate: revision and action table tests
+    required_before: core controller contract
+    evidence:
+      - lib/src/domain/tracking_session_snapshot.dart
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+      - test/public_api_compatibility_test.dart
+  - id: E1-HISTORY
+    phase: E1
+    title: Owner-scoped summary pagination and invalidations
+    release_gate: deterministic no-leak paging
+    required_before: core controller contract
+    evidence:
+      - lib/src/domain/track_query.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/application/tracking_client.dart
+      - test/sqlite_track_repository_test.dart
+      - test/tracking_client_test.dart
+      - README.md
+  - id: N1-01
+    phase: N1
+    title: Durable session token, engine lease, and foreign-control resolver
+    release_gate: multi-engine, hot-restart, and stale-resolver tests
+    required_before: core controller contract
+    evidence:
+      - lib/src/domain/tracking_start.dart
+      - lib/src/domain/tracking_session_snapshot.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/NativeCommandCoordinator.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeCommandCoordinator.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - test/tracking_client_test.dart
+      - test/native_tracking_protocol_test.dart
+  - id: E1-CONTRACT
+    phase: E1
+    title: Frozen core controller and compatibility fixture
+    release_gate: interface compile and API review
+    required_before: composed factory
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/domain/tracking_session_snapshot.dart
+      - lib/src/domain/tracking_start.dart
+      - test/public_api_compatibility_test.dart
+  - id: E1-OPEN
+    phase: E1
+    title: Composed TrackingClient.open facade factory
+    release_gate: clean-host lifecycle integration
+    required_before: public test fake
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - README.md
+      - example/lib/main.dart
+      - test/tracking_client_test.dart
+  - id: X1-01
+    phase: X1
+    title: Public core fake and test utilities
+    release_gate: host widget flow without channels
+    required_before: modular example
+    evidence:
+      - lib/flutter_background_location_tracker_testing.dart
+      - test/testing_library_test.dart
+      - example/test/widget_test.dart
+  - id: O1-02
+    phase: O1
+    title: Observe-only watchdog then reviewed warning/enforcement
+    release_gate: false-positive evidence
+    required_before: release candidate
+    evidence:
+      - lib/src/domain/tracking_health.dart
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: O1-04
+    phase: O1
+    title: Setup doctor and redacted support report
+    release_gate: broken-host fixtures and privacy scan
+    required_before: modular example
+    evidence:
+      - lib/src/domain/tracking_health.dart
+      - lib/src/application/tracking_client.dart
+      - README.md
+      - example/lib/main.dart
+      - test/tracking_client_test.dart
+  - id: N1-02
+    phase: N1
+    title: Sequence-only bounded native journal pages
+    release_gate: representative 25k and pager stress
+    required_before: streaming export and history scale
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - lib/src/platform/tracker_adapter.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - test/native_tracking_protocol_test.dart
+  - id: N1-03
+    phase: N1
+    title: Live-page capacity, WAL checkpoint, and bounded maintenance
+    release_gate: full, empty, and reopen disk tests
+    required_before: streaming export and history scale
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+  - id: N1-04
+    phase: N1
+    title: Fallible and recoverable journal initialization
+    release_gate: corrupt, busy, and read-only tests
+    required_before: streaming export and history scale
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - lib/src/domain/native_tracking_protocol.dart
+      - lib/src/platform/tracker_adapter.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - test/native_tracking_protocol_test.dart
+  - id: N1-05
+    phase: N1
+    title: Explicit iOS significant-change termination recovery mode
+    release_gate: 30-run physical termination matrix per device and OS bucket
+    required_before: public termination-recovery claim
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/capability_report.dart
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/TrackingConfiguration.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - tool/quality/physical_qualification_protocol.json
+      - tool/quality/validate_physical_qualification.dart
+  - id: D1-01
+    phase: D1
+    title: Owner-scoped segment and point cursors
+    release_gate: bounded 100k traversal
+    required_before: streaming export
+    evidence:
+      - lib/src/domain/track_data_page.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/sqlite_track_repository_test.dart
+      - test/streaming_track_repository_stress_test.dart
+  - id: D1-02
+    phase: D1
+    title: Immutable configuration epoch schema foundation
+    release_gate: all-schema migration fixtures
+    required_before: runtime config epochs
+    evidence:
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - lib/src/domain/track_point.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/sqlite_track_repository_test.dart
+  - id: S1-01
+    phase: S1
+    title: Incremental sink encoders, paging, progress, and cancellation
+    release_gate: parser, memory, and cancel tests
+    required_before: public export operation
+    evidence:
+      - lib/src/export/incremental_track_export.dart
+      - lib/src/domain/track_data_page.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/incremental_track_export_test.dart
+      - test/streaming_track_repository_stress_test.dart
+  - id: S1-02
+    phase: S1
+    title: Public export result, destination, MediaStore URI, and share-copy ownership
+    release_gate: API 21, 29, and current export tests
+    required_before: modular example
+    evidence:
+      - lib/src/domain/export_models.dart
+      - lib/src/export/track_export_v2_service.dart
+      - lib/src/export/incremental_track_export.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - test/track_export_v2_service_test.dart
+      - test/incremental_track_export_test.dart
+      - test/sqlite_track_repository_test.dart
+  - id: P1-01
+    phase: P1
+    title: Abort and additive deletion/erase reports
+    release_gate: cross-track death and erase tests
+    required_before: 1.0
+    evidence:
+      - lib/src/domain/tracking_privacy.dart
+      - lib/src/application/tracking_privacy_service.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/platform/tracker_adapter.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - test/tracking_client_test.dart
+      - test/sqlite_track_repository_test.dart
+  - id: P1-02
+    phase: P1
+    title: Managed-export access/deletion and owner-scoped retention cleanup
+    release_gate: artifact inventory and URI deletion
+    required_before: modular example
+    evidence:
+      - lib/src/domain/export_models.dart
+      - lib/src/export/track_export_v2_service.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - test/track_export_v2_service_test.dart
+  - id: Q1-01
+    phase: Q1
+    title: Signed timing and monotonic-domain evidence migration
+    release_gate: clock, reboot, and migration tests
+    required_before: quality policy parity
+    evidence:
+      - lib/src/domain/location_sample.dart
+      - lib/src/domain/track_point.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - test/sqlite_track_repository_test.dart
+      - test/position_validator_test.dart
+  - id: Q1-02
+    phase: Q1
+    title: Cross-language quality policy in shadow mode
+    release_gate: shared trace parity
+    required_before: first-fix and motion semantics
+    evidence:
+      - lib/src/domain/fix_quality.dart
+      - lib/src/application/position_validator.dart
+      - lib/src/application/tracking_client.dart
+      - test/position_validator_test.dart
+  - id: Q1-03
+    phase: Q1
+    title: First-fix acquisition and gap semantics
+    release_gate: acquisition and gap fixtures
+    required_before: motion transitions
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/tracking_health.dart
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+      - test/tracking_config_test.dart
+  - id: Q1-04
+    phase: Q1
+    title: Uncertainty-aware stationary and motion transitions
+    release_gate: recorded-route qualification
+    required_before: preset calibration
+    evidence:
+      - lib/src/domain/fix_quality.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/StationaryDisplacementWindow.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StationaryDisplacementWindowTest.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - test/position_validator_test.dart
+  - id: Q1-05
+    phase: Q1
+    title: Provenance-preserving optional derived geometry
+    release_gate: raw and derived reversibility audit
+    required_before: derived geometry publication
+    evidence:
+      - lib/src/domain/derived_geometry.dart
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/export/incremental_track_export.dart
+      - test/derived_geometry_test.dart
+  - id: B1-01
+    phase: B1
+    title: Post-change benchmark rerun
+    release_gate: statistically comparable evidence
+    required_before: preset calibration
+    evidence_mode: physical_manual
+    evidence: []
+  - id: B1-02
+    phase: B1
+    title: Calibrated and versioned preset definitions
+    release_gate: battery and fidelity sign-off
+    required_before: runtime config epochs
+    evidence_mode: physical_manual
+    evidence: []
+  - id: B1-03
+    phase: B1
+    title: Epoch-tagged atomic runtime configuration capability
+    release_gate: process-death convergence
+    required_before: release candidate
+    evidence:
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/platform/tracker_adapter.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - test/tracking_client_test.dart
+      - test/sqlite_track_repository_test.dart
+  - id: B1-04
+    phase: B1
+    title: Bounded opt-in adaptive battery policy
+    release_gate: calibrated shadow benefit and no fidelity-bound violations
+    required_before: adaptive apply mode recommendation
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/adaptive_battery.dart
+      - test/adaptive_battery_test.dart
+      - tool/quality/physical_qualification_protocol.json
+      - tool/quality/validate_physical_qualification.dart
+  - id: X1-02
+    phase: X1
+    title: Modular owner-scoped example and route actions
+    release_gate: Android, iOS, and widget builds
+    required_before: documentation rewrite
+    evidence:
+      - example/lib/main.dart
+      - example/lib/recorded_tracks_section.dart
+      - example/lib/route_map_page.dart
+      - example/lib/tracking_controls.dart
+      - example/lib/tracking_dialogs.dart
+      - example/test/widget_test.dart
+  - id: X1-03
+    phase: X1
+    title: README, migration, troubleshooting, Dartdoc, and protection-boundary docs
+    release_gate: docs, API lint, and pub dry run
+    required_before: release candidate
+    evidence:
+      - README.md
+      - example/README.md
+      - MIGRATION.md
+      - CONTRIBUTING.md
+      - plugin_documents/detailed_plugin_details.md
+      - plugin_documents/implementation_plan_of_detailed_plugin_details.md
+  - id: X1-04
+    phase: X1
+    title: Signed release evidence and RC hardening
+    release_gate: full device, store, and privacy gate
+    required_before: 1.0 publication
+    evidence:
+      - .github/workflows/ci.yml
+      - tool/quality/requirements.yaml
+      - tool/quality/error_codes.yaml
+      - tool/quality/validate_requirements.dart
+      - tool/quality/generate_release_evidence.dart
+      - tool/quality/physical_qualification_protocol.json
+      - tool/quality/validate_physical_qualification.dart

@@ -88,6 +88,54 @@ void main() {
     expect(config.maximumAcceptedAccuracyMeters, 9);
   });
 
+  test('resolved accuracy exposes the final effective values', () {
+    const config = TrackingConfig(
+      accuracy: TrackingAccuracy.medium,
+      locationAccuracy: TrackingAccuracy.precised,
+      movingDistanceFilterMeters: 8,
+    );
+
+    expect(
+      config.resolvedAccuracy,
+      const ResolvedTrackingAccuracy(
+        movingInterval: Duration(seconds: 30),
+        distanceFilterMeters: 8,
+        locationAccuracy: TrackingAccuracy.precised,
+        stationaryInterval: Duration(minutes: 3),
+        stationaryDistanceFilterMeters: 100,
+        maximumAcceptedAccuracyMeters: 100,
+      ),
+    );
+  });
+
+  test('runtime validation catches invalid tracking config in release paths',
+      () {
+    final config = TrackingConfig.fromMap(<String, Object?>{
+      'movingIntervalMs': 0,
+      'stationaryIntervalMs': -1,
+      'notificationTitle': ' ',
+      'notificationText': '',
+    });
+
+    expect(
+      () => config.validate(),
+      throwsA(
+        isA<TrackingConfigurationException>()
+            .having((error) => error.code, 'code', 'invalid_configuration')
+            .having(
+              (error) => error.message,
+              'message',
+              allOf(
+                contains('movingInterval'),
+                contains('stationaryInterval'),
+                contains('androidNotificationTitle'),
+                contains('androidNotificationText'),
+              ),
+            ),
+      ),
+    );
+  });
+
   test('accuracy and overrides survive JSON serialization', () {
     const original = TrackingConfig(
       accuracy: TrackingAccuracy.medium,
@@ -102,6 +150,21 @@ void main() {
     expect(restored.movingDistanceFilterMeters, 7);
     expect(restored.movingInterval, const Duration(seconds: 30));
     expect(restored.toMap()['desiredAccuracy'], 'precised');
+  });
+
+  test('iOS termination recovery is explicit and round-trips', () {
+    const defaultConfig = TrackingConfig();
+    const recoveryConfig = TrackingConfig(
+      iosTerminationRecoveryMode: IosTerminationRecoveryMode.significantChange,
+    );
+
+    expect(defaultConfig.iosTerminationRecoveryMode,
+        IosTerminationRecoveryMode.interrupted);
+    expect(
+      TrackingConfig.fromJson(recoveryConfig.toJson())
+          .iosTerminationRecoveryMode,
+      IosTerminationRecoveryMode.significantChange,
+    );
   });
 
   test('legacy maps without a profile keep the previous high defaults', () {
@@ -127,5 +190,30 @@ void main() {
 
     expect(config.accuracy, TrackingAccuracy.precised);
     expect(config.locationAccuracy, TrackingAccuracy.precised);
+  });
+
+  test('runtime validation catches invalid package configuration', () {
+    final configuration = const TrackingConfiguration(
+      databaseName: ' ',
+      exportDirectoryName: '',
+      uploadLeaseDuration: Duration.zero,
+    );
+
+    expect(
+      () => configuration.validate(),
+      throwsA(
+        isA<TrackingConfigurationException>()
+            .having((error) => error.code, 'code', 'invalid_configuration')
+            .having(
+              (error) => error.message,
+              'message',
+              allOf(
+                contains('databaseName'),
+                contains('exportDirectoryName'),
+                contains('uploadLeaseDuration'),
+              ),
+            ),
+      ),
+    );
   });
 }

@@ -1,0 +1,331 @@
+schema_version: 1
+package: flutter_background_location_tracker
+codes:
+  - code: invalid_configuration
+    owner: TrackingConfigurationException
+    recovery: refresh
+    redaction: no coordinates, route body, user ID, or organization ID
+    commands:
+      - initialize
+      - startTrack
+      - resumeTrack
+  - code: not_initialized
+    owner: TrackingException
+    recovery: refresh
+    redaction: no coordinates, route body, user ID, or organization ID
+    commands:
+      - repository-backed queries
+  - code: not_ready
+    owner: TrackingException
+    recovery: refresh
+    redaction: no coordinates, route body, user ID, or organization ID
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: capability_unsupported
+    owner: TrackingNativeException
+    recovery: refresh
+    redaction: capability code only
+    commands:
+      - requestNextPermission
+      - openSettings
+      - paged history
+  - code: track_not_found_in_owner_scope
+    owner: TrackingOwnershipException
+    recovery: resolve_owner_capture
+    redaction: no track, user, or organization identity
+    commands:
+      - listSegmentPage
+      - listPointPage
+  - code: invalid_page_cursor
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no cursor payload or owner identity
+    commands:
+      - listSegmentPage
+      - listPointPage
+  - code: invalid_page_snapshot
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no track or owner identity
+    commands:
+      - listSegmentPage
+      - listPointPage
+  - code: segment_not_found
+    owner: TrackingStorageException
+    recovery: refresh
+    redaction: no segment or owner identity
+    commands:
+      - listPointPage
+  - code: page_item_too_large
+    owner: TrackingStorageException
+    recovery: refresh
+    redaction: no route contents
+    commands:
+      - listSegmentPage
+      - listPointPage
+  - code: legacy_bundle_limit_exceeded
+    owner: TrackingStorageException
+    recovery: refresh
+    redaction: same-owner track ID and point count only
+    commands:
+      - loadTrackBundle
+  - code: configuration_epoch_missing
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: same-owner track ID only
+    commands:
+      - appendPoint
+  - code: export_track_incomplete
+    owner: TrackingStorageException
+    recovery: refresh
+    redaction: verified same-owner track ID only
+    commands:
+      - incremental export
+  - code: export_cancelled
+    owner: TrackingException
+    recovery: refresh
+    redaction: no route or owner identity
+    commands:
+      - incremental export
+  - code: owner_scope_changed
+    owner: TrackingOwnershipException
+    recovery: refresh
+    redaction: no route or owner identity
+    commands:
+      - incremental export
+  - code: education_issue_stale
+    owner: TrackingNotReadyException
+    recovery: refresh
+    redaction: readiness issue code only
+    commands:
+      - acknowledgeReadinessEducation
+  - code: permission_request_failed
+    owner: TrackingPermissionStepException
+    recovery: refresh
+    redaction: no coordinates, route body, user ID, or organization ID
+    commands:
+      - requestNextPermission
+  - code: active_track_conflict
+    owner: TrackingException
+    recovery: resume
+    redaction: same-owner track ID only after scope verification
+    commands:
+      - startNewTrack
+  - code: no_resumable_track
+    owner: TrackingConflictException
+    recovery: resume
+    redaction: no coordinates, route body, user ID, or organization ID
+    commands:
+      - resumeCurrentTrack
+  - code: owner_scope_conflict
+    owner: TrackingException
+    recovery: resolve_owner_capture
+    redaction: no foreign track ID, user ID, or organization ID
+    commands:
+      - open
+      - switchOwner
+      - resolveOwnerScopeConflict
+  - code: native_persistence_failed
+    owner: TrackingException
+    recovery: retry
+    redaction: no coordinates, route body, user ID, or organization ID
+    commands:
+      - pauseCurrentTrack
+      - completeCurrentTrack
+      - native lifecycle commands
+  - code: protocol_incompatible
+    owner: TrackingException
+    recovery: retry
+    redaction: safe protocol versions and capability codes only
+    commands:
+      - native protocol negotiation
+  - code: export_destination_unavailable
+    owner: TrackingException
+    recovery: retry
+    redaction: display filename only
+    commands:
+      - exportTrack
+  - code: export_storage_permission_required
+    owner: native Android PlatformException
+    recovery: open_settings
+    redaction: API level only
+    commands:
+      - exportToDownloads
+      - deleteDownloadExport
+  - code: native_protocol_upgrade_required
+    owner: TrackingExportException
+    recovery: retry
+    redaction: native capability only
+    commands:
+      - exportTrackV2
+  - code: export_destination_unreadable
+    owner: TrackingExportException
+    recovery: retry
+    redaction: no path, URI, track, or owner identity
+    commands:
+      - prepareExportForSharing
+  - code: managed_export_not_found
+    owner: TrackingExportException
+    recovery: refresh
+    redaction: no path, URI, track, or owner identity
+    commands:
+      - prepareExportForSharing
+  - code: share_copy_failed
+    owner: TrackingExportException
+    recovery: retry
+    redaction: no path, URI, track, or owner identity
+    commands:
+      - prepareExportForSharing
+  - code: destructive_action_not_confirmed
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: no track or owner identity
+    commands:
+      - deleteRecordedTrack
+      - eraseTrackEverywhere
+  - code: privacy_operation_conflict
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: operation ID is never included in the message
+    commands:
+      - abortCurrentTrack
+      - deleteRecordedTrack
+      - eraseTrackEverywhere
+  - code: privacy_operation_not_found
+    owner: TrackingStorageException
+    recovery: refresh
+    redaction: no operation, track, or owner identity
+    commands:
+      - privacy operation recovery
+  - code: managed_exports_require_explicit_cleanup
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: no path, URI, track, or owner identity
+    commands:
+      - deleteRecordedTrack
+  - code: native_clear_failed
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no native payload, track, or owner identity
+    commands:
+      - deleteRecordedTrack
+      - eraseTrackEverywhere
+  - code: owner_conflict_resolution_not_confirmed
+    owner: TrackingOwnershipException
+    recovery: resolve_owner_capture
+    redaction: no foreign track, user, organization, or lease identity
+    commands:
+      - resolveOwnerConflict
+  - code: owner_conflict_token_stale
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: no conflict token or foreign identity
+    commands:
+      - resolveOwnerConflict
+  - code: no_active_track
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: no track or owner identity
+    commands:
+      - updateTrackingConfig
+  - code: tracking_not_ready
+    owner: TrackingNotReadyException
+    recovery: refresh
+    redaction: readiness issues only
+    commands:
+      - example start gesture
+      - FakeTrackingController.startNewTrack
+  - code: native_command_lease_invalid
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no lease token, track, or owner identity
+    commands:
+      - native lifecycle commands
+  - code: native_command_session_mismatch
+    owner: TrackingNativeException
+    recovery: refresh
+    redaction: no lease token, track, or owner identity
+    commands:
+      - native lifecycle commands
+  - code: native_journal_cursor_stalled
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no journal payload, cursor, track, or owner identity
+    commands:
+      - pending journal drain
+  - code: native_journal_page_limit_exceeded
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no journal payload, cursor, track, or owner identity
+    commands:
+      - pending journal drain
+  - code: no_current_track
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: no track or owner identity
+    commands:
+      - owner-bound legacy lifecycle methods
+  - code: no_abortable_track
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: no track or owner identity
+    commands:
+      - abortCurrentTrack
+  - code: track_not_abortable
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: same-owner lifecycle state only
+    commands:
+      - abortCurrentTrack
+  - code: track_not_deletable
+    owner: TrackingConflictException
+    recovery: refresh
+    redaction: same-owner lifecycle state only
+    commands:
+      - deleteRecordedTrack
+      - eraseTrackEverywhere
+  - code: privacy_operation_not_committed
+    owner: TrackingConflictException
+    recovery: retry
+    redaction: no operation, track, or owner identity
+    commands:
+      - privacy operation recovery
+  - code: native_owner_conflict
+    owner: TrackingOwnershipException
+    recovery: resolve_owner_capture
+    redaction: no native track, user, organization, or lease identity
+    commands:
+      - abortCurrentTrack
+      - eraseTrackEverywhere
+  - code: managed_export_not_found_in_owner_scope
+    owner: TrackingOwnershipException
+    recovery: refresh
+    redaction: no export path, URI, track, or owner identity
+    commands:
+      - managed export lookup
+      - managed export deletion
+  - code: managed_export_not_committed
+    owner: TrackingExportException
+    recovery: retry
+    redaction: no export path, URI, track, or owner identity
+    commands:
+      - prepareExportForSharing
+  - code: invalid_export_destination
+    owner: TrackingStorageException
+    recovery: refresh
+    redaction: destination type only
+    commands:
+      - managed export persistence
+  - code: unsafe_export_path
+    owner: TrackingExportException
+    recovery: refresh
+    redaction: no filesystem path
+    commands:
+      - deleteManagedExport
+  - code: unsafe_share_cache_path
+    owner: TrackingExportException
+    recovery: refresh
+    redaction: no filesystem path
+    commands:
+      - prepareExportForSharing

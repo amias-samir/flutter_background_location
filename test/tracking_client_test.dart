@@ -18,7 +18,12 @@ final class _MemoryWriter implements ExportFileWriter {
       '/exports/$fileName';
 }
 
-final class _FakeTracker implements TrackerAdapter, NativeUserActionAdapter {
+final class _FakeTracker
+    implements
+        TrackerAdapter,
+        NativeUserActionAdapter,
+        StagedPermissionAdapter,
+        TrackScopedNativeDataAdapter {
   final StreamController<LocationSample> locations =
       StreamController<LocationSample>.broadcast();
   final StreamController<ActivitySnapshot> activities =
@@ -31,11 +36,24 @@ final class _FakeTracker implements TrackerAdapter, NativeUserActionAdapter {
   final List<String> starts = <String>[];
   final List<String> pauses = <String>[];
   final List<String> stops = <String>[];
+  final List<TrackingConfig> configUpdates = <TrackingConfig>[];
+  final List<String> clearedNativeTracks = <String>[];
+  final List<bool> permissionRequests = <bool>[];
   bool running = false;
   String? nativeTrackId;
   bool failNextPauseAfterStopping = false;
   PendingNativeUserAction? nativeUserAction;
   final List<String> acknowledgedNativeUserActions = <String>[];
+  TrackingPermissionState permissionState = const TrackingPermissionState(
+    platform: 'test',
+    location: LocationPermissionLevel.always,
+    locationServiceEnabled: true,
+    preciseLocation: true,
+    activityRecognitionGranted: true,
+    notificationGranted: true,
+  );
+  final List<TrackingReadinessAction> permissionSteps =
+      <TrackingReadinessAction>[];
 
   @override
   Stream<LocationSample> get locationStream => locations.stream;
@@ -57,6 +75,12 @@ final class _FakeTracker implements TrackerAdapter, NativeUserActionAdapter {
   Future<void> acknowledgePendingUserAction(String actionId) async {
     acknowledgedNativeUserActions.add(actionId);
     if (nativeUserAction?.actionId == actionId) nativeUserAction = null;
+  }
+
+  @override
+  Future<int> clearNativeTrackData(String trackId) async {
+    clearedNativeTracks.add(trackId);
+    return 0;
   }
 
   @override
@@ -110,8 +134,19 @@ final class _FakeTracker implements TrackerAdapter, NativeUserActionAdapter {
       List<LocationSample>.of(pending);
 
   @override
-  Future<TrackingPermissionState> permissions({bool request = false}) async =>
-      const TrackingPermissionState(
+  Future<TrackingPermissionState> permissions({bool request = false}) async {
+    permissionRequests.add(request);
+    return permissionState;
+  }
+
+  @override
+  Future<TrackingPermissionState> requestPermissionStep({
+    required TrackingReadinessAction action,
+    required int expectedReadinessRevision,
+  }) async {
+    permissionSteps.add(action);
+    if (action == TrackingReadinessAction.requestBackgroundLocation) {
+      permissionState = const TrackingPermissionState(
         platform: 'test',
         location: LocationPermissionLevel.always,
         locationServiceEnabled: true,
@@ -119,6 +154,9 @@ final class _FakeTracker implements TrackerAdapter, NativeUserActionAdapter {
         activityRecognitionGranted: true,
         notificationGranted: true,
       );
+    }
+    return permissionState;
+  }
 
   @override
   Future<void> resume({
@@ -161,7 +199,9 @@ final class _FakeTracker implements TrackerAdapter, NativeUserActionAdapter {
   Future<void> updateConfig({
     required String trackId,
     required TrackingConfig config,
-  }) async {}
+  }) async {
+    configUpdates.add(config);
+  }
 }
 
 Future<void> _waitUntil(Future<bool> Function() condition) async {
@@ -235,6 +275,48 @@ void main() {
     expect(tracker.acknowledged, <String>['earlier', 'later']);
     expect(client.currentStatus.motionState, MotionState.moving);
     expect(client.currentStatus.samplingProfile, SamplingProfile.moving);
+
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('mismatched native fixes are quarantined before acknowledgement',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'active-track');
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = trackId
+      ..pending.add(
+        LocationSample(
+          latitude: 27.71,
+          longitude: 85.31,
+          capturedAt: harness.now.add(const Duration(seconds: 10)),
+          eventId: 'foreign-event',
+          trackId: 'foreign-native-track',
+        ),
+      );
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(seconds: 30)),
+    );
+
+    await client.initialize();
+
+    await _waitUntil(
+        () async => tracker.acknowledged.contains('foreign-event'));
+    final bundle = await harness.repository.loadTrackBundle(trackId);
+    final points = bundle.segments.expand((segment) => segment.points).toList();
+    expect(points, hasLength(1));
+    expect(points.single.accepted, isFalse);
+    expect(
+      points.single.qualityFlags,
+      TrackPointQualityFlag.nativeTrackMismatch,
+    );
+    expect(points.single.rejectionReason, 'native_track_mismatch');
 
     await client.completeTrack(trackId: trackId);
     await client.dispose();
@@ -366,6 +448,248 @@ void main() {
     await client.dispose();
   });
 
+  test('startNewTrack creates a route with read-only readiness', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
+    );
+
+    final result = await client.startNewTrack(
+      const TrackStartRequest(
+        owner: TrackingOwner(userId: 'user-1', organizationId: 'org-1'),
+        routeId: 'North Route',
+      ),
+    );
+
+    expect(result.disposition, TrackStartDisposition.created);
+    expect(result.created, isTrue);
+    expect(result.track.userId, 'user-1');
+    expect(result.track.organizationId, 'org-1');
+    expect(result.track.routeId, startsWith('North_Route_'));
+    expect(tracker.starts, <String>[result.trackId]);
+    expect(tracker.permissionRequests, isNot(contains(true)));
+
+    await client.completeTrack(trackId: result.trackId);
+    await client.dispose();
+  });
+
+  test('startNewTrack reports same-owner conflict without native mutation',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'active-track');
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = trackId;
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+
+    await expectLater(
+      client.startNewTrack(
+        const TrackStartRequest(
+          owner: TrackingOwner(userId: 'user-1', organizationId: 'org-1'),
+        ),
+      ),
+      throwsA(
+        isA<TrackingConflictException>()
+            .having((error) => error.code, 'code', 'active_track_conflict')
+            .having((error) => error.trackId, 'trackId', trackId),
+      ),
+    );
+    expect(tracker.starts, isEmpty);
+
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('startOrRecoverTrack hides a foreign paused route and starts own route',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'foreign-track');
+    await harness.repository.pauseTrack(trackId, reason: 'owner switch');
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+
+    final result = await client.startOrRecoverTrack(
+      const TrackStartRequest(
+        owner: TrackingOwner(userId: 'other-user', organizationId: 'org'),
+      ),
+    );
+    expect(result.disposition, TrackStartDisposition.created);
+    expect(result.track.userId, 'other-user');
+    expect(result.track.id, isNot(trackId));
+    expect(tracker.starts, <String>[result.track.id]);
+
+    await client.completeTrack(trackId: result.track.id);
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('startOrRecoverTrack resumes a same-owner paused route', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'paused-track');
+    await harness.repository.pauseTrack(trackId, reason: 'rest');
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+
+    final result = await client.startOrRecoverTrack(
+      const TrackStartRequest(
+        owner: TrackingOwner(userId: 'user-1', organizationId: 'org-1'),
+      ),
+    );
+
+    expect(result.trackId, trackId);
+    expect(result.disposition, TrackStartDisposition.resumedPaused);
+    expect(tracker.starts, <String>[trackId]);
+    expect(tracker.permissionRequests, isNot(contains(true)));
+    expect((await harness.repository.getTrack(trackId))!.status,
+        TrackStatus.active);
+
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('startTrack validates config before database or native mutation',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    await expectLater(
+      client.startTrack(
+        userId: 'user',
+        organizationId: 'org',
+        config: TrackingConfig.fromMap(<String, Object?>{
+          'movingIntervalMs': 0,
+        }),
+      ),
+      throwsA(
+        isA<TrackingConfigurationException>()
+            .having((error) => error.code, 'code', 'invalid_configuration'),
+      ),
+    );
+
+    expect(tracker.starts, isEmpty);
+    expect(await harness.repository.listTracks(), isEmpty);
+    await client.dispose();
+  });
+
+  test('checkReadiness is read-only and separates background education',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker()
+      ..permissionState = const TrackingPermissionState(
+        platform: 'test',
+        location: LocationPermissionLevel.whileInUse,
+        locationServiceEnabled: true,
+        preciseLocation: true,
+        activityRecognitionGranted: true,
+        notificationGranted: true,
+        canRequestBackground: true,
+      );
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final readiness = await client.checkReadiness();
+
+    expect(readiness.canStart, isFalse);
+    expect(
+      readiness.nextAction,
+      TrackingReadinessAction.explainBackgroundLocation,
+    );
+    expect(tracker.permissionSteps, isEmpty);
+    expect(tracker.starts, isEmpty);
+    await client.dispose();
+  });
+
+  test('requestNextPermission performs one staged request after education',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker()
+      ..permissionState = const TrackingPermissionState(
+        platform: 'test',
+        location: LocationPermissionLevel.whileInUse,
+        locationServiceEnabled: true,
+        preciseLocation: true,
+        activityRecognitionGranted: true,
+        notificationGranted: true,
+        canRequestBackground: true,
+      );
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    await client.acknowledgeReadinessEducation(
+      'background_location_explanation_required',
+    );
+    final readiness = await client.requestNextPermission();
+
+    expect(readiness.canStart, isTrue);
+    expect(readiness.nextAction, TrackingReadinessAction.none);
+    expect(
+      tracker.permissionSteps,
+      <TrackingReadinessAction>[
+        TrackingReadinessAction.requestBackgroundLocation,
+      ],
+    );
+    expect(tracker.starts, isEmpty);
+    await client.dispose();
+  });
+
+  test('healthSnapshot reports coordinate-free status and readiness', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
+    );
+    await client.initialize();
+
+    final health = await client.healthSnapshot();
+
+    expect(health.observedAt, harness.now);
+    expect(health.status.lifecycle, TrackerLifecycle.paused);
+    expect(health.canStart, isTrue);
+    expect(health.nativeProtocol.version, 1);
+    await client.dispose();
+  });
+
   test('native capture runs only while the route is active', () async {
     final harness = RepositoryHarness();
     await harness.initialize();
@@ -396,6 +720,34 @@ void main() {
     expect(tracker.running, isFalse);
     expect(tracker.stops, <String>[trackId]);
     expect(client.currentStatus.lifecycle, TrackerLifecycle.idle);
+    await client.dispose();
+  });
+
+  test('completeTrack clears matching paused native state', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final trackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+    );
+    await client.pauseTrack(trackId: trackId);
+
+    expect(tracker.running, isFalse);
+    expect(tracker.nativeTrackId, trackId);
+
+    await client.completeTrack(trackId: trackId);
+
+    expect(tracker.stops, <String>[trackId]);
+    expect(tracker.nativeTrackId, isNull);
+    expect((await client.getTrack(trackId))!.status, TrackStatus.completed);
     await client.dispose();
   });
 
@@ -463,6 +815,39 @@ void main() {
     await client.dispose();
   });
 
+  test('keepLatestOnly never deletes another owner route', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final foreign = await harness.repository.createTrack(
+      userId: 'foreign-user',
+      organizationId: 'foreign-org',
+      config: harness.config,
+      requestedTrackId: 'foreign-completed',
+    );
+    await harness.repository.markTrackActive(foreign);
+    await harness.repository.completeTrack(foreign, reason: 'finished');
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      configuration: const TrackingConfiguration(
+        recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
+      ),
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+
+    final own = await client.startNewTrack(
+      const TrackStartRequest(
+        owner: TrackingOwner(userId: 'user-1', organizationId: 'org-1'),
+      ),
+    );
+
+    expect(await harness.repository.getTrack(foreign), isNotNull);
+    expect(await harness.repository.getTrack(own.trackId), isNotNull);
+    await client.completeTrack(trackId: own.trackId);
+    await client.dispose();
+  });
+
   test('deleteTrack removes a selected completed route', () async {
     final harness = RepositoryHarness();
     await harness.initialize();
@@ -487,6 +872,39 @@ void main() {
 
     expect(await client.getTrack(trackId), isNull);
     expect(await client.listTracks(), isEmpty);
+    await client.dispose();
+  });
+
+  test('listTrackPage exposes bounded route summaries through the client',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    final firstTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+      requestedTrackId: 'page-first',
+    );
+    await client.completeTrack(trackId: firstTrackId);
+    harness.now = harness.now.add(const Duration(minutes: 1));
+    final secondTrackId = await client.startTrack(
+      userId: 'user',
+      organizationId: 'org',
+      requestedTrackId: 'page-second',
+    );
+    await client.completeTrack(trackId: secondTrackId);
+
+    final page = await client.listTrackPage(TrackQuery(limit: 1));
+
+    expect(page.items.map((track) => track.id), <String>[secondTrackId]);
+    expect(page.hasMore, isTrue);
+    expect(page.nextCursor, isNotNull);
+
     await client.dispose();
   });
 
@@ -743,5 +1161,378 @@ void main() {
 
     await client.completeTrack(trackId: trackId);
     await client.dispose();
+  });
+
+  test('session stream replays route-aware lifecycle actions', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'session-track');
+    await harness.repository.pauseTrack(trackId, reason: 'rest');
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+    );
+    await client.initialize();
+
+    final paused = await client.sessionStream.first;
+    expect(paused.currentTrack?.id, trackId);
+    expect(paused.allowedActions.canStartNew, isFalse);
+    expect(paused.allowedActions.canPause, isFalse);
+    expect(paused.allowedActions.canResume, isTrue);
+    expect(paused.allowedActions.canComplete, isTrue);
+
+    await client.completeTrack(trackId: trackId);
+    await _waitUntil(
+      () async => client.currentSession?.allowedActions.canStartNew == true,
+    );
+
+    final idle = client.currentSession!;
+    expect(idle.status.lifecycle, TrackerLifecycle.idle);
+    expect(idle.currentTrack, isNull);
+    expect(idle.allowedActions.canStartNew, isTrue);
+    await client.dispose();
+  });
+
+  test('Q1-03 reports first-fix timeout while capture keeps running', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
+    );
+    await client.initialize();
+    final trackId = await client.startTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: const TrackingConfig(
+        firstFixTimeout: Duration(milliseconds: 10),
+      ),
+    );
+
+    await _waitUntil(
+      () async =>
+          client.currentSession?.fixState == TrackingFixState.firstFixTimedOut,
+    );
+    expect(tracker.running, isTrue);
+    expect((await harness.repository.getTrack(trackId))!.status,
+        TrackStatus.active);
+
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('Q1-03 starts a new geometry segment after a large callback gap',
+      () async {
+    final harness = RepositoryHarness(
+      config: const TrackingConfig(
+        largeGapThreshold: Duration(minutes: 1),
+      ),
+    );
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(minutes: 2)),
+    );
+    await client.initialize();
+    final trackId = await client.startTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: harness.config,
+    );
+    tracker.locations.add(LocationSample(
+      latitude: 27.7,
+      longitude: 85.3,
+      horizontalAccuracy: 5,
+      capturedAt: harness.now,
+      provider: 'test',
+      trackId: trackId,
+      eventId: 'gap-first',
+    ));
+    await _waitUntil(
+      () async =>
+          (await harness.repository.getTrack(trackId))!.acceptedPointCount == 1,
+    );
+    tracker.locations.add(LocationSample(
+      latitude: 28.7,
+      longitude: 86.3,
+      horizontalAccuracy: 5,
+      capturedAt: harness.now.add(const Duration(minutes: 2)),
+      provider: 'test',
+      trackId: trackId,
+      eventId: 'gap-second',
+    ));
+    await _waitUntil(
+      () async =>
+          (await harness.repository.getTrack(trackId))!.acceptedPointCount == 2,
+    );
+
+    final bundle = await harness.repository.loadTrackBundle(trackId);
+    expect(bundle.segments, hasLength(2));
+    expect(
+        bundle.segments.first.segment.status, TrackSegmentStatus.interrupted);
+    expect(
+        bundle.segments.last.points.single.qualityFlags &
+            TrackPointQualityFlag.largeGap,
+        isNot(0));
+    expect(bundle.track.totalDistanceMeters, 0);
+
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test('E1-OPEN returns an initialized owner-scoped controller', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    const firstOwner = TrackingOwner(
+      userId: 'user-1',
+      organizationId: 'org-1',
+    );
+    const secondOwner = TrackingOwner(
+      userId: 'user-2',
+      organizationId: 'org-1',
+    );
+    final controller = await TrackingClient.open(
+      owner: firstOwner,
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
+    );
+
+    expect(controller.isInitialized, isTrue);
+    expect(controller.currentOwner.userId, 'user-1');
+    final first = await controller.startNewTrack(
+      const TrackStartRequest(owner: firstOwner, routeId: 'owner one'),
+    );
+    await expectLater(
+      controller.startNewTrack(
+        const TrackStartRequest(owner: secondOwner, routeId: 'wrong owner'),
+      ),
+      throwsA(isA<TrackingOwnershipException>()),
+    );
+    expect(tracker.starts, hasLength(1));
+
+    final paused = await controller.pauseCurrentTrack();
+    expect(paused.track.status, TrackStatus.paused);
+    await controller.switchOwner(secondOwner);
+    expect(await controller.getTrack(first.trackId), isNull);
+    expect(controller.currentSession.blockerCode, isNull);
+    expect(controller.currentSession.allowedActions.canStartNew, isTrue);
+
+    final second = await controller.startNewTrack(
+      const TrackStartRequest(owner: secondOwner, routeId: 'owner two'),
+    );
+    expect(second.track.userId, 'user-2');
+    await controller.completeCurrentTrack();
+    await controller.dispose();
+  });
+
+  test('B1-03 runtime config update fences capture and activates an epoch',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    const owner = TrackingOwner(userId: 'user-1', organizationId: 'org-1');
+    final controller = await TrackingClient.open(
+      owner: owner,
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
+    );
+    final started = await controller.startNewTrack(
+      const TrackStartRequest(owner: owner, routeId: 'config update'),
+    );
+    const updatedConfig = TrackingConfig(accuracy: TrackingAccuracy.medium);
+
+    final update = await (controller as TrackingConfigurationController)
+        .updateTrackingConfig(updatedConfig);
+
+    expect(update.trackId, started.trackId);
+    expect(update.epoch.epochNumber, 2);
+    expect(update.epoch.resolvedConfig.accuracy, TrackingAccuracy.medium);
+    expect(tracker.pauses, <String>[started.trackId]);
+    expect(tracker.configUpdates, <TrackingConfig>[updatedConfig]);
+    expect(tracker.starts, <String>[started.trackId, started.trackId]);
+    expect((await controller.getTrack(started.trackId))!.config.accuracy,
+        TrackingAccuracy.medium);
+
+    await controller.completeCurrentTrack();
+    await controller.dispose();
+  });
+
+  test(
+      'E1-OWN resolves a redacted foreign live capture with a stale-safe token',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final foreignId = await harness.createActiveTrack(trackId: 'foreign-live');
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = foreignId;
+    const newOwner = TrackingOwner(
+      userId: 'new-user',
+      organizationId: 'org-1',
+    );
+    final controller = await TrackingClient.open(
+      owner: newOwner,
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now,
+    );
+    final blocked = controller.currentSession;
+    expect(blocked.blockerCode, 'owner_scope_conflict');
+    expect(blocked.currentTrack, isNull);
+    expect(blocked.blockerRecoveryToken, isNotEmpty);
+
+    await expectLater(
+      controller.resolveOwnerConflict(
+        const OwnerConflictResolutionRequest(
+          conflictToken: 'stale',
+          operationId: 'resolve-1',
+          confirmed: true,
+        ),
+      ),
+      throwsA(
+        isA<TrackingConflictException>().having(
+          (error) => error.code,
+          'code',
+          'owner_conflict_token_stale',
+        ),
+      ),
+    );
+    final result = await controller.resolveOwnerConflict(
+      OwnerConflictResolutionRequest(
+        conflictToken: blocked.blockerRecoveryToken!,
+        operationId: 'resolve-1',
+        confirmed: true,
+      ),
+    );
+    expect(
+      result.disposition,
+      OwnerConflictResolutionDisposition.preservedPaused,
+    );
+    expect((await harness.repository.getTrack(foreignId))!.status,
+        TrackStatus.paused);
+    expect(controller.currentSession.blockerCode, isNull);
+    expect(controller.currentSession.allowedActions.canStartNew, isTrue);
+
+    await controller.dispose();
+  });
+
+  test('P1-01 abort retains a cancelled route and clears scoped native data',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'privacy-abort');
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = trackId;
+    final privacy = TrackingPrivacyService(
+      repository: harness.repository,
+      tracker: tracker,
+      owner: const TrackingOwner(
+        userId: 'user-1',
+        organizationId: 'org-1',
+      ),
+    );
+
+    final report = await privacy.abortCurrentTrack(
+      const AbortTrackRequest(
+        reason: 'user_cancelled',
+        operationId: 'privacy-abort-op',
+      ),
+    );
+    final replay = await privacy.abortCurrentTrack(
+      const AbortTrackRequest(operationId: 'privacy-abort-op'),
+    );
+
+    expect(report.status, 'completed');
+    expect(replay.operationId, report.operationId);
+    expect(tracker.stops, <String>[trackId]);
+    expect(tracker.clearedNativeTracks, <String>[trackId]);
+    final retained = await harness.repository.getTrack(trackId);
+    expect(retained?.status, TrackStatus.failed);
+    expect(retained?.terminalReasonCode, 'cancelled_by_host');
+    await tracker.dispose();
+    await harness.repository.close();
+  });
+
+  test('P1-01 confirmed deletion is owner-scoped and replayable', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'privacy-delete');
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+    final tracker = _FakeTracker();
+    final privacy = TrackingPrivacyService(
+      repository: harness.repository,
+      tracker: tracker,
+      owner: const TrackingOwner(
+        userId: 'user-1',
+        organizationId: 'org-1',
+      ),
+    );
+    const request = DeleteTrackRequest(
+      trackId: 'privacy-delete',
+      confirmed: true,
+      operationId: 'privacy-delete-op',
+    );
+
+    final report = await privacy.deleteRecordedTrack(request);
+    final replay = await privacy.deleteRecordedTrack(request);
+
+    expect(report.status, 'completed');
+    expect(replay.operationId, report.operationId);
+    expect(await harness.repository.getTrack(trackId), isNull);
+    expect(tracker.clearedNativeTracks, <String>[trackId]);
+    final operation =
+        await harness.repository.getPrivacyOperation(report.operationId);
+    expect(operation?.status, 'completed');
+    expect(operation?.trackId, isNull);
+    await tracker.dispose();
+    await harness.repository.close();
+  });
+
+  test('P1-01 erase stops active capture and removes only selected owner route',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'privacy-erase');
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = trackId;
+    final privacy = TrackingPrivacyService(
+      repository: harness.repository,
+      tracker: tracker,
+      owner: const TrackingOwner(
+        userId: 'user-1',
+        organizationId: 'org-1',
+      ),
+    );
+
+    final report = await privacy.eraseTrackEverywhere(
+      const EraseTrackRequest(
+        trackId: 'privacy-erase',
+        confirmed: true,
+        operationId: 'privacy-erase-op',
+      ),
+    );
+
+    expect(report.status, 'completed');
+    expect(tracker.stops, <String>[trackId]);
+    expect(tracker.clearedNativeTracks, <String>[trackId]);
+    expect(await harness.repository.getTrack(trackId), isNull);
+    await tracker.dispose();
+    await harness.repository.close();
   });
 }

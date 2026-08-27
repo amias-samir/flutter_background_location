@@ -28,6 +28,11 @@ final class LocationSample {
     this.trackId,
     this.capturedActivity,
     this.capturedMotionState,
+    this.nativeReceivedAt,
+    this.providerTimeDeltaMsAtReceipt,
+    this.monotonicFixNanos,
+    this.monotonicReceivedNanos,
+    this.monotonicDomainId,
   });
 
   final double latitude;
@@ -54,6 +59,21 @@ final class LocationSample {
   final String? trackId;
   final ActivitySnapshot? capturedActivity;
   final MotionState? capturedMotionState;
+
+  /// Wall-clock time at which the native callback received this fix.
+  final DateTime? nativeReceivedAt;
+
+  /// Signed native-receipt minus provider-time delta in milliseconds.
+  final int? providerTimeDeltaMsAtReceipt;
+
+  /// Provider monotonic fix marker, when the platform supplies one.
+  final int? monotonicFixNanos;
+
+  /// Native callback monotonic marker in [monotonicDomainId].
+  final int? monotonicReceivedNanos;
+
+  /// Opaque boot/process clock domain for safe monotonic comparisons.
+  final String? monotonicDomainId;
 
   MockLocationAssessment get mockAssessment {
     // A positive platform signal is authoritative even if an older adapter
@@ -104,6 +124,14 @@ final class LocationSample {
       provider: map['provider'] as String?,
       eventId: map['eventId'] as String?,
       trackId: map['trackId'] as String?,
+      nativeReceivedAt: map['nativeReceivedAt'] == null
+          ? null
+          : timestamp(map['nativeReceivedAt']),
+      providerTimeDeltaMsAtReceipt:
+          (map['providerTimeDeltaMsAtReceipt'] as num?)?.toInt(),
+      monotonicFixNanos: (map['monotonicFixNanos'] as num?)?.toInt(),
+      monotonicReceivedNanos: (map['monotonicReceivedNanos'] as num?)?.toInt(),
+      monotonicDomainId: map['monotonicDomainId'] as String?,
       capturedActivity: hasActivity
           ? ActivitySnapshot(
               type: trackingActivityTypeFromValue(map['activityType']),

@@ -1,9 +1,15 @@
 import '../domain/activity_snapshot.dart';
+import '../domain/export_models.dart';
 import '../domain/location_sample.dart';
 import '../domain/track.dart';
+import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
+import '../domain/track_query.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
+import '../domain/tracking_configuration_epoch.dart';
+import '../domain/tracking_privacy.dart';
+import '../domain/tracking_start.dart';
 
 final class TrackBundle {
   const TrackBundle({required this.track, required this.segments});
@@ -147,6 +153,218 @@ abstract interface class UploadOutboxRepository {
     String trackId,
     UploadOutboxKind kind,
   );
+}
+
+/// Optional accidental cross-account guard for upload discovery.
+///
+/// Authentication and upload credentials remain the host application's
+/// responsibility. The built-in uploader uses this capability whenever an
+/// owner-bound controller was opened.
+abstract interface class OwnerScopedUploadOutboxRepository {
+  Future<List<String>> pendingUploadTrackIdsForOwner(TrackingOwner owner);
+}
+
+/// Optional bounded route-history capability.
+abstract interface class PaginatedTrackRepository {
+  Future<TrackPage> listTrackPage(TrackQuery query);
+}
+
+/// Optional owner-scoped, bounded route-data capability.
+///
+/// Cursors are opaque and are valid only for the exact track, segment, and
+/// accepted-point filter used to create them. Each first page fixes an upper
+/// sequence/segment boundary, so concurrent appends are visible only to a new
+/// traversal. The owner metadata is an accidental cross-account guard, not an
+/// authentication boundary; host authentication remains the app's duty.
+abstract interface class StreamingTrackRepository {
+  Future<TrackDataSnapshot> createTrackDataSnapshot({
+    required TrackingOwner owner,
+    required String trackId,
+  });
+
+  Future<TrackSegmentPage> listSegmentPage({
+    required TrackingOwner owner,
+    required String trackId,
+    required int limit,
+    String? cursor,
+    TrackDataSnapshot? snapshot,
+  });
+
+  Future<TrackPointPage> listPointPage({
+    required TrackingOwner owner,
+    required String trackId,
+    String? segmentId,
+    required int limit,
+    String? cursor,
+    bool acceptedOnly = false,
+    TrackDataSnapshot? snapshot,
+  });
+}
+
+/// Optional owner-scoped lookup for immutable point-policy provenance.
+abstract interface class ConfigurationEpochRepository {
+  Future<TrackingConfigurationEpoch?> getConfigurationEpoch({
+    required TrackingOwner owner,
+    required String trackId,
+    required String epochId,
+  });
+}
+
+/// Durable primitives for a pause-fenced runtime configuration switch.
+abstract interface class MutableConfigurationEpochRepository {
+  Future<TrackingConfigurationUpdateOperation> beginConfigurationUpdate({
+    required TrackingOwner owner,
+    required String trackId,
+    required TrackingConfig config,
+  });
+
+  Future<void> markConfigurationUpdateStage({
+    required String operationId,
+    required TrackingConfigurationUpdateStage stage,
+  });
+
+  Future<TrackingConfigurationEpoch> activateConfigurationUpdate({
+    required String operationId,
+  });
+
+  Future<void> cancelConfigurationUpdate(String operationId);
+
+  Future<List<TrackingConfigurationUpdateOperation>>
+      pendingConfigurationUpdates();
+}
+
+/// Optional repository capability for an explicit in-session route gap.
+abstract interface class GapSegmentRepository {
+  Future<String> beginGapSegment({
+    required String trackId,
+    required DateTime observedAt,
+    required String reason,
+  });
+}
+
+/// Owner-scoped route lookup and retention capability used by the safe facade.
+///
+/// Owner metadata prevents accidental cross-account access inside the package;
+/// it is not an authentication boundary. Custom repositories must implement
+/// this capability to participate in explicit owner-safe lifecycle APIs.
+abstract interface class OwnerScopedTrackRepository {
+  Stream<Track?> watchCurrentTrackForOwner(TrackingOwner owner);
+
+  Future<Track?> getTrackForOwner(TrackingOwner owner, String trackId);
+
+  Future<Track?> findActiveTrackForOwner(TrackingOwner owner);
+
+  Future<Track?> findLatestPausedTrackForOwner(TrackingOwner owner);
+
+  Future<List<Track>> listTracksForOwner(TrackingOwner owner);
+
+  Future<void> deleteTrackForOwner(TrackingOwner owner, String trackId);
+
+  Future<void> deleteTracksExceptForOwner(
+    TrackingOwner owner,
+    Set<String> retainedTrackIds,
+  );
+}
+
+/// Durable owner-scoped primitives for additive abort/delete/erase workflows.
+abstract interface class PrivacyTrackRepository {
+  Future<TrackPrivacyOperationRecord> beginPrivacyOperation({
+    required TrackingOwner owner,
+    required String trackId,
+    required String operationType,
+    String? operationId,
+  });
+
+  Future<TrackPrivacyOperationRecord?> getPrivacyOperation(String operationId);
+
+  Future<void> updatePrivacyOperation({
+    required String operationId,
+    required String stage,
+    bool irreversibleCommitted = false,
+    String status = 'pending',
+    String? terminalReasonCode,
+    bool completed = false,
+    bool redactTrackIdentity = false,
+  });
+
+  Future<void> abortTrackForOwner({
+    required TrackingOwner owner,
+    required String trackId,
+    required String reason,
+    required String operationId,
+  });
+
+  Future<void> eraseTrackForOwner({
+    required TrackingOwner owner,
+    required String trackId,
+    required String operationId,
+  });
+
+  Future<void> deleteRecordedTrackForOwner({
+    required TrackingOwner owner,
+    required String trackId,
+    required String operationId,
+  });
+}
+
+enum ManagedExportState { pending, committed, deleted }
+
+/// Canonical inventory entry for an artifact created by the package.
+final class ManagedExportRecord {
+  const ManagedExportRecord({
+    required this.id,
+    required this.trackId,
+    required this.format,
+    required this.state,
+    required this.createdAt,
+    this.destination,
+    this.committedAt,
+    this.deletedAt,
+  });
+
+  final String id;
+  final String trackId;
+  final TrackExportFormat format;
+  final ManagedExportState state;
+  final TrackExportDestination? destination;
+  final DateTime createdAt;
+  final DateTime? committedAt;
+  final DateTime? deletedAt;
+}
+
+/// Optional two-phase inventory used by V2 export and later scoped erase.
+abstract interface class ManagedExportRepository {
+  Future<String> beginManagedExport({
+    required TrackingOwner owner,
+    required String trackId,
+    required TrackExportFormat format,
+  });
+
+  Future<void> commitManagedExport({
+    required TrackingOwner owner,
+    required String exportId,
+    required TrackExportDestination destination,
+  });
+
+  Future<void> abortManagedExport({
+    required TrackingOwner owner,
+    required String exportId,
+  });
+
+  Future<ManagedExportRecord?> getManagedExport({
+    required TrackingOwner owner,
+    required String exportId,
+  });
+
+  Future<List<ManagedExportRecord>> listManagedExports({
+    required TrackingOwner owner,
+    required String trackId,
+  });
+
+  Future<void> markManagedExportDeleted({
+    required TrackingOwner owner,
+    required String exportId,
+  });
 }
 
 abstract interface class TrackRepository {
