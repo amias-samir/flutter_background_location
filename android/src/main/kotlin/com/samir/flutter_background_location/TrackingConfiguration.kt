@@ -3,18 +3,18 @@ package com.samir.flutter_background_location
 import org.json.JSONObject
 
 internal data class TrackingConfiguration(
-    val movingIntervalMs: Long = 15_000L,
-    val movingDistanceFilterMeters: Float = 15f,
-    val stationaryIntervalMs: Long = 120_000L,
-    val stationaryDistanceFilterMeters: Float = 75f,
+    val movingIntervalMs: Long = 10_000L,
+    val movingDistanceFilterMeters: Float = 5f,
+    val stationaryIntervalMs: Long = 30_000L,
+    val stationaryDistanceFilterMeters: Float = 25f,
     val stationaryTimeoutMs: Long = 90_000L,
     val stationaryProbeDisplacementMeters: Float = 30f,
     val stationaryConfidenceThreshold: Int = 75,
     val movingConfidenceThreshold: Int = 60,
     val movingConfirmationCount: Int = 2,
     val activityRecognitionIntervalMs: Long = 10_000L,
-    val desiredAccuracy: String = "high",
-    val maximumAcceptedAccuracyMeters: Double = 60.0,
+    val desiredAccuracy: String = "precised",
+    val maximumAcceptedAccuracyMeters: Double = 20.0,
     val notificationChannelId: String = "active_location_tracking",
     val notificationChannelName: String = "Active location tracking",
     val notificationChannelDescription: String =

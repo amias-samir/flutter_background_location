@@ -509,7 +509,13 @@ work_packages:
     release_gate: battery and fidelity sign-off
     required_before: runtime config epochs
     evidence_mode: physical_manual
-    evidence: []
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingConfiguration.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/TrackingConfiguration.swift
+      - test/tracking_config_test.dart
+      - README.md
   - id: B1-03
     phase: B1
     title: Epoch-tagged atomic runtime configuration capability

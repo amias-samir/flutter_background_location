@@ -346,6 +346,54 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     await _openController();
   }
 
+  Future<void> _changeAccuracy(TrackingAccuracy value) async {
+    if (value == _accuracy) return;
+    setState(() => _accuracy = value);
+    if (value != TrackingAccuracy.precised || !mounted) return;
+
+    final openSettings =
+        await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Precised tracking uses more battery'),
+            content: const Text(
+              'For the densest Android location updates, exclude this app '
+              'from battery optimization and choose Unrestricted or No '
+              'restrictions if your device provides that option. Setting '
+              'names vary by manufacturer. This is optional and increases '
+              'battery use.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Not now'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Open battery settings'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (openSettings && mounted) await _openBatteryOptimizationSettings();
+  }
+
+  Future<void> _openBatteryOptimizationSettings() => _run(() async {
+    final result = await _tracking!.openSettings(
+      TrackingSettingsDestination.batteryOptimization,
+    );
+    if (!mounted) return;
+    setState(() {
+      _message = result.opened
+          ? 'In Android battery settings, allow this app to ignore battery '
+                'optimization or select Unrestricted/No restrictions.'
+          : result.supported
+          ? 'Battery optimization settings could not be opened.'
+          : 'Battery optimization settings are not available on this platform.';
+    });
+  });
+
   @override
   void dispose() {
     unawaited(_cancelSubscriptions());
@@ -384,7 +432,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
             accuracy: _accuracy,
             enabled: canConfigure,
             onRetentionChanged: _changeRetention,
-            onAccuracyChanged: (value) => setState(() => _accuracy = value),
+            onAccuracyChanged: _changeAccuracy,
           ),
           const SizedBox(height: 16),
           Wrap(
@@ -428,6 +476,13 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                       ),
                 child: const Text('App settings'),
               ),
+              if (_accuracy == TrackingAccuracy.precised)
+                OutlinedButton(
+                  onPressed: _busy || tracking == null
+                      ? null
+                      : _openBatteryOptimizationSettings,
+                  child: const Text('Battery settings'),
+                ),
             ],
           ),
           const SizedBox(height: 16),

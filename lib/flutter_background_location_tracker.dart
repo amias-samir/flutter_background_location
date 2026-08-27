@@ -1,3 +1,5 @@
+/// Public API for background route tracking, lifecycle control, storage,
+/// diagnostics, and export on Android and iOS.
 library;
 
 export 'src/application/tracking_client.dart';

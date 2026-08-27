@@ -30,22 +30,22 @@ struct TrackingConfiguration {
   init(dictionary: [String: Any]) {
     movingIntervalMs = Self.number(
       dictionary["movingIntervalMs"],
-      defaultValue: 15_000,
+      defaultValue: 10_000,
       minimum: 1_000
     )
     movingDistanceFilterMeters = Self.number(
       dictionary["movingDistanceFilterMeters"],
-      defaultValue: 15,
+      defaultValue: 5,
       minimum: 0
     )
     stationaryIntervalMs = Self.number(
       dictionary["stationaryIntervalMs"],
-      defaultValue: 120_000,
+      defaultValue: 30_000,
       minimum: 5_000
     )
     stationaryDistanceFilterMeters = Self.number(
       dictionary["stationaryDistanceFilterMeters"],
-      defaultValue: 75,
+      defaultValue: 25,
       minimum: 0
     )
     stationaryTimeoutMs = Self.number(
@@ -60,12 +60,12 @@ struct TrackingConfiguration {
     )
     maximumAcceptedAccuracyMeters = Self.number(
       dictionary["maximumAcceptedAccuracyMeters"],
-      defaultValue: 60,
+      defaultValue: 20,
       minimum: 1
     )
     movingDesiredAccuracy = Self.accuracy(
       dictionary["desiredAccuracy"],
-      defaultValue: kCLLocationAccuracyBest
+      defaultValue: kCLLocationAccuracyBestForNavigation
     )
     stationaryDesiredAccuracy = Self.accuracy(
       dictionary["stationaryDesiredAccuracy"],

@@ -23,16 +23,16 @@ enum IosTerminationRecoveryMode { interrupted, significantChange }
 /// override the native provider accuracy without changing the intervals or
 /// distance filters.
 enum TrackingAccuracy {
-  /// Prioritizes battery life and accepts fixes accurate to 200 metres.
+  /// Uses balanced native accuracy and accepts fixes accurate to 100 metres.
   low,
 
-  /// Balances route fidelity and battery use, accepting up to 100 metres.
+  /// Uses high native accuracy and accepts fixes accurate to 60 metres.
   medium,
 
-  /// Uses the original high-fidelity defaults and accepts up to 60 metres.
+  /// Uses navigation-grade native accuracy and accepts up to 20 metres.
   high,
 
-  /// Requests dense navigation updates and accepts up to 20 metres.
+  /// Requests the densest navigation updates and accepts up to 10 metres.
   precised;
 
   /// Maximum horizontal accuracy accepted by this predefined profile.
@@ -41,10 +41,10 @@ enum TrackingAccuracy {
   /// explicit `TrackingConfig(maximumAcceptedAccuracyMeters: ...)` value
   /// overrides this preset value.
   double get maximumAcceptedAccuracyMeters => switch (this) {
-        TrackingAccuracy.low => 200,
-        TrackingAccuracy.medium => 100,
-        TrackingAccuracy.high => 60,
-        TrackingAccuracy.precised => 20,
+        TrackingAccuracy.low => 100,
+        TrackingAccuracy.medium => 60,
+        TrackingAccuracy.high => 20,
+        TrackingAccuracy.precised => 10,
       };
 
   /// Parses persisted/native values while accepting the grammatically common
@@ -148,47 +148,52 @@ final class TrackingConfig {
                     : accuracy == TrackingAccuracy.precised
                         ? const Duration(seconds: 45)
                         : const Duration(minutes: 1)),
-        locationAccuracy = locationAccuracy ?? accuracy,
+        locationAccuracy = locationAccuracy ??
+            (accuracy == TrackingAccuracy.low
+                ? TrackingAccuracy.medium
+                : accuracy == TrackingAccuracy.medium
+                    ? TrackingAccuracy.high
+                    : TrackingAccuracy.precised),
         movingDistanceFilterMeters = movingDistanceFilterMeters ??
             (accuracy == TrackingAccuracy.low
-                ? 50
+                ? 25
                 : accuracy == TrackingAccuracy.medium
-                    ? 25
+                    ? 15
                     : accuracy == TrackingAccuracy.precised
                         ? 5
-                        : 15),
+                        : 5),
         movingInterval = movingInterval ??
             (accuracy == TrackingAccuracy.low
-                ? const Duration(minutes: 1)
+                ? const Duration(seconds: 30)
                 : accuracy == TrackingAccuracy.medium
-                    ? const Duration(seconds: 30)
+                    ? const Duration(seconds: 15)
                     : accuracy == TrackingAccuracy.precised
                         ? const Duration(seconds: 5)
-                        : const Duration(seconds: 15)),
+                        : const Duration(seconds: 10)),
         stationaryDistanceFilterMeters = stationaryDistanceFilterMeters ??
             (accuracy == TrackingAccuracy.low
-                ? 200
+                ? 100
                 : accuracy == TrackingAccuracy.medium
-                    ? 100
+                    ? 75
                     : accuracy == TrackingAccuracy.precised
-                        ? 25
-                        : 75),
+                        ? 15
+                        : 25),
         stationaryInterval = stationaryInterval ??
             (accuracy == TrackingAccuracy.low
-                ? const Duration(minutes: 5)
+                ? const Duration(minutes: 3)
                 : accuracy == TrackingAccuracy.medium
-                    ? const Duration(minutes: 3)
+                    ? const Duration(minutes: 2)
                     : accuracy == TrackingAccuracy.precised
                         ? const Duration(seconds: 30)
-                        : const Duration(minutes: 2)),
+                        : const Duration(seconds: 30)),
         maximumAcceptedAccuracyMeters = maximumAcceptedAccuracyMeters ??
             (accuracy == TrackingAccuracy.low
-                ? 200
+                ? 100
                 : accuracy == TrackingAccuracy.medium
-                    ? 100
+                    ? 60
                     : accuracy == TrackingAccuracy.precised
-                        ? 20
-                        : 60),
+                        ? 10
+                        : 20),
         assert(movingDistanceFilterMeters == null ||
             movingDistanceFilterMeters >= 0),
         assert(stationaryDistanceFilterMeters == null ||

@@ -74,7 +74,7 @@ final class TrackStartResult {
   /// Readiness snapshot used before issuing native capture.
   final TrackingReadiness readiness;
 
-  /// Convenience accessor for [track.id].
+  /// Convenience accessor for [Track.id].
   String get trackId => track.id;
 
   /// Whether this command created a new route.

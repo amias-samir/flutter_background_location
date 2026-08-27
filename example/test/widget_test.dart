@@ -27,6 +27,40 @@ void main() {
     });
   });
 
+  testWidgets('precised profile explains and opens battery settings', (
+    tester,
+  ) async {
+    const owner = TrackingOwner(
+      userId: 'example-user',
+      organizationId: 'example-organization',
+    );
+    final controller = FakeTrackingController(owner: owner);
+    await tester.pumpWidget(
+      TrackingExampleApp(controllerFactory: (_, _) async => controller),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(DropdownButtonFormField<TrackingAccuracy>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('precised').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Precised tracking uses more battery'), findsOneWidget);
+    expect(find.textContaining('Unrestricted'), findsOneWidget);
+    await tester.tap(find.text('Open battery settings'));
+    await tester.pumpAndSettle();
+
+    expect(
+      controller.calls.any(
+        (call) =>
+            call.method == 'openSettings' &&
+            call.arguments['destination'] == 'batteryOptimization',
+      ),
+      isTrue,
+    );
+    expect(find.widgetWithText(OutlinedButton, 'Battery settings'), findsOne);
+  });
+
   testWidgets('start asks for a non-empty route identifier', (tester) async {
     await tester.pumpWidget(testApp());
     await tester.pumpAndSettle();

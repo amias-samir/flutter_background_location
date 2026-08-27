@@ -49,7 +49,10 @@ void main() {
     ));
 
     expect(decision.kind, AdaptiveBatteryDecisionKind.unchanged);
-    expect(decision.proposedConfig.locationAccuracy, TrackingAccuracy.high);
+    expect(
+      decision.proposedConfig.locationAccuracy,
+      TrackingAccuracy.precised,
+    );
     expect(decision.proposedConfig.movingInterval, staticConfig.movingInterval);
   });
 
@@ -111,7 +114,7 @@ final class _FakeConfigurationController
         trackId: 'track',
         epochNumber: configs.length + 1,
         resolvedConfig: config,
-        presetDefinitionVersion: 1,
+        presetDefinitionVersion: TrackingPolicyVersions.presetDefinition,
         qualityPolicyVersion: 1,
         createdAt: now,
         activationSequence: configs.length + 1,

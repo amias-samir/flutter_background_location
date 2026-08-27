@@ -5,9 +5,20 @@ import 'tracker_status.dart';
 ///
 /// [notDetected] is not proof that a fix is genuine. Platform signals can be
 /// unavailable or bypassed by rooted/jailbroken devices and RF/GNSS spoofing.
-enum MockLocationAssessment { detected, notDetected, unavailable }
+enum MockLocationAssessment {
+  /// The platform positively marked the fix as simulated or mocked.
+  detected,
 
+  /// Mock detection was available and did not flag the fix.
+  notDetected,
+
+  /// The platform could not provide mock-location evidence.
+  unavailable,
+}
+
+/// Raw location and capture evidence received from the native provider.
 final class LocationSample {
+  /// Creates one provider sample before package quality validation.
   const LocationSample({
     required this.latitude,
     required this.longitude,
@@ -35,21 +46,52 @@ final class LocationSample {
     this.monotonicDomainId,
   });
 
+  /// Latitude in decimal degrees.
   final double latitude;
+
+  /// Longitude in decimal degrees.
   final double longitude;
+
+  /// Altitude above the provider's reference ellipsoid, in metres.
   final double? altitude;
+
+  /// Reported horizontal uncertainty radius, in metres.
   final double? horizontalAccuracy;
+
+  /// Reported vertical uncertainty, in metres.
   final double? verticalAccuracy;
+
+  /// Reported ground speed in metres per second.
   final double? speed;
+
+  /// Reported speed uncertainty in metres per second.
   final double? speedAccuracy;
+
+  /// Reported direction of travel in degrees.
   final double? heading;
+
+  /// Reported heading uncertainty in degrees.
   final double? headingAccuracy;
+
+  /// UTC provider timestamp for the fix.
   final DateTime capturedAt;
+
+  /// Whether the platform positively marked this fix as mocked.
   final bool isMocked;
+
+  /// Whether the platform exposed a mock-detection signal.
   final bool mockDetectionAvailable;
+
+  /// Whether an external accessory produced the location, when known.
   final bool? isProducedByAccessory;
+
+  /// Sanitized platform reason associated with mock detection.
   final String? mockEvidence;
+
+  /// Native provider name, such as `fused` or `gps`.
   final String? provider;
+
+  /// Durable native-journal event identifier, when provided.
   final String? eventId;
 
   /// The native session that produced this fix, when supplied by the adapter.
@@ -57,7 +99,11 @@ final class LocationSample {
   /// Durable native queues use this value to prevent a delayed event from one
   /// session being attached to a different active track after process death.
   final String? trackId;
+
+  /// Activity evidence captured with this fix.
   final ActivitySnapshot? capturedActivity;
+
+  /// Native moving/stationary state captured with this fix.
   final MotionState? capturedMotionState;
 
   /// Wall-clock time at which the native callback received this fix.
@@ -75,6 +121,7 @@ final class LocationSample {
   /// Opaque boot/process clock domain for safe monotonic comparisons.
   final String? monotonicDomainId;
 
+  /// Three-state interpretation of the available mock-location evidence.
   MockLocationAssessment get mockAssessment {
     // A positive platform signal is authoritative even if an older adapter
     // omitted or incorrectly cleared its separate availability field.
@@ -83,6 +130,7 @@ final class LocationSample {
     return MockLocationAssessment.notDetected;
   }
 
+  /// Decodes a native location-channel payload.
   factory LocationSample.fromMap(Map<Object?, Object?> map) {
     double? number(String key) => (map[key] as num?)?.toDouble();
     DateTime timestamp(Object? value, {DateTime? fallback}) {

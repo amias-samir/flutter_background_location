@@ -97,7 +97,7 @@ class TrackingConfigurationControls extends StatelessWidget {
         const Padding(
           padding: EdgeInsets.only(top: 8),
           child: Text(
-            'Precised requests frequent, navigation-grade fixes and can use significantly more battery.',
+            'Precised requests 5-second navigation-grade updates, accepts only fixes within 10 m, and can use significantly more battery.',
             style: TextStyle(color: Colors.deepOrange),
           ),
         ),

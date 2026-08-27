@@ -918,9 +918,20 @@ final class FakeTrackingController
 
   @override
   Future<TrackingSettingsResult> openSettings(
-          TrackingSettingsDestination destination) async =>
-      TrackingSettingsResult(
-          destination: destination, supported: true, opened: true);
+    TrackingSettingsDestination destination,
+  ) async {
+    calls.add(
+      FakeTrackingCall(
+        'openSettings',
+        <String, Object?>{'destination': destination.name},
+      ),
+    );
+    return TrackingSettingsResult(
+      destination: destination,
+      supported: true,
+      opened: true,
+    );
+  }
 
   @override
   Future<TrackingConfigurationUpdateResult> updateTrackingConfig(

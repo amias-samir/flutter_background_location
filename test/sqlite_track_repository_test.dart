@@ -762,7 +762,7 @@ void main() {
     expect(epoch.epochNumber, 1);
     expect(epoch.activationSequence, 1);
     expect(epoch.resolvedConfig.toMap(), harness.config.toMap());
-    expect(epoch.presetDefinitionVersion, 1);
+    expect(epoch.presetDefinitionVersion, 2);
     expect(epoch.qualityPolicyVersion, 1);
 
     await expectLater(

@@ -6,43 +6,47 @@ void main() {
     const config = TrackingConfig();
 
     expect(config.accuracy, TrackingAccuracy.high);
-    expect(config.locationAccuracy, TrackingAccuracy.high);
-    expect(config.movingInterval, const Duration(seconds: 15));
-    expect(config.movingDistanceFilterMeters, 15);
-    expect(config.stationaryInterval, const Duration(minutes: 2));
-    expect(config.stationaryDistanceFilterMeters, 75);
-    expect(config.maximumAcceptedAccuracyMeters, 60);
+    expect(config.locationAccuracy, TrackingAccuracy.precised);
+    expect(config.movingInterval, const Duration(seconds: 10));
+    expect(config.movingDistanceFilterMeters, 5);
+    expect(config.stationaryInterval, const Duration(seconds: 30));
+    expect(config.stationaryDistanceFilterMeters, 25);
+    expect(config.maximumAcceptedAccuracyMeters, 20);
   });
 
   test('accuracy profiles resolve all predefined sampling values', () {
     const expectations = <TrackingAccuracy, Object>{
       TrackingAccuracy.low: (
-        Duration(minutes: 1),
-        50,
-        Duration(minutes: 5),
-        200,
-        200.0,
-      ),
-      TrackingAccuracy.medium: (
         Duration(seconds: 30),
         25,
         Duration(minutes: 3),
         100,
         100.0,
+        TrackingAccuracy.medium,
       ),
-      TrackingAccuracy.high: (
+      TrackingAccuracy.medium: (
         Duration(seconds: 15),
         15,
         Duration(minutes: 2),
         75,
         60.0,
+        TrackingAccuracy.high,
+      ),
+      TrackingAccuracy.high: (
+        Duration(seconds: 10),
+        5,
+        Duration(seconds: 30),
+        25,
+        20.0,
+        TrackingAccuracy.precised,
       ),
       TrackingAccuracy.precised: (
         Duration(seconds: 5),
         5,
         Duration(seconds: 30),
-        25,
-        20.0,
+        15,
+        10.0,
+        TrackingAccuracy.precised,
       ),
     };
 
@@ -55,6 +59,7 @@ void main() {
         Duration,
         int,
         double,
+        TrackingAccuracy,
       );
       expect(config.movingInterval, values.$1, reason: accuracy.name);
       expect(config.movingDistanceFilterMeters, values.$2,
@@ -66,7 +71,7 @@ void main() {
           reason: accuracy.name);
       expect(accuracy.maximumAcceptedAccuracyMeters, values.$5,
           reason: '${accuracy.name} enum value');
-      expect(config.locationAccuracy, accuracy, reason: accuracy.name);
+      expect(config.locationAccuracy, values.$6, reason: accuracy.name);
     }
   });
 
@@ -82,8 +87,8 @@ void main() {
     expect(config.accuracy, TrackingAccuracy.low);
     expect(config.locationAccuracy, TrackingAccuracy.precised);
     expect(config.movingInterval, const Duration(seconds: 8));
-    expect(config.movingDistanceFilterMeters, 50);
-    expect(config.stationaryInterval, const Duration(minutes: 5));
+    expect(config.movingDistanceFilterMeters, 25);
+    expect(config.stationaryInterval, const Duration(minutes: 3));
     expect(config.stationaryDistanceFilterMeters, 12);
     expect(config.maximumAcceptedAccuracyMeters, 9);
   });
@@ -98,12 +103,12 @@ void main() {
     expect(
       config.resolvedAccuracy,
       const ResolvedTrackingAccuracy(
-        movingInterval: Duration(seconds: 30),
+        movingInterval: Duration(seconds: 15),
         distanceFilterMeters: 8,
         locationAccuracy: TrackingAccuracy.precised,
-        stationaryInterval: Duration(minutes: 3),
-        stationaryDistanceFilterMeters: 100,
-        maximumAcceptedAccuracyMeters: 100,
+        stationaryInterval: Duration(minutes: 2),
+        stationaryDistanceFilterMeters: 75,
+        maximumAcceptedAccuracyMeters: 60,
       ),
     );
   });
@@ -148,7 +153,7 @@ void main() {
     expect(restored.accuracy, TrackingAccuracy.medium);
     expect(restored.locationAccuracy, TrackingAccuracy.precised);
     expect(restored.movingDistanceFilterMeters, 7);
-    expect(restored.movingInterval, const Duration(seconds: 30));
+    expect(restored.movingInterval, const Duration(seconds: 15));
     expect(restored.toMap()['desiredAccuracy'], 'precised');
   });
 
@@ -167,19 +172,19 @@ void main() {
     );
   });
 
-  test('legacy maps without a profile keep the previous high defaults', () {
+  test('legacy maps without a profile use the current high defaults', () {
     final config = TrackingConfig.fromMap(<String, Object?>{
       'movingIntervalMs': 12000,
       'stationaryDistanceFilterMeters': 45,
     });
 
     expect(config.accuracy, TrackingAccuracy.high);
-    expect(config.locationAccuracy, TrackingAccuracy.high);
+    expect(config.locationAccuracy, TrackingAccuracy.precised);
     expect(config.movingInterval, const Duration(seconds: 12));
-    expect(config.movingDistanceFilterMeters, 15);
-    expect(config.stationaryInterval, const Duration(minutes: 2));
+    expect(config.movingDistanceFilterMeters, 5);
+    expect(config.stationaryInterval, const Duration(seconds: 30));
     expect(config.stationaryDistanceFilterMeters, 45);
-    expect(config.maximumAcceptedAccuracyMeters, 60);
+    expect(config.maximumAcceptedAccuracyMeters, 20);
   });
 
   test('precise serialized spelling is accepted as a compatibility alias', () {

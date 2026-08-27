@@ -39,8 +39,9 @@ offline GeoJSON, KML, and GPX export.
 | Android | API 21 | Fused Location Provider, Activity Recognition, foreground service |
 | iOS | 13.0 | Core Location and Core Motion |
 
-Android builds use Java 17 and compile SDK 35. iOS supports CocoaPods and
-Flutter's Swift Package Manager integration.
+The Android plugin targets Java 17 and compile SDK 35; the bundled MapLibre
+example CI uses JDK 21. iOS supports CocoaPods and Flutter's Swift Package
+Manager integration.
 
 ## Installation
 
@@ -63,7 +64,15 @@ Import the public library:
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 ```
 
-## 60-second integration
+## Minimal integration
+
+The host application needs five package-level steps:
+
+1. Add the Android manifest and iOS `Info.plist` configuration below.
+2. Open one application-scoped `TrackingClient` for the authenticated owner.
+3. Drive permission UI from `checkReadiness()` and request only its next action.
+4. Drive Start, Pause, Resume, and Complete from `session.allowedActions`.
+5. Export completed routes with `exportTrack()` and dispose at sign-out.
 
 Create exactly one application-scoped controller for the signed-in owner. The
 controller initializes storage/native state before it is returned, replays the
@@ -112,6 +121,15 @@ Future<void> stopUsingTracking() async {
 ```
 
 The complete staged permission flow and platform declarations follow below.
+
+| Core API | Use |
+|---|---|
+| `TrackingClient.open()` | Initialize and restore one owner-scoped controller |
+| `TrackingController` | Control lifecycle, history, export, and deletion |
+| `TrackingSessionSnapshot` | Render status and enabled actions |
+| `TrackingReadiness` | Present the next permission or Settings step |
+| `TrackingConfig` | Configure accuracy, sampling, and mock policy |
+| `TrackQuery` / `TrackPage` | Load bounded route-history pages |
 
 ## Platform configuration
 
@@ -877,7 +895,7 @@ permanent, so export or upload the route first when another copy is required.
 ## Tracking configuration
 
 Use the `accuracy` preset for a complete battery/precision profile. `high` is
-the default and preserves the package's original sampling behavior:
+the default and now favors dense, navigation-grade route capture:
 
 ```dart
 const balanced = TrackingConfig(accuracy: TrackingAccuracy.medium);
@@ -896,10 +914,10 @@ values, while stationary values still come from the low profile.
 
 | Preset | Moving interval | Moving filter | Native request | Stationary interval | Stationary filter | Accepted accuracy |
 |---|---:|---:|---|---:|---:|---:|
-| `low` | 60 seconds | 50 m | Low power / 100 m | 5 minutes | 200 m | 200 m |
-| `medium` | 30 seconds | 25 m | Balanced / nearest 10 m | 3 minutes | 100 m | 100 m |
-| `high` (default) | 15 seconds | 15 m | High / best | 2 minutes | 75 m | 60 m |
-| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 25 m | 20 m |
+| `low` | 30 seconds | 25 m | Balanced / nearest 10 m | 3 minutes | 100 m | 100 m |
+| `medium` | 15 seconds | 15 m | High / best | 2 minutes | 75 m | 60 m |
+| `high` (default) | 10 seconds | 5 m | High / navigation | 30 seconds | 25 m | 20 m |
+| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 15 m | 10 m |
 
 Android and iOS translate the native request to the closest platform accuracy;
 the table shows Android/iOS terminology. Presets are starting points, not
@@ -910,12 +928,12 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 | Option | Default | Purpose |
 |---|---:|---|
 | `accuracy` | `high` | Supplies all preset sampling and accepted-accuracy values |
-| `locationAccuracy` | Same as `accuracy` | Overrides only Android/iOS native request accuracy |
-| `movingInterval` | 15 seconds | Requested interval while moving |
-| `movingDistanceFilterMeters` | 15 m | Minimum moving displacement |
-| `stationaryInterval` | 2 minutes | Requested interval while stationary |
-| `stationaryDistanceFilterMeters` | 75 m | Minimum stationary displacement |
-| `maximumAcceptedAccuracyMeters` | 60 m | Reject fixes with poorer reported accuracy |
+| `locationAccuracy` | `precised` for the default `high` preset | Overrides only Android/iOS native request accuracy |
+| `movingInterval` | 10 seconds | Requested interval while moving |
+| `movingDistanceFilterMeters` | 5 m | Minimum moving displacement |
+| `stationaryInterval` | 30 seconds | Requested interval while stationary |
+| `stationaryDistanceFilterMeters` | 25 m | Minimum stationary displacement |
+| `maximumAcceptedAccuracyMeters` | 20 m | Reject fixes with poorer reported accuracy |
 | `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
 | `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
 | `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |
@@ -930,8 +948,11 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 | `iosTerminationRecoveryMode` | `interrupted` | Standard/manual recovery or opt-in significant-change relaunch semantics |
 
 Operating systems may batch, delay, coalesce, or skip callbacks. Shortening an
-interval does not guarantee that frequency. `precised` can materially increase
-battery use and should be enabled only when dense route geometry is necessary.
+interval does not guarantee that frequency. `high` and especially `precised`
+can materially increase battery use and should be enabled only when dense route
+geometry is necessary. On Android, the host may offer a user-initiated shortcut
+to battery-optimization settings, but must not imply that exemption is required
+or automatically granted.
 
 ## Activity and battery behavior
 

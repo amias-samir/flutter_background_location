@@ -21,7 +21,7 @@ final class AdaptiveFidelityBounds {
 
   factory AdaptiveFidelityBounds.fromStaticConfig(TrackingConfig config) =>
       AdaptiveFidelityBounds(
-        leastAccurateProfile: config.locationAccuracy,
+        leastAccurateProfile: config.accuracy,
         maximumMovingInterval: config.movingInterval,
         maximumMovingDistanceFilterMeters: config.movingDistanceFilterMeters,
         maximumStationaryInterval: config.stationaryInterval,
@@ -243,7 +243,7 @@ final class AdaptiveBatteryPolicyEngine {
     int capInt(int value, int maximum) => value > maximum ? maximum : value;
     return TrackingConfig(
       accuracy: least,
-      locationAccuracy: least,
+      locationAccuracy: preset.locationAccuracy,
       movingInterval: capDuration(
           preset.movingInterval, policy.bounds.maximumMovingInterval),
       movingDistanceFilterMeters: capInt(

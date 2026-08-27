@@ -52,8 +52,11 @@ changes the selector to **Latest only** before starting a new route.
 
 The example defaults to `TrackingAccuracy.high`. Developers can select
 `low`/`medium` for less frequent sampling, while `precised` is an explicit
-high-consumption choice and displays a battery warning. Individual
-`TrackingConfig` fields still override the selected preset.
+high-consumption choice. Selecting it displays a battery warning and offers a
+user-initiated shortcut to Android battery-optimization settings, where OEMs
+may label the relevant choice **Unrestricted** or **No restrictions**. The
+exemption is optional, is never granted automatically, and can increase battery
+use. Individual `TrackingConfig` fields still override the selected preset.
 
 The example widget tests inject `FakeTrackingController` from
 `flutter_background_location_tracker_testing.dart`; they exercise interrupted
