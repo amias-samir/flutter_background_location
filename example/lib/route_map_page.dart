@@ -36,7 +36,18 @@ class TrackMapPage extends StatelessWidget {
                 '${route.segments.length} drawable segment(s)',
               ),
             ),
-            Expanded(child: TrackRouteMap(route: route)),
+            Expanded(
+              child: Stack(
+                children: <Widget>[
+                  Positioned.fill(child: TrackRouteMap(route: route)),
+                  const Positioned(
+                    left: 12,
+                    bottom: 12,
+                    child: _RouteEndpointLegend(),
+                  ),
+                ],
+              ),
+            ),
           ],
         );
       },
@@ -89,17 +100,19 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         ),
       );
     }
-    if (widget.route.segments.isEmpty) {
-      await controller.addCircle(
-        maplibre.CircleOptions(
-          geometry: widget.route.points.first,
-          circleColor: '#00796B',
-          circleRadius: 7,
-          circleStrokeColor: '#FFFFFF',
-          circleStrokeWidth: 2,
-        ),
-      );
-    }
+    await _drawEndpoint(
+      controller,
+      coordinate: widget.route.start,
+      color: '#D32F2F',
+      radius: widget.route.hasDistinctEndpoints ? 8 : 10,
+    );
+    await _drawEndpoint(
+      controller,
+      coordinate: widget.route.destination,
+      color: '#2E7D32',
+      radius: widget.route.hasDistinctEndpoints ? 8 : 5,
+      strokeWidth: widget.route.hasDistinctEndpoints ? 3 : 1,
+    );
     if (widget.route.points.length == 1) return;
     await controller.animateCamera(
       maplibre.CameraUpdate.newLatLngBounds(
@@ -111,6 +124,72 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
       ),
     );
   }
+
+  Future<void> _drawEndpoint(
+    maplibre.MapLibreMapController controller, {
+    required maplibre.LatLng coordinate,
+    required String color,
+    required double radius,
+    double strokeWidth = 3,
+  }) async {
+    await controller.addCircle(
+      maplibre.CircleOptions(
+        geometry: coordinate,
+        circleColor: color,
+        circleRadius: radius,
+        circleStrokeColor: '#FFFFFF',
+        circleStrokeWidth: strokeWidth,
+      ),
+    );
+  }
+}
+
+class _RouteEndpointLegend extends StatelessWidget {
+  const _RouteEndpointLegend();
+
+  @override
+  Widget build(BuildContext context) => Card(
+    elevation: 2,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: const <Widget>[
+          _LegendItem(color: Color(0xFFD32F2F), label: 'Start'),
+          SizedBox(width: 12),
+          _LegendItem(color: Color(0xFF2E7D32), label: 'Destination'),
+        ],
+      ),
+    ),
+  );
+}
+
+class _LegendItem extends StatelessWidget {
+  const _LegendItem({required this.color, required this.label});
+
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: <Widget>[
+      Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 1.5),
+          boxShadow: const <BoxShadow>[
+            BoxShadow(color: Colors.black26, blurRadius: 2),
+          ],
+        ),
+      ),
+      const SizedBox(width: 5),
+      Text(label, style: Theme.of(context).textTheme.labelMedium),
+    ],
+  );
 }
 
 class RouteGeometry {
@@ -127,6 +206,14 @@ class RouteGeometry {
   final maplibre.LatLngBounds bounds;
   final maplibre.LatLng center;
   final int pointCount;
+
+  maplibre.LatLng get start => points.first;
+
+  maplibre.LatLng get destination => points.last;
+
+  bool get hasDistinctEndpoints =>
+      start.latitude != destination.latitude ||
+      start.longitude != destination.longitude;
 
   factory RouteGeometry.fromBundle(TrackBundle bundle) {
     final all = <maplibre.LatLng>[];

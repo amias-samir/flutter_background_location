@@ -13,7 +13,8 @@ This app demonstrates:
 - recorded-track history with per-route actions;
 - owner-conflict recovery that pauses and preserves a previous owner’s local
   capture after explicit confirmation;
-- MapLibre street-map route display;
+- MapLibre street-map route display with red Start and green Destination
+  indicators;
 - user-named GeoJSON, KML, and GPX export;
 - confirmed deletion of a selected completed route.
 - a coordinate-free diagnostics/setup-doctor panel;

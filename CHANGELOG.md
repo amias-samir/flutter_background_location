@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Added red Start and green Destination indicators to the example route map.
 - Refreshed the example with clearer session, lifecycle, configuration, and
   recorded-route cards, plus a confirmed owner-conflict recovery prompt.
 - Expanded integration-focused Dartdoc coverage and simplified the README's

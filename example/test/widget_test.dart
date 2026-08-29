@@ -176,6 +176,27 @@ void main() {
     expect(geometry.segments, hasLength(2));
     expect(geometry.segments.first.last.latitude, 1);
     expect(geometry.segments.last.first.latitude, 20);
+    expect(geometry.start.latitude, 0);
+    expect(geometry.start.longitude, 0);
+    expect(geometry.destination.latitude, 21);
+    expect(geometry.destination.longitude, 21);
+    expect(geometry.hasDistinctEndpoints, isTrue);
+  });
+
+  test('single-point map uses the same coordinate for both endpoints', () {
+    final track = _completedTrack();
+    final geometry = RouteGeometry.fromBundle(
+      TrackBundle(
+        track: track,
+        segments: <TrackSegmentWithPoints>[
+          _segment(track, 1, const <(double, double)>[(27.7, 85.3)]),
+        ],
+      ),
+    );
+
+    expect(geometry.start.latitude, geometry.destination.latitude);
+    expect(geometry.start.longitude, geometry.destination.longitude);
+    expect(geometry.hasDistinctEndpoints, isFalse);
   });
 }
 
