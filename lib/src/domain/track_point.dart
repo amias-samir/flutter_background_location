@@ -11,6 +11,7 @@ abstract final class TrackPointQualityFlag {
   static const int staleTimestamp = 1 << 3;
   static const int invalidCoordinate = 1 << 4;
   static const int largeGap = 1 << 5;
+  static const int nativeTrackMismatch = 1 << 6;
 }
 
 final class TrackPoint {
@@ -41,6 +42,13 @@ final class TrackPoint {
     this.rejectionReason,
     this.mockEvidence,
     this.nativeEventId,
+    this.configurationEpochId,
+    this.nativeReceivedAt,
+    this.providerTimeDeltaMsAtReceipt,
+    this.monotonicFixNanos,
+    this.monotonicReceivedNanos,
+    this.monotonicDomainId,
+    this.qualityPolicyVersion,
   });
 
   final String id;
@@ -66,6 +74,18 @@ final class TrackPoint {
   final bool mockDetectionAvailable;
   final String? mockEvidence;
   final String? nativeEventId;
+
+  /// Immutable policy epoch used to evaluate this point, when known.
+  ///
+  /// Legacy evidence remains null when its stored route configuration cannot
+  /// prove which policy was active.
+  final String? configurationEpochId;
+  final DateTime? nativeReceivedAt;
+  final int? providerTimeDeltaMsAtReceipt;
+  final int? monotonicFixNanos;
+  final int? monotonicReceivedNanos;
+  final String? monotonicDomainId;
+  final int? qualityPolicyVersion;
   final bool accepted;
   final int qualityFlags;
   final String? rejectionReason;
@@ -75,6 +95,50 @@ final class TrackPoint {
     if (!mockDetectionAvailable) return MockLocationAssessment.unavailable;
     return MockLocationAssessment.notDetected;
   }
+
+  /// Returns an export/map view with replacement coordinates while retaining
+  /// every raw point identifier and evidence field.
+  ///
+  /// This does not mutate or persist the canonical raw point.
+  TrackPoint withCoordinates({
+    required double latitude,
+    required double longitude,
+  }) =>
+      TrackPoint(
+        id: id,
+        trackId: trackId,
+        segmentId: segmentId,
+        sequence: sequence,
+        latitude: latitude,
+        longitude: longitude,
+        altitude: altitude,
+        horizontalAccuracy: horizontalAccuracy,
+        verticalAccuracy: verticalAccuracy,
+        speed: speed,
+        speedAccuracy: speedAccuracy,
+        heading: heading,
+        headingAccuracy: headingAccuracy,
+        capturedAt: capturedAt,
+        persistedAt: persistedAt,
+        activityType: activityType,
+        activityConfidence: activityConfidence,
+        motionState: motionState,
+        provider: provider,
+        isMocked: isMocked,
+        mockDetectionAvailable: mockDetectionAvailable,
+        mockEvidence: mockEvidence,
+        nativeEventId: nativeEventId,
+        configurationEpochId: configurationEpochId,
+        nativeReceivedAt: nativeReceivedAt,
+        providerTimeDeltaMsAtReceipt: providerTimeDeltaMsAtReceipt,
+        monotonicFixNanos: monotonicFixNanos,
+        monotonicReceivedNanos: monotonicReceivedNanos,
+        monotonicDomainId: monotonicDomainId,
+        qualityPolicyVersion: qualityPolicyVersion,
+        accepted: accepted,
+        qualityFlags: qualityFlags,
+        rejectionReason: rejectionReason,
+      );
 
   factory TrackPoint.fromDatabase(Map<String, Object?> row) => TrackPoint(
         id: row['id']! as String,
@@ -103,6 +167,17 @@ final class TrackPoint {
         mockDetectionAvailable: row['mock_detection_available'] == 1,
         mockEvidence: row['mock_evidence'] as String?,
         nativeEventId: row['native_event_id'] as String?,
+        configurationEpochId: row['configuration_epoch_id'] as String?,
+        nativeReceivedAt: row['native_received_at'] == null
+            ? null
+            : DateTime.parse(row['native_received_at']! as String).toUtc(),
+        providerTimeDeltaMsAtReceipt:
+            (row['provider_time_delta_ms_at_receipt'] as num?)?.toInt(),
+        monotonicFixNanos: (row['monotonic_fix_nanos'] as num?)?.toInt(),
+        monotonicReceivedNanos:
+            (row['monotonic_received_nanos'] as num?)?.toInt(),
+        monotonicDomainId: row['monotonic_domain_id'] as String?,
+        qualityPolicyVersion: (row['quality_policy_version'] as num?)?.toInt(),
         accepted: row['accepted'] == 1,
         qualityFlags: (row['quality_flags'] as num?)?.toInt() ?? 0,
         rejectionReason: row['rejection_reason'] as String?,

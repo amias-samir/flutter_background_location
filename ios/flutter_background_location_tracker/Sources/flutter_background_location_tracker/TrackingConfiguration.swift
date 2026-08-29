@@ -1,6 +1,11 @@
 import CoreLocation
 import Foundation
 
+enum IOSTerminationRecoveryMode: String {
+  case interrupted
+  case significantChange
+}
+
 struct TrackingConfiguration {
   let movingIntervalMs: Double
   let movingDistanceFilterMeters: Double
@@ -18,28 +23,29 @@ struct TrackingConfiguration {
   let stationaryConfidenceThreshold: Int
   let movingConfidenceThreshold: Int
   let movingConfirmationCount: Int
+  let terminationRecoveryMode: IOSTerminationRecoveryMode
 
   static let defaults = TrackingConfiguration(dictionary: [:])
 
   init(dictionary: [String: Any]) {
     movingIntervalMs = Self.number(
       dictionary["movingIntervalMs"],
-      defaultValue: 15_000,
+      defaultValue: 10_000,
       minimum: 1_000
     )
     movingDistanceFilterMeters = Self.number(
       dictionary["movingDistanceFilterMeters"],
-      defaultValue: 15,
+      defaultValue: 5,
       minimum: 0
     )
     stationaryIntervalMs = Self.number(
       dictionary["stationaryIntervalMs"],
-      defaultValue: 120_000,
+      defaultValue: 30_000,
       minimum: 5_000
     )
     stationaryDistanceFilterMeters = Self.number(
       dictionary["stationaryDistanceFilterMeters"],
-      defaultValue: 75,
+      defaultValue: 25,
       minimum: 0
     )
     stationaryTimeoutMs = Self.number(
@@ -54,12 +60,12 @@ struct TrackingConfiguration {
     )
     maximumAcceptedAccuracyMeters = Self.number(
       dictionary["maximumAcceptedAccuracyMeters"],
-      defaultValue: 60,
+      defaultValue: 20,
       minimum: 1
     )
     movingDesiredAccuracy = Self.accuracy(
       dictionary["desiredAccuracy"],
-      defaultValue: kCLLocationAccuracyBest
+      defaultValue: kCLLocationAccuracyBestForNavigation
     )
     stationaryDesiredAccuracy = Self.accuracy(
       dictionary["stationaryDesiredAccuracy"],
@@ -96,6 +102,9 @@ struct TrackingConfiguration {
       minimum: 1,
       maximum: 20
     )
+    terminationRecoveryMode = IOSTerminationRecoveryMode(
+      rawValue: (dictionary["iosTerminationRecoveryMode"] as? String) ?? ""
+    ) ?? .interrupted
   }
 
   var dictionary: [String: Any] {
@@ -117,6 +126,7 @@ struct TrackingConfiguration {
       "stationaryConfidenceThreshold": stationaryConfidenceThreshold,
       "movingConfidenceThreshold": movingConfidenceThreshold,
       "movingConfirmationCount": movingConfirmationCount,
+      "iosTerminationRecoveryMode": terminationRecoveryMode.rawValue,
     ]
   }
 
@@ -193,7 +203,7 @@ struct TrackingConfiguration {
       return defaultValue
     }
     switch name.replacingOccurrences(of: "_", with: "").lowercased() {
-    case "bestfornavigation", "navigation":
+    case "bestfornavigation", "navigation", "precise", "precised":
       return kCLLocationAccuracyBestForNavigation
     case "best", "high":
       return kCLLocationAccuracyBest

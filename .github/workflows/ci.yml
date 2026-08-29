@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Dart and package checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install package dependencies
+        run: flutter pub get
+      - name: Validate quality ledger
+        run: dart run tool/quality/validate_requirements.dart
+      - name: Generate sanitized release evidence
+        run: dart run tool/quality/generate_release_evidence.dart
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test tool/quality
+      - name: Analyze package
+        run: flutter analyze
+      - name: Test package
+        run: flutter test --coverage
+      - name: Pub dry run
+        run: flutter pub publish --dry-run
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: build/quality/release_evidence.json
+          if-no-files-found: error
+
+  example_android:
+    name: Example and Android checks
+    runs-on: ubuntu-latest
+    needs: package
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # AGP 9 resolves maplibre_gl with Java source level 21. Using JDK 17
+          # fails during :maplibre_gl:compileDebugJavaWithJavac before the
+          # example application is compiled.
+          java-version: "21"
+      - name: Install package dependencies
+        run: flutter pub get
+      - name: Install example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Check example formatting
+        run: dart format --output=none --set-exit-if-changed example/lib example/test
+      - name: Analyze example
+        working-directory: example
+        run: flutter analyze
+      - name: Test example
+        working-directory: example
+        run: flutter test
+      - name: Build Android example APK
+        working-directory: example
+        run: flutter build apk --debug
+      - name: Android unit tests
+        working-directory: example/android
+        run: ./gradlew testDebugUnitTest
+
+  ios:
+    name: iOS packaging checks
+    runs-on: macos-latest
+    needs: package
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install package dependencies
+        run: flutter pub get
+      - name: Install example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build iOS example and plugin Swift package without codesign
+        working-directory: example
+        run: flutter build ios --debug --no-codesign
+      - name: Lint privacy manifest
+        run: plutil -lint ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/PrivacyInfo.xcprivacy

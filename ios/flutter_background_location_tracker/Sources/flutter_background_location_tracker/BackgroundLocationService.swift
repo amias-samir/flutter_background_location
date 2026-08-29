@@ -24,12 +24,14 @@ enum BackgroundLocationServiceError: LocalizedError {
   case locationServicesDisabled
   case locationPermissionDenied
   case backgroundPermissionRequired
+  case preciseLocationRequired
   case missingUsageDescription(String)
   case backgroundModeMissing
   case permissionRequestInProgress
   case invalidArguments(String)
   case locationJournalCapacity(current: Int, maximum: Int)
   case locationJournalFailure(String)
+  case nativeJournalCursorInvalid
 
   var code: String {
     switch self {
@@ -39,12 +41,14 @@ enum BackgroundLocationServiceError: LocalizedError {
     case .locationServicesDisabled: return "location_services_disabled"
     case .locationPermissionDenied: return "location_permission_denied"
     case .backgroundPermissionRequired: return "background_permission_required"
+    case .preciseLocationRequired: return "precise_location_required"
     case .missingUsageDescription: return "missing_usage_description"
     case .backgroundModeMissing: return "background_mode_missing"
     case .permissionRequestInProgress: return "permission_request_in_progress"
     case .invalidArguments: return "invalid_arguments"
     case .locationJournalCapacity: return "location_journal_capacity"
     case .locationJournalFailure: return "location_journal_failure"
+    case .nativeJournalCursorInvalid: return "native_journal_cursor_invalid"
     }
   }
 
@@ -62,6 +66,8 @@ enum BackgroundLocationServiceError: LocalizedError {
       return "Location permission is denied or restricted."
     case .backgroundPermissionRequired:
       return "Always location permission is required for background tracking."
+    case .preciseLocationRequired:
+      return "Precise Location is required for route tracking."
     case .missingUsageDescription(let key):
       return "The host app Info.plist must define \(key)."
     case .backgroundModeMissing:
@@ -74,6 +80,8 @@ enum BackgroundLocationServiceError: LocalizedError {
       return "The durable location journal is full (\(current)/\(maximum) pending fixes)."
     case .locationJournalFailure(let message):
       return message
+    case .nativeJournalCursorInvalid:
+      return "The native journal cursor is invalid; restart paging from the first page."
     }
   }
 }
@@ -96,17 +104,38 @@ private enum TrackingProfile: String {
 }
 
 final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
-  weak var delegate: BackgroundLocationServiceDelegate?
+  static let shared = BackgroundLocationService()
+
+  private let observers = NSHashTable<AnyObject>.weakObjects()
+
+  func addObserver(_ observer: BackgroundLocationServiceDelegate) {
+    observers.add(observer)
+  }
+
+  func removeObserver(_ observer: BackgroundLocationServiceDelegate) {
+    observers.remove(observer)
+  }
+
+  private func notifyObservers(
+    _ notification: (BackgroundLocationServiceDelegate) -> Void
+  ) {
+    for case let observer as BackgroundLocationServiceDelegate in observers.allObjects {
+      notification(observer)
+    }
+  }
 
   private enum PersistenceKey {
     static let lifecycle = "flutter_background_location.lifecycle"
     static let trackId = "flutter_background_location.track_id"
     static let configuration = "flutter_background_location.configuration"
+    static let sessionControlToken = "flutter_background_location.session_control_token"
+    static let commandRevision = "flutter_background_location.command_revision"
+    static let lastCommandId = "flutter_background_location.last_command_id"
   }
 
   private let locationManager = CLLocationManager()
   private let userDefaults: UserDefaults
-  private let locationJournal: NativeLocationJournal
+  private let locationJournalQueue: NativeLocationJournalQueue
 
   private var motionManager: CMMotionActivityManager?
   private var motionPermissionProbe: CMMotionActivityManager?
@@ -129,27 +158,83 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var movingEvidence = 0
   private var journalPendingCount: Int?
   private var journalFailureMessage: String?
+  private var sessionGeneration: Int64 = 0
+  private var pendingTerminationRecovery = false
+  private var recoveredFromTermination = false
+  private var terminationRecoveryGapStartedAt: Date?
+  // Stored as AnyObject so this package can keep its iOS 13 deployment target
+  // while using CLBackgroundActivitySession on iOS 17 and later.
+  private var backgroundActivitySession: AnyObject?
+  private let monotonicDomainId = "ios_process_\(UUID().uuidString)"
+
+  var nativeCommandTrackId: String? { trackId }
+  var nativeCommandLifecycleIsIdle: Bool { lifecycle == .idle }
+  var nativeSessionControlToken: String? {
+    userDefaults.string(forKey: PersistenceKey.sessionControlToken)
+  }
+  var nativeCommandRevision: Int64 {
+    max(0, Int64(userDefaults.integer(forKey: PersistenceKey.commandRevision)))
+  }
+  var nativeLastCommandId: String? {
+    userDefaults.string(forKey: PersistenceKey.lastCommandId)
+  }
+
+  func claimNativeSessionControl(_ token: String) throws {
+    guard !token.isEmpty else {
+      throw BackgroundLocationServiceError.invalidArguments(
+        "Session-control token must not be empty."
+      )
+    }
+    if nativeSessionControlToken != token {
+      userDefaults.set(0, forKey: PersistenceKey.commandRevision)
+      userDefaults.removeObject(forKey: PersistenceKey.lastCommandId)
+    }
+    userDefaults.set(token, forKey: PersistenceKey.sessionControlToken)
+    guard userDefaults.synchronize() else {
+      throw BackgroundLocationServiceError.invalidState(
+        "Could not persist native session control."
+      )
+    }
+  }
+
+  func recordNativeCommandResult(token: String, commandId: String, revision: Int64) throws {
+    userDefaults.set(token, forKey: PersistenceKey.sessionControlToken)
+    userDefaults.set(commandId, forKey: PersistenceKey.lastCommandId)
+    userDefaults.set(revision, forKey: PersistenceKey.commandRevision)
+    guard userDefaults.synchronize() else {
+      throw BackgroundLocationServiceError.invalidState(
+        "Could not persist the native command result."
+      )
+    }
+  }
 
   init(
     userDefaults: UserDefaults = .standard,
     locationJournal: NativeLocationJournal = NativeLocationJournal()
   ) {
     self.userDefaults = userDefaults
-    self.locationJournal = locationJournal
+    locationJournalQueue = NativeLocationJournalQueue(journal: locationJournal)
     super.init()
     locationManager.delegate = self
     restorePersistedState()
   }
 
-  func initialize() throws -> [String: Any] {
-    do {
-      journalPendingCount = try locationJournal.prepare()
-      journalFailureMessage = nil
-    } catch {
-      throw failLocationJournal(error)
+  func initialize(completion: @escaping (Result<[String: Any], Error>) -> Void) {
+    locationJournalQueue.prepare { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .success(let pendingCount):
+        DispatchQueue.main.async {
+          self.journalPendingCount = pendingCount
+          self.journalFailureMessage = nil
+          self.attemptTerminationRecoveryIfNeeded()
+          self.emitStatus(message: self.recoveryStatusMessage)
+          completion(.success(self.stateMap()))
+        }
+      case .failure(let error):
+        completion(.failure(self.failLocationJournal(error)))
+      }
     }
-    emitStatus(message: lifecycle == .interrupted ? "previous_session_interrupted" : nil)
-    return stateMap()
   }
 
   func requestPermissions(
@@ -245,22 +330,53 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "adaptiveSampling": true,
       "durableNativeHandoff": true,
       "nativeJournalCapacity": NativeLocationJournal.maximumPendingEvents,
-      "terminatedRecovery": false,
+      "terminatedRecovery": true,
+      "terminationRecoveryModes": [
+        IOSTerminationRecoveryMode.interrupted.rawValue,
+        IOSTerminationRecoveryMode.significantChange.rawValue,
+      ],
       "motorizedTwoWheelerDetection": false,
     ]
   }
 
-  func start(trackId: String, configuration: TrackingConfiguration) throws -> [String: Any] {
+  func start(
+    trackId: String,
+    configuration: TrackingConfiguration,
+    completion: @escaping (Result<[String: Any], Error>) -> Void
+  ) {
     guard lifecycle != .tracking && lifecycle != .starting else {
-      throw BackgroundLocationServiceError.alreadyTracking
+      completion(.failure(BackgroundLocationServiceError.alreadyTracking))
+      return
     }
     guard !trackId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      throw BackgroundLocationServiceError.invalidTrackId
+      completion(.failure(BackgroundLocationServiceError.invalidTrackId))
+      return
     }
 
-    try validateTrackingPreconditions(configuration)
-    try prepareJournalForCapture()
+    do {
+      try validateTrackingPreconditions(configuration)
+    } catch {
+      completion(.failure(error))
+      return
+    }
 
+    locationJournalQueue.ensureCapacityForCapture { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .success(let pendingCount):
+        self.journalPendingCount = pendingCount
+        self.journalFailureMessage = nil
+        completion(.success(self.startAfterJournalPrepared(trackId: trackId, configuration: configuration)))
+      case .failure(let error):
+        completion(.failure(self.failLocationJournal(error)))
+      }
+    }
+  }
+
+  private func startAfterJournalPrepared(
+    trackId: String,
+    configuration: TrackingConfiguration
+  ) -> [String: Any] {
     stationaryTransitionWorkItem?.cancel()
     stationaryTransitionWorkItem = nil
     movingEvidence = 0
@@ -274,14 +390,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
     self.trackId = trackId
     self.configuration = configuration
+    sessionGeneration += 1
     lifecycle = .starting
     profile = .moving
     persistState()
     emitStatus()
 
     configureLocationManager(for: .moving)
+    startBackgroundActivitySessionIfNeeded()
     startMotionUpdatesIfPossible()
-    locationManager.startUpdatingLocation()
+    startConfiguredLocationUpdates()
 
     lifecycle = .tracking
     persistState()
@@ -289,62 +407,104 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     return stateMap()
   }
 
-  func pause() throws -> [String: Any] {
+  func pause(completion: @escaping (Result<[String: Any], Error>) -> Void) {
     if lifecycle == .paused {
-      return stateMap()
+      completion(.success(stateMap()))
+      return
     }
     guard lifecycle == .tracking || lifecycle == .starting else {
-      throw BackgroundLocationServiceError.invalidState(
-        "pauseTracking can only be called while tracking is active."
-      )
+      completion(
+        .failure(
+          BackgroundLocationServiceError.invalidState(
+            "pauseTracking can only be called while tracking is active."
+          )))
+      return
     }
 
+    lifecycle = .stopping
+    emitStatus(message: "user_paused")
     stopNativeUpdates()
-    lifecycle = .paused
-    profile = .paused
-    persistState()
-    emitStatus()
-    return stateMap()
+    locationJournalQueue.fence { [weak self] in
+      guard let self else { return }
+      self.lifecycle = .paused
+      self.profile = .paused
+      self.persistState()
+      self.emitStatus()
+      completion(.success(self.stateMap()))
+    }
   }
 
   func resume(
     trackId suppliedTrackId: String?,
-    configuration suppliedConfiguration: TrackingConfiguration?
-  ) throws -> [String: Any] {
+    configuration suppliedConfiguration: TrackingConfiguration?,
+    completion: @escaping (Result<[String: Any], Error>) -> Void
+  ) {
     guard lifecycle == .paused || lifecycle == .interrupted else {
-      throw BackgroundLocationServiceError.invalidState(
-        "resumeTracking requires a paused or interrupted track."
-      )
+      completion(
+        .failure(
+          BackgroundLocationServiceError.invalidState(
+            "resumeTracking requires a paused or interrupted track."
+          )))
+      return
     }
     guard let resumedTrackId = suppliedTrackId ?? trackId else {
-      throw BackgroundLocationServiceError.invalidTrackId
+      completion(.failure(BackgroundLocationServiceError.invalidTrackId))
+      return
     }
-    return try start(
+    start(
       trackId: resumedTrackId,
-      configuration: suppliedConfiguration ?? configuration
+      configuration: suppliedConfiguration ?? configuration,
+      completion: completion
     )
   }
 
-  func stop(reason: String?) -> [String: Any] {
+  func stop(
+    expectedTrackId: String? = nil,
+    reason: String?,
+    completion: @escaping (Result<[String: Any], Error>) -> Void
+  ) {
     guard lifecycle != .idle else {
-      return stateMap()
+      completion(.success(stateMap()))
+      return
+    }
+    if let expectedTrackId,
+      let trackId,
+      expectedTrackId != trackId
+    {
+      completion(
+        .failure(
+          BackgroundLocationServiceError.invalidState(
+            "The requested track does not match the native session."
+          )))
+      return
     }
 
     lifecycle = .stopping
     emitStatus(message: reason)
     stopNativeUpdates()
-    lifecycle = .idle
-    profile = .idle
-    trackId = nil
-    clearPersistedSession()
-    emitStatus(message: reason)
-    return stateMap()
+    locationJournalQueue.fence { [weak self] in
+      guard let self else { return }
+      self.lifecycle = .idle
+      self.profile = .idle
+      self.trackId = nil
+      self.clearPersistedSession()
+      self.emitStatus(message: reason)
+      completion(.success(self.stateMap()))
+    }
   }
 
   func update(configuration: TrackingConfiguration) -> [String: Any] {
     self.configuration = configuration
     if lifecycle == .tracking {
+      locationManager.stopUpdatingLocation()
+      locationManager.stopMonitoringSignificantLocationChanges()
       configureLocationManager(for: profile)
+      if configuration.allowBackgroundLocationUpdates {
+        startBackgroundActivitySessionIfNeeded()
+      } else {
+        stopBackgroundActivitySession()
+      }
+      startConfiguredLocationUpdates()
     }
     persistState()
     emitStatus(message: "configuration_updated")
@@ -368,6 +528,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "lifecycle": lifecycle.rawValue,
       "isTracking": lifecycle == .tracking || lifecycle == .starting,
       "isPaused": lifecycle == .paused,
+      "nativeServiceActive": lifecycle == .tracking || lifecycle == .starting,
+      "backgroundActivitySessionActive": backgroundActivitySession != nil,
       "trackingProfile": profile.rawValue,
       "samplingProfile": profile == .stationary ? "stationary" : "moving",
       "batteryMode": profile == .stationary ? "stationary" : "moving",
@@ -378,6 +540,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "locationJournalHealthy": journalPendingCount != nil && journalFailureMessage == nil,
       "locationJournalCapacity": NativeLocationJournal.maximumPendingEvents,
       "timestamp": epochMilliseconds(Date()),
+      "commandRevision": nativeCommandRevision,
+      "iosTerminationRecoveryMode": configuration.terminationRecoveryMode.rawValue,
+      "recoveredFromTermination": recoveredFromTermination,
     ]
     if let journalPendingCount {
       state["pendingLocationCount"] = journalPendingCount
@@ -387,6 +552,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
     if let trackId {
       state["trackId"] = trackId
+    }
+    if let terminationRecoveryGapStartedAt {
+      state["terminationRecoveryGapStartedAt"] = epochMilliseconds(
+        terminationRecoveryGapStartedAt
+      )
     }
     if let lastLocationEvent {
       state["lastLocation"] = lastLocationEvent
@@ -405,28 +575,96 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     lastLocationEvent
   }
 
-  func pendingLocations() throws -> [[String: Any]] {
-    do {
-      let events = try locationJournal.pendingLocations()
-      journalPendingCount = events.count
-      journalFailureMessage = nil
-      return events
-    } catch {
-      throw failLocationJournal(error)
+  func pendingLocations(completion: @escaping (Result<[[String: Any]], Error>) -> Void) {
+    locationJournalQueue.pendingLocations { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .success(let events):
+        self.journalPendingCount = events.count
+        self.journalFailureMessage = nil
+        completion(.success(events))
+      case .failure(let error):
+        completion(.failure(self.failLocationJournal(error)))
+      }
     }
   }
 
-  func acknowledgeLocations(eventIds: [String]) throws -> [String: Any] {
-    do {
-      let acknowledgement = try locationJournal.acknowledge(eventIds: eventIds)
-      journalPendingCount = acknowledgement.remaining
-      journalFailureMessage = nil
-      return [
-        "acknowledged": acknowledgement.deleted,
-        "remaining": acknowledgement.remaining,
-      ]
-    } catch {
-      throw failLocationJournal(error)
+  func pendingLocationPage(
+    cursor: String?,
+    maxRecords: Int,
+    maxEncodedBytes: Int,
+    completion: @escaping (Result<[String: Any], Error>) -> Void
+  ) {
+    locationJournalQueue.pendingLocationPage(
+      cursor: cursor,
+      maxRecords: maxRecords,
+      maxEncodedBytes: maxEncodedBytes
+    ) { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .success(let page):
+        if cursor == nil {
+          self.journalPendingCount = page.events.count + page.remainingCount
+        }
+        self.journalFailureMessage = nil
+        completion(.success(page.map))
+      case .failure(let error):
+        if case NativeLocationJournalError.invalidCursor = error {
+          completion(.failure(BackgroundLocationServiceError.nativeJournalCursorInvalid))
+        } else {
+          completion(.failure(self.failLocationJournal(error)))
+        }
+      }
+    }
+  }
+
+  func nativeJournalDiagnostic(
+    performMaintenance: Bool,
+    completion: @escaping ([String: Any]) -> Void
+  ) {
+    locationJournalQueue.diagnostic(
+      performMaintenance: performMaintenance,
+      completion: completion
+    )
+  }
+
+  func acknowledgeLocations(
+    eventIds: [String],
+    completion: @escaping (Result<[String: Any], Error>) -> Void
+  ) {
+    locationJournalQueue.acknowledge(eventIds: eventIds) { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .success(let acknowledgement):
+        self.journalPendingCount = acknowledgement.remaining
+        self.journalFailureMessage = nil
+        completion(
+          .success([
+            "acknowledged": acknowledgement.deleted,
+            "remaining": acknowledgement.remaining,
+          ]))
+      case .failure(let error):
+        completion(.failure(self.failLocationJournal(error)))
+      }
+    }
+  }
+
+  func deletePendingLocations(
+    trackId: String,
+    completion: @escaping (Result<Int, Error>) -> Void
+  ) {
+    locationJournalQueue.deleteTrack(trackId: trackId) { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .success(let deleted):
+        if let pendingCount = self.journalPendingCount {
+          self.journalPendingCount = max(0, pendingCount - deleted)
+        }
+        self.journalFailureMessage = nil
+        completion(.success(deleted))
+      case .failure(let error):
+        completion(.failure(self.failLocationJournal(error)))
+      }
     }
   }
 
@@ -449,14 +687,31 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         throw BackgroundLocationServiceError.backgroundModeMissing
       }
     }
+    guard hasPreciseLocationAuthorization() else {
+      throw BackgroundLocationServiceError.preciseLocationRequired
+    }
   }
 
-  private func prepareJournalForCapture() throws {
+  private func enforceActiveTrackingPreconditions(reason: String) {
+    guard lifecycle == .tracking || lifecycle == .starting else {
+      emitStatus(message: reason)
+      return
+    }
     do {
-      journalPendingCount = try locationJournal.ensureCapacityForCapture()
-      journalFailureMessage = nil
+      try validateTrackingPreconditions(configuration)
+      emitStatus(message: reason)
+    } catch let error as BackgroundLocationServiceError {
+      stopNativeUpdates()
+      lifecycle = .interrupted
+      profile = .paused
+      persistState()
+      emitStatus(message: "tracking_interrupted_\(error.code)")
     } catch {
-      throw failLocationJournal(error)
+      stopNativeUpdates()
+      lifecycle = .interrupted
+      profile = .paused
+      persistState()
+      emitStatus(message: "tracking_interrupted_prerequisite_lost")
     }
   }
 
@@ -555,7 +810,14 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   private func stopNativeUpdates() {
+    sessionGeneration += 1
     locationManager.stopUpdatingLocation()
+    locationManager.stopMonitoringSignificantLocationChanges()
+    locationManager.allowsBackgroundLocationUpdates = false
+    if #available(iOS 11.0, *) {
+      locationManager.showsBackgroundLocationIndicator = false
+    }
+    stopBackgroundActivitySession()
     motionManager?.stopActivityUpdates()
     motionManager = nil
     stationaryTransitionWorkItem?.cancel()
@@ -567,10 +829,77 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     resetStationaryCandidate()
   }
 
+  private func startBackgroundActivitySessionIfNeeded() {
+    guard configuration.allowBackgroundLocationUpdates,
+      backgroundActivitySession == nil
+    else {
+      return
+    }
+    if #available(iOS 17.0, *) {
+      backgroundActivitySession = CLBackgroundActivitySession()
+    }
+  }
+
+  private func startConfiguredLocationUpdates() {
+    if configuration.terminationRecoveryMode == .significantChange {
+      locationManager.startMonitoringSignificantLocationChanges()
+    } else {
+      locationManager.startUpdatingLocation()
+    }
+  }
+
+  private var recoveryStatusMessage: String? {
+    if recoveredFromTermination {
+      return "termination_recovery_started_gap_possible"
+    }
+    return lifecycle == .interrupted ? "previous_session_interrupted" : nil
+  }
+
+  private func attemptTerminationRecoveryIfNeeded() {
+    guard pendingTerminationRecovery else { return }
+    pendingTerminationRecovery = false
+    guard configuration.terminationRecoveryMode == .significantChange,
+      trackId != nil,
+      currentAuthorizationStatus() == .authorizedAlways,
+      CLLocationManager.locationServicesEnabled()
+    else {
+      lifecycle = .interrupted
+      profile = .paused
+      persistState()
+      return
+    }
+    do {
+      try validateTrackingPreconditions(configuration)
+      sessionGeneration += 1
+      profile = .moving
+      lifecycle = .starting
+      configureLocationManager(for: .moving)
+      startBackgroundActivitySessionIfNeeded()
+      startMotionUpdatesIfPossible()
+      startConfiguredLocationUpdates()
+      lifecycle = .tracking
+      recoveredFromTermination = true
+      persistState()
+    } catch {
+      lifecycle = .interrupted
+      profile = .paused
+      persistState()
+    }
+  }
+
+  private func stopBackgroundActivitySession() {
+    if #available(iOS 17.0, *),
+      let session = backgroundActivitySession as? CLBackgroundActivitySession
+    {
+      session.invalidate()
+    }
+    backgroundActivitySession = nil
+  }
+
   private func handle(_ activity: CMMotionActivity) {
     let event = activityMap(activity)
     lastActivityEvent = event
-    delegate?.backgroundLocationService(self, didReceiveActivity: event)
+    notifyObservers { $0.backgroundLocationService(self, didReceiveActivity: event) }
 
     let type = event["type"] as? String ?? "unknown"
     let confidence = event["confidence"] as? Int ?? 0
@@ -657,23 +986,21 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   private func shouldExitStationary(for location: CLLocation) -> Bool {
     guard profile == .stationary,
-      location.horizontalAccuracy >= 0,
+      isMotionEvidenceEligible(location),
       let reference = stationaryReferenceLocation,
-      reference.horizontalAccuracy >= 0,
+      isMotionEvidenceEligible(reference),
       location.timestamp >= reference.timestamp
     else {
       return false
     }
-    return location.distance(from: reference)
+    let certainDisplacement = location.distance(from: reference)
+      - location.horizontalAccuracy - reference.horizontalAccuracy
+    return certainDisplacement
       >= configuration.stationaryProbeDisplacementMeters
   }
 
   private func recordStationaryCandidateEvidence(_ location: CLLocation) {
-    guard location.horizontalAccuracy >= 0,
-      location.horizontalAccuracy <= configuration.maximumAcceptedAccuracyMeters
-    else {
-      return
-    }
+    guard isMotionEvidenceEligible(location) else { return }
     lastReliableLocation = location
     guard stationaryTransitionWorkItem != nil else { return }
     guard let candidate = stationaryCandidateLocation else {
@@ -685,7 +1012,18 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     stationaryCandidateMaximumDisplacement = max(
       stationaryCandidateMaximumDisplacement,
       location.distance(from: candidate)
+        + location.horizontalAccuracy + candidate.horizontalAccuracy
     )
+  }
+
+  private func isMotionEvidenceEligible(_ location: CLLocation) -> Bool {
+    guard location.horizontalAccuracy > 0,
+      location.horizontalAccuracy <= configuration.maximumAcceptedAccuracyMeters
+    else { return false }
+    if #available(iOS 15.0, *), location.sourceInformation?.isSimulatedBySoftware == true {
+      return false
+    }
+    return true
   }
 
   private func hasLowStationaryDisplacementEvidence() -> Bool {
@@ -702,6 +1040,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   private func locationMap(_ location: CLLocation) -> [String: Any] {
+    let nativeReceivedAt = Date()
+    let nativeReceivedAtMs = epochMilliseconds(nativeReceivedAt)
+    let providerTimestampMs = epochMilliseconds(location.timestamp)
     var event: [String: Any] = [
       "eventId": UUID().uuidString,
       "lat": location.coordinate.latitude,
@@ -711,7 +1052,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "verticalAccuracy": location.verticalAccuracy,
       "heading": location.course,
       "speed": location.speed,
-      "timestamp": epochMilliseconds(location.timestamp),
+      "timestamp": providerTimestampMs,
+      "nativeReceivedAt": nativeReceivedAtMs,
+      "providerTimeDeltaMsAtReceipt": nativeReceivedAtMs - providerTimestampMs,
+      "monotonicReceivedNanos": Int64(ProcessInfo.processInfo.systemUptime * 1_000_000_000),
+      "monotonicDomainId": monotonicDomainId,
       "trackingProfile": profile.rawValue,
       "samplingProfile": profile == .stationary ? "stationary" : "moving",
       "batteryMode": profile == .stationary ? "stationary" : "moving",
@@ -804,7 +1149,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   private func emitStatus(message: String? = nil) {
-    delegate?.backgroundLocationService(self, didChangeStatus: stateMap(message: message))
+    let status = stateMap(message: message)
+    notifyObservers { $0.backgroundLocationService(self, didChangeStatus: status) }
   }
 
   private func currentAuthorizationStatus() -> CLAuthorizationStatus {
@@ -928,9 +1274,21 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     case .paused:
       lifecycle = .paused
       profile = .paused
-    case .starting, .tracking, .stopping, .interrupted, .failed:
-      // iOS cannot promise automatic continuous recovery after termination.
-      // Keep enough state for Dart to surface an explicit resume action.
+    case .starting, .tracking:
+      terminationRecoveryGapStartedAt = Date()
+      if configuration.terminationRecoveryMode == .significantChange {
+        lifecycle = .starting
+        profile = .moving
+        pendingTerminationRecovery = true
+      } else {
+        lifecycle = .interrupted
+        profile = .paused
+        userDefaults.set(
+          TrackingLifecycle.interrupted.rawValue,
+          forKey: PersistenceKey.lifecycle
+        )
+      }
+    case .stopping, .interrupted, .failed:
       lifecycle = .interrupted
       profile = .paused
       userDefaults.set(TrackingLifecycle.interrupted.rawValue, forKey: PersistenceKey.lifecycle)
@@ -944,6 +1302,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     userDefaults.removeObject(forKey: PersistenceKey.lifecycle)
     userDefaults.removeObject(forKey: PersistenceKey.trackId)
     userDefaults.removeObject(forKey: PersistenceKey.configuration)
+    pendingTerminationRecovery = false
+    recoveredFromTermination = false
+    terminationRecoveryGapStartedAt = nil
   }
 
   private func epochMilliseconds(_ date: Date) -> Int64 {
@@ -955,6 +1316,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard lifecycle == .tracking else { return }
     for location in locations {
+      let generation = sessionGeneration
       recordStationaryCandidateEvidence(location)
       if shouldExitStationary(for: location) {
         transition(to: .moving)
@@ -962,15 +1324,26 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       guard shouldEmit(location) else { continue }
       lastEmittedLocation = location
       let event = locationMap(location)
-      do {
-        journalPendingCount = try locationJournal.append(event)
-        journalFailureMessage = nil
-      } catch {
-        failLocationJournal(error)
-        return
+      locationJournalQueue.append(event) { [weak self] result in
+        guard let self else { return }
+        switch result {
+        case .success(let pendingCount):
+          self.journalPendingCount = pendingCount
+          self.journalFailureMessage = nil
+          guard generation == self.sessionGeneration,
+            self.lifecycle == .tracking || self.lifecycle == .starting
+          else {
+            return
+          }
+          self.lastLocationEvent = event
+          self.notifyObservers {
+            $0.backgroundLocationService(self, didReceiveLocation: event)
+          }
+        case .failure(let error):
+          guard generation == self.sessionGeneration else { return }
+          self.failLocationJournal(error)
+        }
       }
-      lastLocationEvent = event
-      delegate?.backgroundLocationService(self, didReceiveLocation: event)
     }
   }
 
@@ -1000,7 +1373,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
     finishPermissionRequestIfNeeded()
-    emitStatus(message: "authorization_changed")
+    enforceActiveTrackingPreconditions(reason: "authorization_changed")
   }
 
   func locationManager(
@@ -1011,7 +1384,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       return
     }
     finishPermissionRequestIfNeeded()
-    emitStatus(message: "authorization_changed")
+    enforceActiveTrackingPreconditions(reason: "authorization_changed")
   }
 
   private func finishPermissionRequestIfNeeded() {

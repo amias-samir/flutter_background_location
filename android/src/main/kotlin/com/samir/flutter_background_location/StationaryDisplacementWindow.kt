@@ -9,6 +9,7 @@ internal data class StationaryGpsFix(
     val latitude: Double,
     val longitude: Double,
     val observedAtMs: Long,
+    val horizontalAccuracyMeters: Double = 0.0,
 )
 
 /**
@@ -69,7 +70,11 @@ internal class StationaryDisplacementWindow {
         val limit = maximumDisplacementMeters.coerceAtLeast(0f).toDouble()
         for (firstIndex in anchorIndex until fixes.lastIndex) {
             for (secondIndex in firstIndex + 1..fixes.lastIndex) {
-                if (distanceMeters(fixes[firstIndex], fixes[secondIndex]) > limit) {
+                val maximumPlausibleDisplacement =
+                    distanceMeters(fixes[firstIndex], fixes[secondIndex]) +
+                        fixes[firstIndex].horizontalAccuracyMeters.coerceAtLeast(0.0) +
+                        fixes[secondIndex].horizontalAccuracyMeters.coerceAtLeast(0.0)
+                if (maximumPlausibleDisplacement > limit) {
                     return false
                 }
             }

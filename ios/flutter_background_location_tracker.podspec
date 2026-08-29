@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'flutter_background_location_tracker'
-  s.version          = '0.1.0'
+  s.version          = '0.1.2'
   s.summary          = 'Battery-aware background location and motion tracking for Flutter.'
   s.description      = <<-DESC
 Native iOS support for continuous Core Location updates, Core Motion activity

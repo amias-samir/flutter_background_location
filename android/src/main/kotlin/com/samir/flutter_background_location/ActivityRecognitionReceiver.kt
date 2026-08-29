@@ -56,10 +56,17 @@ class ActivityRecognitionReceiver : BroadcastReceiver() {
         val result = ActivityRecognitionResult.extractResult(intent) ?: return
         val activity = result.mostProbableActivity
         val store = TrackingStateStore(context)
-        if (!store.trackingEnabled || store.isPaused) return
+        val trackId = intent.getStringExtra(LocationTrackingService.EXTRA_TRACK_ID)
+        val generation = intent.getLongExtra(
+            LocationTrackingService.EXTRA_ACTIVITY_GENERATION,
+            0L,
+        )
+        if (!store.acceptsActivityRecognitionEvent(trackId, generation)) return
 
         val serviceIntent = Intent(context, LocationTrackingService::class.java).apply {
             action = LocationTrackingService.ACTION_ACTIVITY_UPDATE
+            putExtra(LocationTrackingService.EXTRA_TRACK_ID, trackId)
+            putExtra(LocationTrackingService.EXTRA_ACTIVITY_GENERATION, generation)
             putExtra(LocationTrackingService.EXTRA_ACTIVITY_TYPE, activity.type)
             putExtra(LocationTrackingService.EXTRA_ACTIVITY_CONFIDENCE, activity.confidence)
             putExtra(

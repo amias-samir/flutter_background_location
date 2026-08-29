@@ -1,6 +1,7 @@
 package com.samir.flutter_background_location
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.location.LocationManager
 import android.os.Build
 import android.os.PowerManager
@@ -34,6 +35,46 @@ internal class TrackingStateStore(context: Context) {
     val configuration: TrackingConfiguration
         get() = TrackingConfiguration.fromJson(preferences.getString(KEY_CONFIGURATION, null))
 
+    val activityRecognitionGeneration: Long?
+        get() = preferences.getLong(KEY_ACTIVITY_RECOGNITION_GENERATION, 0L)
+            .takeIf { it > 0L }
+
+    val sessionControlToken: String?
+        get() = preferences.getString(KEY_SESSION_CONTROL_TOKEN, null)
+            ?.takeIf { it.isNotBlank() }
+
+    val commandRevision: Long
+        get() = preferences.getLong(KEY_COMMAND_REVISION, 0L).coerceAtLeast(0L)
+
+    val lastCommandId: String?
+        get() = preferences.getString(KEY_LAST_COMMAND_ID, null)
+            ?.takeIf { it.isNotBlank() }
+
+    fun claimSessionControl(sessionControlToken: String) {
+        require(sessionControlToken.isNotBlank()) { "Session-control token must not be empty." }
+        val existing = this.sessionControlToken
+        val editor = preferences.edit()
+            .putString(KEY_SESSION_CONTROL_TOKEN, sessionControlToken)
+        if (existing != sessionControlToken) {
+            editor.putLong(KEY_COMMAND_REVISION, 0L)
+                .remove(KEY_LAST_COMMAND_ID)
+        }
+        editor.commitOrThrow("claim native session control")
+    }
+
+    fun recordCommandResult(
+        sessionControlToken: String,
+        commandId: String,
+        revision: Long,
+    ) {
+        require(revision > 0L) { "Command revision must be positive." }
+        preferences.edit()
+            .putString(KEY_SESSION_CONTROL_TOKEN, sessionControlToken)
+            .putString(KEY_LAST_COMMAND_ID, commandId)
+            .putLong(KEY_COMMAND_REVISION, revision)
+            .commitOrThrow("record native command result")
+    }
+
     fun begin(trackId: String, configuration: TrackingConfiguration) {
         preferences.edit()
             .putString(KEY_TRACK_ID, trackId)
@@ -46,7 +87,7 @@ internal class TrackingStateStore(context: Context) {
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
             .remove(KEY_MESSAGE)
-            .apply()
+            .commitOrThrow("begin tracking")
     }
 
     fun resume() {
@@ -59,7 +100,7 @@ internal class TrackingStateStore(context: Context) {
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
             .remove(KEY_MESSAGE)
-            .apply()
+            .commitOrThrow("resume tracking")
     }
 
     fun markState(state: String, profile: String, message: String? = null) {
@@ -69,11 +110,13 @@ internal class TrackingStateStore(context: Context) {
             .apply {
                 if (message == null) remove(KEY_MESSAGE) else putString(KEY_MESSAGE, message)
             }
-            .apply()
+            .commitOrThrow("mark tracking state")
     }
 
     fun updateConfiguration(configuration: TrackingConfiguration) {
-        preferences.edit().putString(KEY_CONFIGURATION, configuration.toJson()).apply()
+        preferences.edit()
+            .putString(KEY_CONFIGURATION, configuration.toJson())
+            .commitOrThrow("update tracking configuration")
     }
 
     fun pause() {
@@ -84,8 +127,9 @@ internal class TrackingStateStore(context: Context) {
             .putString(KEY_PROFILE, PROFILE_PAUSED)
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
+            .remove(KEY_ACTIVITY_RECOGNITION_GENERATION)
             .remove(KEY_MESSAGE)
-            .apply()
+            .commitOrThrow("pause tracking")
     }
 
     fun stop(reason: String?) {
@@ -100,7 +144,8 @@ internal class TrackingStateStore(context: Context) {
             .remove(KEY_SERVICE_STARTED_AT)
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
-            .apply()
+            .remove(KEY_ACTIVITY_RECOGNITION_GENERATION)
+            .commitOrThrow("stop tracking")
     }
 
     fun fail(message: String) {
@@ -112,7 +157,46 @@ internal class TrackingStateStore(context: Context) {
             .putString(KEY_MESSAGE, message)
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
-            .apply()
+            .remove(KEY_ACTIVITY_RECOGNITION_GENERATION)
+            .commitOrThrow("fail tracking")
+    }
+
+    fun interrupt(message: String) {
+        preferences.edit()
+            .putBoolean(KEY_TRACKING_ENABLED, true)
+            .putBoolean(KEY_PAUSED, false)
+            .putString(KEY_STATE, STATE_INTERRUPTED)
+            .putString(KEY_PROFILE, PROFILE_PAUSED)
+            .putString(KEY_MESSAGE, message)
+            .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
+            .remove(KEY_SERVICE_HEARTBEAT_AT)
+            .remove(KEY_ACTIVITY_RECOGNITION_GENERATION)
+            .commitOrThrow("interrupt tracking")
+    }
+
+    fun nextActivityRecognitionGeneration(): Long {
+        val generation = (preferences.getLong(KEY_ACTIVITY_RECOGNITION_GENERATION_COUNTER, 0L) + 1L)
+            .takeIf { it > 0L }
+            ?: 1L
+        preferences.edit()
+            .putLong(KEY_ACTIVITY_RECOGNITION_GENERATION_COUNTER, generation)
+            .putLong(KEY_ACTIVITY_RECOGNITION_GENERATION, generation)
+            .commitOrThrow("register activity recognition generation")
+        return generation
+    }
+
+    fun clearActivityRecognitionGeneration() {
+        preferences.edit()
+            .remove(KEY_ACTIVITY_RECOGNITION_GENERATION)
+            .commitOrThrow("clear activity recognition generation")
+    }
+
+    fun acceptsActivityRecognitionEvent(trackId: String?, generation: Long): Boolean {
+        if (trackId.isNullOrBlank() || generation <= 0L) return false
+        return trackingEnabled &&
+            !isPaused &&
+            activeTrackId == trackId &&
+            activityRecognitionGeneration == generation
     }
 
     /**
@@ -131,7 +215,7 @@ internal class TrackingStateStore(context: Context) {
         preferences.edit()
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
-            .apply()
+            .commitOrThrow("mark service stopped")
     }
 
     /**
@@ -159,7 +243,7 @@ internal class TrackingStateStore(context: Context) {
             .putString(KEY_PENDING_ACTION, action)
             .putString(KEY_PENDING_ACTION_REASON, reason)
             .putLong(KEY_PENDING_ACTION_TIMESTAMP, timestamp)
-            .commit()
+            .commitOrThrow("record pending notification action")
         return pendingUserAction() ?: linkedMapOf(
             "actionId" to actionId,
             "trackId" to trackId,
@@ -279,6 +363,7 @@ internal class TrackingStateStore(context: Context) {
         "lastPointAt" to TrackingEventBus.lastLocation?.get("timestamp"),
         "serviceStartedAt" to serviceStartedAt,
         "pendingUserAction" to pendingUserAction(),
+        "commandRevision" to commandRevision,
         "message" to preferences.getString(KEY_MESSAGE, null),
         "mockDetectionAvailable" to MOCK_DETECTION_AVAILABLE,
         "locationServicesEnabled" to locationServicesEnabled,
@@ -290,6 +375,12 @@ internal class TrackingStateStore(context: Context) {
 
     fun emitCurrentStatus() {
         TrackingEventBus.emitStatus(statusMap())
+    }
+
+    private fun SharedPreferences.Editor.commitOrThrow(operation: String) {
+        if (!commit()) {
+            throw IllegalStateException("Could not durably persist $operation.")
+        }
     }
 
     companion object {
@@ -325,11 +416,18 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_SERVICE_HEARTBEAT_AT = "service_heartbeat_at"
         private const val KEY_HEARTBEAT_CAPTURE_ACTIVE = "heartbeat_capture_active"
         private const val KEY_MESSAGE = "status_message"
+        private const val KEY_ACTIVITY_RECOGNITION_GENERATION =
+            "activity_recognition_generation"
+        private const val KEY_ACTIVITY_RECOGNITION_GENERATION_COUNTER =
+            "activity_recognition_generation_counter"
         private const val KEY_PENDING_ACTION_ID = "pending_user_action_id"
         private const val KEY_PENDING_ACTION_TRACK_ID = "pending_user_action_track_id"
         private const val KEY_PENDING_ACTION = "pending_user_action"
         private const val KEY_PENDING_ACTION_REASON = "pending_user_action_reason"
         private const val KEY_PENDING_ACTION_TIMESTAMP = "pending_user_action_timestamp"
+        private const val KEY_SESSION_CONTROL_TOKEN = "session_control_token"
+        private const val KEY_COMMAND_REVISION = "command_revision"
+        private const val KEY_LAST_COMMAND_ID = "last_command_id"
         private const val SERVICE_START_GRACE_MS = 90_000L
         private const val SERVICE_HEARTBEAT_STALE_AFTER_MS = 180_000L
 
