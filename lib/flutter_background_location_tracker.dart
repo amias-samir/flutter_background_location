@@ -1,17 +1,36 @@
+/// Public API for background route tracking, lifecycle control, storage,
+/// diagnostics, and export on Android and iOS.
 library;
 
-export 'src/application/field_tracking_client.dart';
+export 'src/application/tracking_client.dart';
+export 'src/application/derived_geometry_service.dart';
+export 'src/application/tracking_privacy_service.dart';
 export 'src/domain/activity_snapshot.dart';
+export 'src/domain/adaptive_battery.dart';
 export 'src/domain/capability_report.dart';
+export 'src/domain/derived_geometry.dart';
 export 'src/domain/export_models.dart';
+export 'src/domain/fix_quality.dart';
 export 'src/domain/location_sample.dart';
+export 'src/domain/native_tracking_protocol.dart';
 export 'src/domain/permission_state.dart';
 export 'src/domain/track.dart';
+export 'src/domain/track_data_page.dart';
 export 'src/domain/track_point.dart';
+export 'src/domain/track_query.dart';
 export 'src/domain/track_segment.dart';
 export 'src/domain/tracker_status.dart';
 export 'src/domain/tracking_config.dart';
+export 'src/domain/tracking_configuration_epoch.dart';
+export 'src/domain/tracking_error.dart';
+export 'src/domain/tracking_health.dart';
+export 'src/domain/tracking_privacy.dart';
+export 'src/domain/tracking_readiness.dart';
+export 'src/domain/tracking_session_snapshot.dart';
+export 'src/domain/tracking_settings.dart';
+export 'src/domain/tracking_start.dart';
 export 'src/export/track_export_service.dart';
+export 'src/export/track_export_v2_service.dart';
 export 'src/platform/tracker_adapter.dart';
 export 'src/storage/track_repository.dart';
 export 'src/upload/track_uploader.dart';

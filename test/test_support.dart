@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_background_location_tracker/src/domain/activity_snapshot.dart';
 import 'package:flutter_background_location_tracker/src/domain/location_sample.dart';
 import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
@@ -54,6 +56,11 @@ final class RepositoryHarness {
     MotionState motionState = MotionState.unknown,
     String? eventId,
     String? sourceTrackId,
+    DateTime? nativeReceivedAt,
+    int? providerTimeDeltaMsAtReceipt,
+    int? monotonicFixNanos,
+    int? monotonicReceivedNanos,
+    String? monotonicDomainId,
   }) {
     final timestamp = capturedAt ?? now;
     return repository.appendPoint(
@@ -70,6 +77,11 @@ final class RepositoryHarness {
           provider: 'test',
           eventId: eventId,
           trackId: sourceTrackId,
+          nativeReceivedAt: nativeReceivedAt,
+          providerTimeDeltaMsAtReceipt: providerTimeDeltaMsAtReceipt,
+          monotonicFixNanos: monotonicFixNanos,
+          monotonicReceivedNanos: monotonicReceivedNanos,
+          monotonicDomainId: monotonicDomainId,
         ),
         activity: ActivitySnapshot(
           type: activityType,
@@ -84,3 +96,9 @@ final class RepositoryHarness {
     );
   }
 }
+
+String readFixture(String relativePath) =>
+    File('test/fixtures/$relativePath').readAsStringSync().replaceAll(
+          '\r\n',
+          '\n',
+        );

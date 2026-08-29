@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="flutter_background_location" xmlns="http://www.topografix.com/GPX/1/1" xmlns:fbl="https://github.com/flutter-background-location/extensions/1" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <metadata>
+    <name>Track characterization-route</name>
+    <time>2026-07-20T08:00:00.000Z</time>
+    <desc>raw</desc>
+  </metadata>
+  <trk>
+    <name>Track characterization-route</name>
+    <trkseg>
+      <trkpt lat="27.7000000" lon="85.3000000">
+        <time>2026-07-20T08:00:00.000Z</time>
+        <extensions>
+          <fbl:sequence>1</fbl:sequence>
+          <fbl:mockAssessment>unavailable</fbl:mockAssessment>
+          <fbl:activity>unknown</fbl:activity>
+          <fbl:activityConfidence>0</fbl:activityConfidence>
+        </extensions>
+      </trkpt>
+      <trkpt lat="27.7000000" lon="85.3000000">
+        <time>2026-07-20T08:00:15.000Z</time>
+        <extensions>
+          <fbl:sequence>2</fbl:sequence>
+          <fbl:mockAssessment>unavailable</fbl:mockAssessment>
+          <fbl:activity>unknown</fbl:activity>
+          <fbl:activityConfidence>0</fbl:activityConfidence>
+        </extensions>
+      </trkpt>
+    </trkseg>
+    <trkseg>
+      <trkpt lat="27.8000000" lon="85.4000000">
+        <time>2026-07-20T08:10:15.000Z</time>
+        <extensions>
+          <fbl:sequence>4</fbl:sequence>
+          <fbl:mockAssessment>unavailable</fbl:mockAssessment>
+          <fbl:activity>in_vehicle</fbl:activity>
+          <fbl:activityConfidence>88</fbl:activityConfidence>
+        </extensions>
+      </trkpt>
+      <trkpt lat="27.8000000" lon="85.4000000">
+        <time>2026-07-20T08:10:30.000Z</time>
+        <extensions>
+          <fbl:sequence>5</fbl:sequence>
+          <fbl:mockAssessment>unavailable</fbl:mockAssessment>
+          <fbl:activity>in_vehicle</fbl:activity>
+          <fbl:activityConfidence>88</fbl:activityConfidence>
+        </extensions>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>

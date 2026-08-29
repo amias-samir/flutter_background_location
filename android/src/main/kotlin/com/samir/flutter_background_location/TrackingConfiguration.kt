@@ -3,17 +3,18 @@ package com.samir.flutter_background_location
 import org.json.JSONObject
 
 internal data class TrackingConfiguration(
-    val movingIntervalMs: Long = 15_000L,
-    val movingDistanceFilterMeters: Float = 15f,
-    val stationaryIntervalMs: Long = 120_000L,
-    val stationaryDistanceFilterMeters: Float = 75f,
+    val movingIntervalMs: Long = 10_000L,
+    val movingDistanceFilterMeters: Float = 5f,
+    val stationaryIntervalMs: Long = 30_000L,
+    val stationaryDistanceFilterMeters: Float = 25f,
     val stationaryTimeoutMs: Long = 90_000L,
     val stationaryProbeDisplacementMeters: Float = 30f,
     val stationaryConfidenceThreshold: Int = 75,
     val movingConfidenceThreshold: Int = 60,
     val movingConfirmationCount: Int = 2,
     val activityRecognitionIntervalMs: Long = 10_000L,
-    val desiredAccuracy: String = "high",
+    val desiredAccuracy: String = "precised",
+    val maximumAcceptedAccuracyMeters: Double = 20.0,
     val notificationChannelId: String = "active_location_tracking",
     val notificationChannelName: String = "Active location tracking",
     val notificationChannelDescription: String =
@@ -33,6 +34,7 @@ internal data class TrackingConfiguration(
         put(KEY_MOVING_CONFIRMATION_COUNT, movingConfirmationCount)
         put(KEY_ACTIVITY_INTERVAL, activityRecognitionIntervalMs)
         put(KEY_DESIRED_ACCURACY, desiredAccuracy)
+        put(KEY_MAXIMUM_ACCEPTED_ACCURACY, maximumAcceptedAccuracyMeters)
         put(KEY_NOTIFICATION_CHANNEL_ID, notificationChannelId)
         put(KEY_NOTIFICATION_CHANNEL_NAME, notificationChannelName)
         put(KEY_NOTIFICATION_CHANNEL_DESCRIPTION, notificationChannelDescription)
@@ -53,6 +55,7 @@ internal data class TrackingConfiguration(
         private const val KEY_MOVING_CONFIRMATION_COUNT = "movingConfirmationCount"
         private const val KEY_ACTIVITY_INTERVAL = "activityRecognitionIntervalMs"
         private const val KEY_DESIRED_ACCURACY = "desiredAccuracy"
+        private const val KEY_MAXIMUM_ACCEPTED_ACCURACY = "maximumAcceptedAccuracyMeters"
         private const val KEY_NOTIFICATION_CHANNEL_ID = "notificationChannelId"
         private const val KEY_NOTIFICATION_CHANNEL_NAME = "notificationChannelName"
         private const val KEY_NOTIFICATION_CHANNEL_DESCRIPTION = "notificationChannelDescription"
@@ -99,6 +102,10 @@ internal data class TrackingConfiguration(
                     values.long(KEY_ACTIVITY_INTERVAL, defaults.activityRecognitionIntervalMs)
                         .coerceAtLeast(1_000L),
                 desiredAccuracy = values.string(KEY_DESIRED_ACCURACY, defaults.desiredAccuracy),
+                maximumAcceptedAccuracyMeters = values.double(
+                    KEY_MAXIMUM_ACCEPTED_ACCURACY,
+                    defaults.maximumAcceptedAccuracyMeters,
+                ).coerceAtLeast(1.0),
                 notificationChannelId =
                     values.string(KEY_NOTIFICATION_CHANNEL_ID, defaults.notificationChannelId)
                         .ifBlank { defaults.notificationChannelId },
@@ -137,6 +144,9 @@ internal data class TrackingConfiguration(
 
         private fun Map<*, *>.float(key: String, fallback: Float): Float =
             (this[key] as? Number)?.toFloat() ?: fallback
+
+        private fun Map<*, *>.double(key: String, fallback: Double): Double =
+            (this[key] as? Number)?.toDouble() ?: fallback
 
         private fun Map<*, *>.int(key: String, fallback: Int): Int =
             (this[key] as? Number)?.toInt() ?: fallback
