@@ -8,6 +8,7 @@ import '../domain/track_query.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
+import '../domain/tracking_continuity.dart';
 import '../domain/tracking_privacy.dart';
 import '../domain/tracking_start.dart';
 
@@ -36,6 +37,34 @@ final class PointWriteRequest {
   final bool accepted;
   final int qualityFlags;
   final String? rejectionReason;
+}
+
+/// Result of one atomic point/topology/gap transaction.
+final class PointAppendResult {
+  const PointAppendResult({
+    required this.point,
+    required this.segmentId,
+    required this.duplicate,
+    this.gap,
+  });
+
+  final TrackPoint point;
+  final String segmentId;
+  final TrackingContinuityGap? gap;
+  final bool duplicate;
+}
+
+/// Optional atomic continuity capability for repositories that support the
+/// schema-12 evidence model.
+abstract interface class ContinuityTrackRepository {
+  Future<TrackPoint?> findLastRawPoint(String trackId);
+
+  Future<PointAppendResult> appendPointWithContinuity(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+  );
+
+  Future<List<TrackingContinuityGap>> listContinuityGaps(String trackId);
 }
 
 enum TrackOperationType { pause, complete }
@@ -240,6 +269,11 @@ abstract interface class GapSegmentRepository {
     required DateTime observedAt,
     required String reason,
   });
+}
+
+/// Optional audit used to coalesce only proven-safe legacy callback gaps.
+abstract interface class LegacyGapEvidenceRepository {
+  Future<Set<String>> safeLegacyAutomaticAfterSegmentIds(String trackId);
 }
 
 /// Owner-scoped route lookup and retention capability used by the safe facade.

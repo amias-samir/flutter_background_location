@@ -80,6 +80,35 @@ the bounded V2 export service. Existing `listTracks()` and
 `TrackExportResult.path` stay available during the pre-1.0 compatibility
 window.
 
+## Schema 12 continuity and multi-day Trips
+
+Schema 12 is additive. Existing Tracks, segments, points, configuration epochs,
+outbox records, managed exports, and derived geometry remain unchanged. Each
+existing Track receives one implicit owner-scoped Trip/leg membership row.
+
+Existing `TrackingClient.open()` integrations remain source-compatible. To
+present a journey once while completing each day independently, opt into:
+
+```dart
+final TrackingTripController tracking = await TrackingClient.openWithTrips(
+  owner: TrackingOwner(userId: userId, organizationId: organizationId),
+);
+```
+
+Replace final completion at the end of each day with `endCurrentDay()`, call
+`continueTrip()` the next morning, and call `completeTrip()` only at the final
+destination. Do not reopen completed Track rows; a continuation creates a new
+immutable daily leg. Use `listTripPage()` for normal history and `exportTrip()`
+for one GeoJSON/KML/GPX artifact.
+
+The old `largeGapThreshold` remains decodable, but elapsed accepted-point time
+alone no longer proves a capture interruption. New configuration separates
+provider-fix age, callback-health warning, accepted-geometry gap diagnostics,
+and continuity fallback policy. Map/export clients that want the corrected
+normal presentation should select
+`RouteGeometryContinuity.mergeAutomaticCallbackGaps`; raw evidence remains
+available through `preserveEvidenceSegments`.
+
 ## Runtime configuration
 
 Feature-detect `TrackingConfigurationController` and call

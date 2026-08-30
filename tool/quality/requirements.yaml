@@ -465,15 +465,18 @@ work_packages:
       - test/position_validator_test.dart
   - id: Q1-03
     phase: Q1
-    title: First-fix acquisition and gap semantics
+    title: First-fix acquisition and explicit continuity-gap evidence
     release_gate: acquisition and gap fixtures
     required_before: motion transitions
     evidence:
       - lib/src/domain/tracking_config.dart
+      - lib/src/domain/tracking_continuity.dart
       - lib/src/domain/tracking_health.dart
       - lib/src/application/tracking_client.dart
+      - lib/src/application/route_geometry_assembler.dart
       - test/tracking_client_test.dart
       - test/tracking_config_test.dart
+      - test/tracking_continuity_test.dart
   - id: Q1-04
     phase: Q1
     title: Uncertainty-aware stationary and motion transitions

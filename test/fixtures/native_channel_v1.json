@@ -119,6 +119,7 @@
         "config": {
           "accuracy": "high",
           "desiredAccuracy": "precised",
+          "stationaryDesiredAccuracy": "precised",
           "movingDistanceFilterMeters": 5,
           "movingIntervalMs": 10000,
           "stationaryDistanceFilterMeters": 25,
@@ -135,6 +136,10 @@
           "batchPointCount": 25,
           "batchMaxAgeMs": 120000,
           "largeGapThresholdMs": 300000,
+          "maximumProviderFixAgeMs": 300000,
+          "callbackHealthWarningThresholdMs": 120000,
+          "acceptedGeometryGapThresholdMs": 300000,
+          "continuityPolicy": "conservative",
           "firstFixTimeoutMs": 60000,
           "notificationTitle": "Location tracking active",
           "notificationText": "Recording your route"
@@ -154,6 +159,7 @@
         "config": {
           "accuracy": "high",
           "desiredAccuracy": "precised",
+          "stationaryDesiredAccuracy": "precised",
           "movingDistanceFilterMeters": 5,
           "movingIntervalMs": 10000,
           "stationaryDistanceFilterMeters": 25,
@@ -170,6 +176,10 @@
           "batchPointCount": 25,
           "batchMaxAgeMs": 120000,
           "largeGapThresholdMs": 300000,
+          "maximumProviderFixAgeMs": 300000,
+          "callbackHealthWarningThresholdMs": 120000,
+          "acceptedGeometryGapThresholdMs": 300000,
+          "continuityPolicy": "conservative",
           "firstFixTimeoutMs": 60000,
           "notificationTitle": "Location tracking active",
           "notificationText": "Recording your route"
@@ -190,6 +200,7 @@
         "config": {
           "accuracy": "high",
           "desiredAccuracy": "precised",
+          "stationaryDesiredAccuracy": "precised",
           "movingDistanceFilterMeters": 5,
           "movingIntervalMs": 10000,
           "stationaryDistanceFilterMeters": 25,
@@ -206,6 +217,10 @@
           "batchPointCount": 25,
           "batchMaxAgeMs": 120000,
           "largeGapThresholdMs": 300000,
+          "maximumProviderFixAgeMs": 300000,
+          "callbackHealthWarningThresholdMs": 120000,
+          "acceptedGeometryGapThresholdMs": 300000,
+          "continuityPolicy": "conservative",
           "firstFixTimeoutMs": 60000,
           "notificationTitle": "Location tracking active",
           "notificationText": "Recording your route"

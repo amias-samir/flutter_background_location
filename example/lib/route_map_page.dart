@@ -5,17 +5,108 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
-class TrackMapPage extends StatelessWidget {
+class TrackMapPage extends StatefulWidget {
   const TrackMapPage({super.key, required this.tracking, required this.track});
 
   final Tracking tracking;
   final Track track;
 
   @override
+  State<TrackMapPage> createState() => _TrackMapPageState();
+}
+
+class _TrackMapPageState extends State<TrackMapPage> {
+  var _continuity = RouteGeometryContinuity.mergeAutomaticCallbackGaps;
+
+  Future<RouteGeometry> _load() async {
+    final tracking = widget.tracking;
+    if (tracking is TrackingGeometryController) {
+      return RouteGeometry.fromReport(
+        await (tracking as TrackingGeometryController)
+            .assembleTrackRouteGeometry(
+              widget.track.id,
+              continuity: _continuity,
+            ),
+      );
+    }
+    final bundle = await tracking.loadTrackBundle(widget.track.id);
+    return RouteGeometry.fromReport(
+      const RouteGeometryAssembler().assemble(
+        sourceParts: bundle.segments.map(
+          (segment) => RouteGeometrySourcePart(
+            legNumber: 1,
+            segment: segment.segment,
+            points: segment.points,
+          ),
+        ),
+        continuity: _continuity,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => _RouteMapScaffold(
+    title: 'Recorded route',
+    continuity: _continuity,
+    onContinuityChanged: (value) => setState(() => _continuity = value),
+    future: _load(),
+  );
+}
+
+class TripMapPage extends StatefulWidget {
+  const TripMapPage({super.key, required this.tracking, required this.trip});
+
+  final MultiDayTripController tracking;
+  final Trip trip;
+
+  @override
+  State<TripMapPage> createState() => _TripMapPageState();
+}
+
+class _TripMapPageState extends State<TripMapPage> {
+  var _continuity = RouteGeometryContinuity.mergeAutomaticCallbackGaps;
+
+  Future<RouteGeometry> _load() async {
+    final results = await Future.wait<Object>(<Future<Object>>[
+      widget.tracking.assembleTripRouteGeometry(
+        widget.trip.id,
+        continuity: _continuity,
+      ),
+      widget.tracking.loadTripBundle(widget.trip.id),
+    ]);
+    return RouteGeometry.fromReport(
+      results[0] as RouteGeometryReport,
+      gaps: (results[1] as TripBundle).gaps,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => _RouteMapScaffold(
+    title: widget.trip.routeId ?? 'Multi-day Trip',
+    continuity: _continuity,
+    onContinuityChanged: (value) => setState(() => _continuity = value),
+    future: _load(),
+  );
+}
+
+class _RouteMapScaffold extends StatelessWidget {
+  const _RouteMapScaffold({
+    required this.title,
+    required this.continuity,
+    required this.onContinuityChanged,
+    required this.future,
+  });
+
+  final String title;
+  final RouteGeometryContinuity continuity;
+  final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
+  final Future<RouteGeometry> future;
+
+  @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Recorded route')),
-    body: FutureBuilder<TrackBundle>(
-      future: tracking.loadTrackBundle(track.id),
+    appBar: AppBar(title: Text(title)),
+    body: FutureBuilder<RouteGeometry>(
+      future: future,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return Center(child: SelectableText(snapshot.error.toString()));
@@ -23,23 +114,66 @@ class TrackMapPage extends StatelessWidget {
         if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        final route = RouteGeometry.fromBundle(snapshot.requireData);
+        final route = snapshot.requireData;
         if (route.points.isEmpty) {
           return const Center(child: Text('No accepted coordinates yet.'));
         }
         return Column(
           children: <Widget>[
             Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                '${route.pointCount} points • '
-                '${route.segments.length} drawable segment(s)',
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+              child: Column(
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          '${route.pointCount} points • '
+                          '${route.geometryPartCount} drawable part(s) • '
+                          '${route.gapCount} gap(s)',
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilterChip(
+                        avatar: const Icon(Icons.link_rounded, size: 18),
+                        label: const Text('Connect all'),
+                        selected:
+                            continuity ==
+                            RouteGeometryContinuity
+                                .connectAllChronologicalPoints,
+                        onSelected: (selected) => onContinuityChanged(
+                          selected
+                              ? RouteGeometryContinuity
+                                    .connectAllChronologicalPoints
+                              : RouteGeometryContinuity
+                                    .mergeAutomaticCallbackGaps,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      continuity ==
+                              RouteGeometryContinuity
+                                  .connectAllChronologicalPoints
+                          ? 'Straight connectors are inferred and are not added to measured distance.'
+                          : 'Only proven automatic callback gaps are joined.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
               ),
             ),
             Expanded(
               child: Stack(
                 children: <Widget>[
-                  Positioned.fill(child: TrackRouteMap(route: route)),
+                  Positioned.fill(
+                    child: TrackRouteMap(
+                      key: ValueKey<RouteGeometryContinuity>(continuity),
+                      route: route,
+                    ),
+                  ),
                   const Positioned(
                     left: 12,
                     bottom: 12,
@@ -100,13 +234,22 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         ),
       );
     }
-    await _drawEndpoint(
+    for (final marker in widget.route.gapMarkers) {
+      await _drawCircle(
+        controller,
+        coordinate: marker,
+        color: '#F57C00',
+        radius: 6,
+        strokeWidth: 2,
+      );
+    }
+    await _drawCircle(
       controller,
       coordinate: widget.route.start,
       color: '#D32F2F',
       radius: widget.route.hasDistinctEndpoints ? 8 : 10,
     );
-    await _drawEndpoint(
+    await _drawCircle(
       controller,
       coordinate: widget.route.destination,
       color: '#2E7D32',
@@ -125,7 +268,7 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     );
   }
 
-  Future<void> _drawEndpoint(
+  Future<void> _drawCircle(
     maplibre.MapLibreMapController controller, {
     required maplibre.LatLng coordinate,
     required String color,
@@ -156,6 +299,8 @@ class _RouteEndpointLegend extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: const <Widget>[
           _LegendItem(color: Color(0xFFD32F2F), label: 'Start'),
+          SizedBox(width: 12),
+          _LegendItem(color: Color(0xFFF57C00), label: 'Gap'),
           SizedBox(width: 12),
           _LegendItem(color: Color(0xFF2E7D32), label: 'Destination'),
         ],
@@ -196,50 +341,126 @@ class RouteGeometry {
   const RouteGeometry({
     required this.segments,
     required this.points,
+    required this.gapMarkers,
     required this.bounds,
     required this.center,
     required this.pointCount,
+    required this.geometryPartCount,
+    required this.gapCount,
+    required this.inferredConnectorCount,
   });
 
   final List<List<maplibre.LatLng>> segments;
   final List<maplibre.LatLng> points;
+  final List<maplibre.LatLng> gapMarkers;
   final maplibre.LatLngBounds bounds;
   final maplibre.LatLng center;
   final int pointCount;
+  final int geometryPartCount;
+  final int gapCount;
+  final int inferredConnectorCount;
 
   maplibre.LatLng get start => points.first;
-
   maplibre.LatLng get destination => points.last;
 
   bool get hasDistinctEndpoints =>
       start.latitude != destination.latitude ||
       start.longitude != destination.longitude;
 
-  factory RouteGeometry.fromBundle(TrackBundle bundle) {
+  factory RouteGeometry.fromReport(
+    RouteGeometryReport report, {
+    Iterable<TrackingContinuityGap>? gaps,
+  }) {
     final all = <maplibre.LatLng>[];
+    final pointCoordinates = <String, maplibre.LatLng>{};
     final segments = <List<maplibre.LatLng>>[];
-    for (final segment in bundle.segments) {
-      final coordinates = segment.points
-          .where((point) => point.accepted && _valid(point))
-          .map((point) => maplibre.LatLng(point.latitude, point.longitude))
-          .toList(growable: false);
-      all.addAll(coordinates);
+    for (final part in report.parts) {
+      final coordinates = <maplibre.LatLng>[];
+      for (final point in part.points.where(_valid)) {
+        final coordinate = maplibre.LatLng(point.latitude, point.longitude);
+        coordinates.add(coordinate);
+        all.add(coordinate);
+        pointCoordinates[point.id] = coordinate;
+      }
       if (coordinates.length >= 2) segments.add(coordinates);
     }
-    final bounds = _bounds(all);
-    return RouteGeometry(
+    final markers = <maplibre.LatLng>[];
+    final representedBoundaries = <String>{};
+    for (final gap in gaps ?? report.gaps) {
+      final beforeId = gap.beforePointId;
+      final before = beforeId == null ? null : pointCoordinates[beforeId];
+      final after = pointCoordinates[gap.afterPointId];
+      if (before == null || after == null) continue;
+      markers.add(_midpoint(before, after));
+      representedBoundaries.add('$beforeId\u0000${gap.afterPointId}');
+    }
+    for (final connector in report.inferredConnectors) {
+      final key = '${connector.beforePointId}\u0000${connector.afterPointId}';
+      if (representedBoundaries.contains(key)) continue;
+      final before = pointCoordinates[connector.beforePointId];
+      final after = pointCoordinates[connector.afterPointId];
+      if (before != null && after != null) {
+        markers.add(_midpoint(before, after));
+      }
+    }
+    return _create(
       segments: segments,
       points: all,
+      gapMarkers: markers,
+      geometryPartCount: report.geometryPartCount,
+      gapCount: report.gapCount,
+      inferredConnectorCount: report.inferredConnectorCount,
+    );
+  }
+
+  factory RouteGeometry.fromBundle(TrackBundle bundle) {
+    final report = const RouteGeometryAssembler().assemble(
+      sourceParts: bundle.segments.map(
+        (segment) => RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: segment.segment,
+          points: segment.points,
+        ),
+      ),
+    );
+    return RouteGeometry.fromReport(report);
+  }
+
+  static RouteGeometry _create({
+    required List<List<maplibre.LatLng>> segments,
+    required List<maplibre.LatLng> points,
+    required List<maplibre.LatLng> gapMarkers,
+    required int geometryPartCount,
+    required int gapCount,
+    required int inferredConnectorCount,
+  }) {
+    final bounds = _bounds(points);
+    return RouteGeometry(
+      segments: segments,
+      points: points,
+      gapMarkers: gapMarkers,
       bounds: bounds,
       center: maplibre.LatLng(
         (bounds.southwest.latitude + bounds.northeast.latitude) / 2,
         (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
       ),
-      pointCount: all.length,
+      pointCount: points.length,
+      geometryPartCount: geometryPartCount,
+      gapCount: gapCount,
+      inferredConnectorCount: inferredConnectorCount,
     );
   }
 
+  static maplibre.LatLng _midpoint(
+    maplibre.LatLng before,
+    maplibre.LatLng after,
+  ) => maplibre.LatLng(
+    (before.latitude + after.latitude) / 2,
+    (before.longitude + after.longitude) / 2,
+  );
+
   static bool _valid(TrackPoint point) =>
+      point.accepted &&
       point.latitude.isFinite &&
       point.longitude.isFinite &&
       point.latitude >= -90 &&

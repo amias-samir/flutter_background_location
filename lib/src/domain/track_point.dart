@@ -48,6 +48,10 @@ final class TrackPoint {
     this.monotonicFixNanos,
     this.monotonicReceivedNanos,
     this.monotonicDomainId,
+    this.captureGenerationId,
+    this.nativeSessionStartedAt,
+    this.nativeLifecycle,
+    this.samplingProfile,
     this.qualityPolicyVersion,
   });
 
@@ -85,6 +89,10 @@ final class TrackPoint {
   final int? monotonicFixNanos;
   final int? monotonicReceivedNanos;
   final String? monotonicDomainId;
+  final String? captureGenerationId;
+  final DateTime? nativeSessionStartedAt;
+  final TrackerLifecycle? nativeLifecycle;
+  final SamplingProfile? samplingProfile;
   final int? qualityPolicyVersion;
   final bool accepted;
   final int qualityFlags;
@@ -134,6 +142,10 @@ final class TrackPoint {
         monotonicFixNanos: monotonicFixNanos,
         monotonicReceivedNanos: monotonicReceivedNanos,
         monotonicDomainId: monotonicDomainId,
+        captureGenerationId: captureGenerationId,
+        nativeSessionStartedAt: nativeSessionStartedAt,
+        nativeLifecycle: nativeLifecycle,
+        samplingProfile: samplingProfile,
         qualityPolicyVersion: qualityPolicyVersion,
         accepted: accepted,
         qualityFlags: qualityFlags,
@@ -177,6 +189,21 @@ final class TrackPoint {
         monotonicReceivedNanos:
             (row['monotonic_received_nanos'] as num?)?.toInt(),
         monotonicDomainId: row['monotonic_domain_id'] as String?,
+        captureGenerationId: row['capture_generation_id'] as String?,
+        nativeSessionStartedAt: row['native_session_started_at'] == null
+            ? null
+            : DateTime.parse(row['native_session_started_at']! as String)
+                .toUtc(),
+        nativeLifecycle:
+            TrackerLifecycle.values.cast<TrackerLifecycle?>().firstWhere(
+                  (candidate) => candidate?.name == row['native_lifecycle'],
+                  orElse: () => null,
+                ),
+        samplingProfile:
+            SamplingProfile.values.cast<SamplingProfile?>().firstWhere(
+                  (candidate) => candidate?.name == row['sampling_profile'],
+                  orElse: () => null,
+                ),
         qualityPolicyVersion: (row['quality_policy_version'] as num?)?.toInt(),
         accepted: row['accepted'] == 1,
         qualityFlags: (row['quality_flags'] as num?)?.toInt() ?? 0,

@@ -1,4 +1,5 @@
 import '../domain/derived_geometry.dart';
+import '../domain/route_geometry.dart';
 import '../domain/track_point.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
@@ -175,6 +176,14 @@ abstract interface class TrackingGeometryController {
   Future<TrackBundle> loadTrackGeometry(
     String trackId, {
     TrackGeometrySelection geometry,
+  });
+
+  /// Assembles presentation geometry with the same continuity policy used by
+  /// exports. Canonical points, segments, and gap evidence are not modified.
+  Future<RouteGeometryReport> assembleTrackRouteGeometry(
+    String trackId, {
+    RouteGeometryContinuity continuity =
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
   });
 
   Future<void> deleteDerivedGeometry(String trackId, String runId);

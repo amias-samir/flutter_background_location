@@ -7,11 +7,14 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xml/xml.dart';
 
+import '../application/route_geometry_assembler.dart';
 import '../domain/activity_snapshot.dart';
-import '../domain/export_models.dart';
 import '../domain/derived_geometry.dart';
+import '../domain/export_models.dart';
+import '../domain/route_geometry.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
+import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../storage/track_repository.dart';
 
@@ -185,6 +188,11 @@ final class TrackExportService {
       path: path,
       pointCount: artifact.pointCount,
       segmentCount: artifact.segmentCount,
+      sourceSegmentCount: artifact.sourceSegmentCount,
+      geometryPartCount: artifact.geometryPartCount,
+      gapCount: artifact.gapCount,
+      inferredConnectorCount: artifact.inferredConnectorCount,
+      geometryContinuity: artifact.geometryContinuity,
     );
   }
 
@@ -204,12 +212,67 @@ final class TrackExportService {
         !options.allowIncompleteTrackSnapshot) {
       throw StateError('Only completed tracks can be exported.');
     }
-    return switch (format) {
-      TrackExportFormat.geoJson => _geoJson(bundle, options),
-      TrackExportFormat.kml => _kml(bundle, options),
-      TrackExportFormat.gpx => _gpx(bundle, options),
-    };
+    final continuityRepository = repository is ContinuityTrackRepository
+        ? repository as ContinuityTrackRepository
+        : null;
+    final legacyRepository = repository is LegacyGapEvidenceRepository
+        ? repository as LegacyGapEvidenceRepository
+        : null;
+    final report = const RouteGeometryAssembler().assemble(
+      sourceParts: bundle.segments.map(
+        (source) => RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: source.segment,
+          points: source.points,
+          legacyAutomaticGapEligible: false,
+        ),
+      ),
+      gaps: await continuityRepository?.listContinuityGaps(trackId) ??
+          const <TrackingContinuityGap>[],
+      continuity: options.geometryContinuity,
+    );
+    final safeLegacyAfterIds =
+        await legacyRepository?.safeLegacyAutomaticAfterSegmentIds(trackId) ??
+            const <String>{};
+    final resolvedReport = safeLegacyAfterIds.isEmpty
+        ? report
+        : const RouteGeometryAssembler().assemble(
+            sourceParts: bundle.segments.map(
+              (source) => RouteGeometrySourcePart(
+                legNumber: 1,
+                segment: source.segment,
+                points: source.points,
+                legacyAutomaticGapEligible:
+                    safeLegacyAfterIds.contains(source.segment.id),
+              ),
+            ),
+            gaps: await continuityRepository?.listContinuityGaps(trackId) ??
+                const <TrackingContinuityGap>[],
+            continuity: options.geometryContinuity,
+          );
+    return renderAssembledBundle(
+      bundle: bundle,
+      format: format,
+      options: options,
+      report: resolvedReport,
+    );
   }
+
+  /// Encodes a caller-assembled route while reusing the canonical formatters.
+  ///
+  /// This is primarily used by combined multi-day Trip export. The supplied
+  /// [report] is presentation geometry; [bundle] remains immutable evidence.
+  TrackExportArtifact renderAssembledBundle({
+    required TrackBundle bundle,
+    required TrackExportFormat format,
+    required TrackExportOptions options,
+    required RouteGeometryReport report,
+  }) =>
+      switch (format) {
+        TrackExportFormat.geoJson => _geoJson(bundle, options, report),
+        TrackExportFormat.kml => _kml(bundle, options, report),
+        TrackExportFormat.gpx => _gpx(bundle, options, report),
+      };
 
   Future<void> deleteExport(TrackExportResult result) =>
       fileWriter.delete(result.path);
@@ -217,9 +280,12 @@ final class TrackExportService {
   static TrackExportArtifact _geoJson(
     TrackBundle bundle,
     TrackExportOptions options,
+    RouteGeometryReport report,
   ) {
     final selectedSegmentPoints = _selectedSegments(bundle, options);
-    final segmentPoints = _geometrySegments(selectedSegmentPoints);
+    final segmentPoints = report.parts
+        .map((part) => part.points.where(_hasValidCoordinate).toList())
+        .toList(growable: false);
     final lines = segmentPoints
         .where((points) => points.length >= 2)
         .map(
@@ -237,10 +303,25 @@ final class TrackExportService {
     final features = <Map<String, Object?>>[
       <String, Object?>{
         'type': 'Feature',
-        'properties': _trackProperties(bundle.track, options),
+        'properties': _trackProperties(bundle.track, options, report),
         'geometry': _geoJsonRouteGeometry(lines),
       },
     ];
+    for (final connector in report.inferredConnectors) {
+      features.add(<String, Object?>{
+        'type': 'Feature',
+        'properties': <String, Object?>{
+          'featureType': 'inferredConnector',
+          'beforePointId': connector.beforePointId,
+          'afterPointId': connector.afterPointId,
+          'cause': connector.cause.name,
+          'durationMs': connector.duration.inMilliseconds,
+          'straightLineDistanceMeters': connector.straightLineDistanceMeters,
+          'excludedFromMeasuredDistance': true,
+        },
+        'geometry': null,
+      });
+    }
     if (options.includeGeoJsonPointFeatures) {
       for (final points in selectedSegmentPoints) {
         for (final point in points) {
@@ -272,6 +353,7 @@ final class TrackExportService {
       'geojson',
       contents,
       selectedSegmentPoints,
+      report,
     );
   }
 
@@ -294,9 +376,12 @@ final class TrackExportService {
   static TrackExportArtifact _kml(
     TrackBundle bundle,
     TrackExportOptions options,
+    RouteGeometryReport report,
   ) {
     final selectedSegmentPoints = _selectedSegments(bundle, options);
-    final segmentPoints = _geometrySegments(selectedSegmentPoints);
+    final segmentPoints = report.parts
+        .map((part) => part.points.where(_hasValidCoordinate).toList())
+        .toList(growable: false);
     final builder = XmlBuilder();
     builder.processing('xml', 'version="1.0" encoding="UTF-8"');
     builder.element(
@@ -312,6 +397,14 @@ final class TrackExportService {
               'Data',
               attributes: const <String, String>{'name': 'geometrySource'},
               nest: () => builder.element('value', nest: 'raw'),
+            );
+            builder.element(
+              'Data',
+              attributes: const <String, String>{'name': 'geometryContinuity'},
+              nest: () => builder.element(
+                'value',
+                nest: report.continuity.name,
+              ),
             );
           });
           for (var index = 0; index < segmentPoints.length; index += 1) {
@@ -339,6 +432,28 @@ final class TrackExportService {
               });
             }
           }
+          for (final connector in report.inferredConnectors) {
+            builder.element('Placemark', nest: () {
+              builder.element('name', nest: 'Inferred route connector');
+              builder.element('ExtendedData', nest: () {
+                for (final entry in <String, String>{
+                  'cause': connector.cause.name,
+                  'beforePointId': connector.beforePointId,
+                  'afterPointId': connector.afterPointId,
+                  'durationMs': connector.duration.inMilliseconds.toString(),
+                  'straightLineDistanceMeters':
+                      connector.straightLineDistanceMeters.toString(),
+                  'excludedFromMeasuredDistance': 'true',
+                }.entries) {
+                  builder.element(
+                    'Data',
+                    attributes: <String, String>{'name': entry.key},
+                    nest: () => builder.element('value', nest: entry.value),
+                  );
+                }
+              });
+            });
+          }
         });
       },
     );
@@ -351,15 +466,19 @@ final class TrackExportService {
       'kml',
       contents,
       selectedSegmentPoints,
+      report,
     );
   }
 
   static TrackExportArtifact _gpx(
     TrackBundle bundle,
     TrackExportOptions options,
+    RouteGeometryReport report,
   ) {
     final selectedSegmentPoints = _selectedSegments(bundle, options);
-    final segmentPoints = _geometrySegments(selectedSegmentPoints);
+    final segmentPoints = report.parts
+        .map((part) => part.points.where(_hasValidCoordinate).toList())
+        .toList(growable: false);
     final builder = XmlBuilder();
     builder.processing('xml', 'version="1.0" encoding="UTF-8"');
     builder.element(
@@ -381,10 +500,29 @@ final class TrackExportService {
             'time',
             nest: _formatTime(bundle.track.startedAt, options),
           );
-          builder.element('desc', nest: 'raw');
+          builder.element('desc', nest: report.continuity.name);
         });
         builder.element('trk', nest: () {
           builder.element('name', nest: _trackName(bundle.track));
+          if (report.inferredConnectors.isNotEmpty) {
+            builder.element('extensions', nest: () {
+              builder.element(
+                'fbl:geometryContinuity',
+                nest: report.continuity.name,
+              );
+              for (final connector in report.inferredConnectors) {
+                builder.element('fbl:gap', attributes: <String, String>{
+                  'cause': connector.cause.name,
+                  'beforePointId': connector.beforePointId,
+                  'afterPointId': connector.afterPointId,
+                  'durationMs': connector.duration.inMilliseconds.toString(),
+                  'straightLineDistanceMeters':
+                      connector.straightLineDistanceMeters.toString(),
+                  'excludedFromMeasuredDistance': 'true',
+                });
+              }
+            });
+          }
           for (final points in segmentPoints) {
             builder.element('trkseg', nest: () {
               for (final point in points) {
@@ -441,6 +579,7 @@ final class TrackExportService {
       'gpx',
       contents,
       selectedSegmentPoints,
+      report,
     );
   }
 
@@ -457,16 +596,6 @@ final class TrackExportService {
           )
           .toList(growable: false);
 
-  static List<List<TrackPoint>> _geometrySegments(
-    List<List<TrackPoint>> selected,
-  ) =>
-      selected
-          .map(
-            (points) =>
-                points.where(_hasValidCoordinate).toList(growable: false),
-          )
-          .toList(growable: false);
-
   static bool _hasValidCoordinate(TrackPoint point) =>
       point.latitude.isFinite &&
       point.longitude.isFinite &&
@@ -478,6 +607,7 @@ final class TrackExportService {
   static Map<String, Object?> _trackProperties(
     Track track,
     TrackExportOptions options,
+    RouteGeometryReport report,
   ) =>
       <String, Object?>{
         'trackId': track.id,
@@ -490,6 +620,12 @@ final class TrackExportService {
         'rejectedPointCount': track.rejectedPointCount,
         'distanceMeters': track.totalDistanceMeters,
         'geometrySource': 'raw',
+        'geometryContinuity': report.continuity.name,
+        'sourceSegmentCount': report.sourceSegmentCount,
+        'geometryPartCount': report.geometryPartCount,
+        'gapCount': report.gapCount,
+        'inferredConnectorCount': report.inferredConnectorCount,
+        'hasInferredConnectors': report.hasInferredConnectors,
       };
 
   static Map<String, Object?> _pointProperties(
@@ -560,6 +696,7 @@ final class TrackExportService {
     String extension,
     String contents,
     List<List<TrackPoint>> segments,
+    RouteGeometryReport report,
   ) {
     final date =
         bundle.track.startedAt.toUtc().toIso8601String().split('T').first;
@@ -575,6 +712,11 @@ final class TrackExportService {
       contents: contents,
       pointCount: segments.fold<int>(0, (sum, points) => sum + points.length),
       segmentCount: segments.length,
+      sourceSegmentCount: report.sourceSegmentCount,
+      geometryPartCount: report.geometryPartCount,
+      gapCount: report.gapCount,
+      inferredConnectorCount: report.inferredConnectorCount,
+      geometryContinuity: report.continuity,
     );
   }
 

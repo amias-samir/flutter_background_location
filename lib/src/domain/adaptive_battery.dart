@@ -244,6 +244,7 @@ final class AdaptiveBatteryPolicyEngine {
     return TrackingConfig(
       accuracy: least,
       locationAccuracy: preset.locationAccuracy,
+      stationaryLocationAccuracy: preset.stationaryLocationAccuracy,
       movingInterval: capDuration(
           preset.movingInterval, policy.bounds.maximumMovingInterval),
       movingDistanceFilterMeters: capInt(
@@ -272,10 +273,15 @@ final class AdaptiveBatteryPolicyEngine {
       mockLocationPolicy: staticConfig.mockLocationPolicy,
       batchPointCount: staticConfig.batchPointCount,
       batchMaxAge: staticConfig.batchMaxAge,
-      largeGapThreshold: staticConfig.largeGapThreshold,
+      maximumProviderFixAge: staticConfig.maximumProviderFixAge,
+      callbackHealthWarningThreshold:
+          staticConfig.callbackHealthWarningThreshold,
+      acceptedGeometryGapThreshold: staticConfig.acceptedGeometryGapThreshold,
+      continuityPolicy: staticConfig.continuityPolicy,
       firstFixTimeout: staticConfig.firstFixTimeout,
       androidNotificationTitle: staticConfig.androidNotificationTitle,
       androidNotificationText: staticConfig.androidNotificationText,
+      iosTerminationRecoveryMode: staticConfig.iosTerminationRecoveryMode,
     );
   }
 

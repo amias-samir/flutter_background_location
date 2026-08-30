@@ -10,6 +10,10 @@ import java.util.UUID
 internal class TrackingStateStore(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    @Volatile
+    private var latestProviderCallbackAt =
+        preferences.getLong(KEY_LAST_PROVIDER_CALLBACK_AT, 0L).takeIf { it > 0L }
+    private var persistedProviderCallbackAt = latestProviderCallbackAt
 
     val activeTrackId: String?
         get() = preferences.getString(KEY_TRACK_ID, null)?.takeIf { it.isNotBlank() }
@@ -31,6 +35,39 @@ internal class TrackingStateStore(context: Context) {
 
     val serviceHeartbeatAt: Long?
         get() = preferences.getLong(KEY_SERVICE_HEARTBEAT_AT, 0L).takeIf { it > 0L }
+
+    val captureGenerationId: String?
+        get() = preferences.getString(KEY_CAPTURE_GENERATION_ID, null)
+            ?.takeIf { it.isNotBlank() }
+
+    val nativeSessionStartedAt: Long?
+        get() = preferences.getLong(KEY_NATIVE_SESSION_STARTED_AT, 0L).takeIf { it > 0L }
+
+    val captureStartReason: String?
+        get() = preferences.getString(KEY_CAPTURE_START_REASON, null)
+            ?.takeIf { it.isNotBlank() }
+
+    val lastProviderCallbackAt: Long?
+        get() = latestProviderCallbackAt
+
+    val lastProfileTransitionAt: Long?
+        get() = preferences.getLong(KEY_LAST_PROFILE_TRANSITION_AT, 0L).takeIf { it > 0L }
+
+    val stationaryExitProbeRequestedAt: Long?
+        get() = preferences.getLong(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT, 0L)
+            .takeIf { it > 0L }
+
+    val stationaryExitProbeCompletedAt: Long?
+        get() = preferences.getLong(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT, 0L)
+            .takeIf { it > 0L }
+
+    val stationaryExitProbeOutcome: String?
+        get() = preferences.getString(KEY_STATIONARY_EXIT_PROBE_OUTCOME, null)
+            ?.takeIf { it.isNotBlank() }
+
+    val stationaryExitFlushOutcome: String?
+        get() = preferences.getString(KEY_STATIONARY_EXIT_FLUSH_OUTCOME, null)
+            ?.takeIf { it.isNotBlank() }
 
     val configuration: TrackingConfiguration
         get() = TrackingConfiguration.fromJson(preferences.getString(KEY_CONFIGURATION, null))
@@ -76,41 +113,145 @@ internal class TrackingStateStore(context: Context) {
     }
 
     fun begin(trackId: String, configuration: TrackingConfiguration) {
+        val now = System.currentTimeMillis()
         preferences.edit()
+            .clearActiveCaptureEvidence()
             .putString(KEY_TRACK_ID, trackId)
             .putString(KEY_CONFIGURATION, configuration.toJson())
             .putBoolean(KEY_TRACKING_ENABLED, true)
             .putBoolean(KEY_PAUSED, false)
             .putString(KEY_STATE, STATE_STARTING)
             .putString(KEY_PROFILE, PROFILE_MOVING)
-            .putLong(KEY_SERVICE_STARTED_AT, System.currentTimeMillis())
+            .putLong(KEY_SERVICE_STARTED_AT, now)
+            .putLong(KEY_LAST_PROFILE_TRANSITION_AT, now)
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
             .remove(KEY_MESSAGE)
             .commitOrThrow("begin tracking")
+        latestProviderCallbackAt = null
+        persistedProviderCallbackAt = null
     }
 
     fun resume() {
+        val now = System.currentTimeMillis()
         preferences.edit()
+            .clearActiveCaptureEvidence()
             .putBoolean(KEY_TRACKING_ENABLED, true)
             .putBoolean(KEY_PAUSED, false)
             .putString(KEY_STATE, STATE_STARTING)
             .putString(KEY_PROFILE, PROFILE_MOVING)
-            .putLong(KEY_SERVICE_STARTED_AT, System.currentTimeMillis())
+            .putLong(KEY_SERVICE_STARTED_AT, now)
+            .putLong(KEY_LAST_PROFILE_TRANSITION_AT, now)
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
             .remove(KEY_SERVICE_HEARTBEAT_AT)
             .remove(KEY_MESSAGE)
             .commitOrThrow("resume tracking")
+        latestProviderCallbackAt = null
+        persistedProviderCallbackAt = null
     }
 
-    fun markState(state: String, profile: String, message: String? = null) {
+    fun markState(
+        state: String,
+        profile: String,
+        message: String? = null,
+        timestamp: Long = System.currentTimeMillis(),
+    ) {
+        val profileChanged = this.profile != profile
         preferences.edit()
             .putString(KEY_STATE, state)
             .putString(KEY_PROFILE, profile)
             .apply {
+                if (profileChanged) putLong(KEY_LAST_PROFILE_TRANSITION_AT, timestamp)
+            }
+            .apply {
                 if (message == null) remove(KEY_MESSAGE) else putString(KEY_MESSAGE, message)
             }
             .commitOrThrow("mark tracking state")
+    }
+
+    /** Commits a new capture boundary before the first native request is installed. */
+    fun beginCaptureGeneration(
+        startReason: String,
+        timestamp: Long = System.currentTimeMillis(),
+        generationId: String = UUID.randomUUID().toString(),
+    ): CaptureSessionEvidence {
+        val evidence = CaptureSessionEvidence.create(
+            startReason = startReason,
+            startedAt = timestamp,
+            generationId = generationId,
+        )
+        preferences.edit()
+            .putString(KEY_CAPTURE_GENERATION_ID, evidence.generationId)
+            .putLong(KEY_NATIVE_SESSION_STARTED_AT, evidence.startedAt)
+            .putString(KEY_CAPTURE_START_REASON, evidence.startReason)
+            .putLong(KEY_LAST_PROFILE_TRANSITION_AT, evidence.startedAt)
+            .remove(KEY_LAST_PROVIDER_CALLBACK_AT)
+            .remove(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT)
+            .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
+            .remove(KEY_STATIONARY_EXIT_PROBE_OUTCOME)
+            .remove(KEY_STATIONARY_EXIT_FLUSH_OUTCOME)
+            .remove(KEY_LAST_LOCATION_REQUEST_FAILURE_AT)
+            .remove(KEY_LAST_LOCATION_REQUEST_FAILURE)
+            .commitOrThrow("begin native capture generation")
+        latestProviderCallbackAt = null
+        persistedProviderCallbackAt = null
+        return evidence
+    }
+
+    /** Records coordinate-free provider health without forcing a disk write for every fix. */
+    @Synchronized
+    fun markProviderCallback(timestamp: Long = System.currentTimeMillis()) {
+        if (timestamp <= 0L) return
+        val latest = latestProviderCallbackAt
+        if (latest != null && timestamp < latest) return
+        latestProviderCallbackAt = timestamp
+        val lastPersisted = persistedProviderCallbackAt
+        if (lastPersisted != null && timestamp >= lastPersisted &&
+            timestamp - lastPersisted < PROVIDER_CALLBACK_PERSIST_INTERVAL_MS
+        ) {
+            return
+        }
+        preferences.edit()
+            .putLong(KEY_LAST_PROVIDER_CALLBACK_AT, timestamp)
+            .apply()
+        persistedProviderCallbackAt = timestamp
+    }
+
+    fun markLocationRequestFailure(
+        message: String,
+        timestamp: Long = System.currentTimeMillis(),
+    ) {
+        preferences.edit()
+            .putLong(KEY_LAST_LOCATION_REQUEST_FAILURE_AT, timestamp)
+            .putString(KEY_LAST_LOCATION_REQUEST_FAILURE, message)
+            .commitOrThrow("record location request failure")
+    }
+
+    fun markStationaryExitProbeRequested(timestamp: Long = System.currentTimeMillis()) {
+        preferences.edit()
+            .putLong(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT, timestamp)
+            .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
+            .putString(KEY_STATIONARY_EXIT_PROBE_OUTCOME, PROBE_OUTCOME_PENDING)
+            .remove(KEY_STATIONARY_EXIT_FLUSH_OUTCOME)
+            .commitOrThrow("record stationary-exit probe request")
+    }
+
+    fun markStationaryExitFlushOutcome(outcome: String) {
+        require(outcome.isNotBlank())
+        preferences.edit()
+            .putString(KEY_STATIONARY_EXIT_FLUSH_OUTCOME, outcome)
+            .commitOrThrow("record stationary-exit flush outcome")
+    }
+
+    fun markStationaryExitProbeCompleted(
+        outcome: String,
+        timestamp: Long = System.currentTimeMillis(),
+    ) {
+        require(outcome.isNotBlank())
+        preferences.edit()
+            .putLong(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT, timestamp)
+            .putString(KEY_STATIONARY_EXIT_PROBE_OUTCOME, outcome)
+            .commitOrThrow("record stationary-exit probe outcome")
     }
 
     fun updateConfiguration(configuration: TrackingConfiguration) {
@@ -134,6 +275,7 @@ internal class TrackingStateStore(context: Context) {
 
     fun stop(reason: String?) {
         preferences.edit()
+            .clearActiveCaptureEvidence()
             .putBoolean(KEY_TRACKING_ENABLED, false)
             .putBoolean(KEY_PAUSED, false)
             .putString(KEY_STATE, STATE_IDLE)
@@ -146,6 +288,8 @@ internal class TrackingStateStore(context: Context) {
             .remove(KEY_SERVICE_HEARTBEAT_AT)
             .remove(KEY_ACTIVITY_RECOGNITION_GENERATION)
             .commitOrThrow("stop tracking")
+        latestProviderCallbackAt = null
+        persistedProviderCallbackAt = null
     }
 
     fun fail(message: String) {
@@ -341,36 +485,54 @@ internal class TrackingStateStore(context: Context) {
             else -> "unknown"
         }
         return linkedMapOf(
-        "platform" to "android",
-        "lifecycle" to lifecycle,
-        "state" to state,
-        "actualState" to actualState,
-        "isTracking" to apiTracking,
-        "trackingRequested" to trackingRequested,
-        "serviceAlive" to serviceAlive,
-        "captureAlive" to captureAlive,
-        "serviceHeartbeatAt" to heartbeatAt,
-        "heartbeatFresh" to heartbeatFresh,
-        "heartbeatCaptureActive" to heartbeatCaptureActive,
-        "isPaused" to isPaused,
-        "trackId" to activeTrackId,
-        "lastLocation" to TrackingEventBus.lastLocation,
-        "lastActivity" to TrackingEventBus.lastActivity,
-        "trackingProfile" to profile,
-        "samplingProfile" to profile,
-        "batteryMode" to profile,
-        "motionState" to motionState,
-        "lastPointAt" to TrackingEventBus.lastLocation?.get("timestamp"),
-        "serviceStartedAt" to serviceStartedAt,
-        "pendingUserAction" to pendingUserAction(),
-        "commandRevision" to commandRevision,
-        "message" to preferences.getString(KEY_MESSAGE, null),
-        "mockDetectionAvailable" to MOCK_DETECTION_AVAILABLE,
-        "locationServicesEnabled" to locationServicesEnabled,
-        "locationServiceEnabled" to locationServicesEnabled,
-        "batteryOptimizationIgnored" to isBatteryOptimizationIgnored(appContext),
-        "timestamp" to now,
-    )
+            "platform" to "android",
+            "lifecycle" to lifecycle,
+            "nativeLifecycle" to lifecycle,
+            "state" to state,
+            "actualState" to actualState,
+            "isTracking" to apiTracking,
+            "trackingRequested" to trackingRequested,
+            "serviceAlive" to serviceAlive,
+            "captureAlive" to captureAlive,
+            "captureGenerationId" to captureGenerationId,
+            "nativeSessionStartedAt" to nativeSessionStartedAt,
+            "captureStartReason" to captureStartReason,
+            "serviceHeartbeatAt" to heartbeatAt,
+            "heartbeatFresh" to heartbeatFresh,
+            "heartbeatCaptureActive" to heartbeatCaptureActive,
+            "lastProviderCallbackAt" to lastProviderCallbackAt,
+            "lastProfileTransitionAt" to lastProfileTransitionAt,
+            "stationaryExitProbeRequestedAt" to stationaryExitProbeRequestedAt,
+            "stationaryExitProbeCompletedAt" to stationaryExitProbeCompletedAt,
+            "stationaryExitProbeOutcome" to stationaryExitProbeOutcome,
+            "stationaryExitFlushOutcome" to stationaryExitFlushOutcome,
+            "lastLocationRequestFailureAt" to preferences.getLong(
+                KEY_LAST_LOCATION_REQUEST_FAILURE_AT,
+                0L,
+            ).takeIf { it > 0L },
+            "lastLocationRequestFailure" to preferences.getString(
+                KEY_LAST_LOCATION_REQUEST_FAILURE,
+                null,
+            ),
+            "isPaused" to isPaused,
+            "trackId" to activeTrackId,
+            "lastLocation" to TrackingEventBus.lastLocation,
+            "lastActivity" to TrackingEventBus.lastActivity,
+            "trackingProfile" to profile,
+            "samplingProfile" to profile,
+            "batteryMode" to profile,
+            "motionState" to motionState,
+            "lastPointAt" to TrackingEventBus.lastLocation?.get("timestamp"),
+            "serviceStartedAt" to serviceStartedAt,
+            "pendingUserAction" to pendingUserAction(),
+            "commandRevision" to commandRevision,
+            "message" to preferences.getString(KEY_MESSAGE, null),
+            "mockDetectionAvailable" to MOCK_DETECTION_AVAILABLE,
+            "locationServicesEnabled" to locationServicesEnabled,
+            "locationServiceEnabled" to locationServicesEnabled,
+            "batteryOptimizationIgnored" to isBatteryOptimizationIgnored(appContext),
+            "timestamp" to now,
+        )
     }
 
     fun emitCurrentStatus() {
@@ -382,6 +544,19 @@ internal class TrackingStateStore(context: Context) {
             throw IllegalStateException("Could not durably persist $operation.")
         }
     }
+
+    private fun SharedPreferences.Editor.clearActiveCaptureEvidence(): SharedPreferences.Editor =
+        remove(KEY_CAPTURE_GENERATION_ID)
+            .remove(KEY_NATIVE_SESSION_STARTED_AT)
+            .remove(KEY_CAPTURE_START_REASON)
+            .remove(KEY_LAST_PROVIDER_CALLBACK_AT)
+            .remove(KEY_LAST_PROFILE_TRANSITION_AT)
+            .remove(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT)
+            .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
+            .remove(KEY_STATIONARY_EXIT_PROBE_OUTCOME)
+            .remove(KEY_STATIONARY_EXIT_FLUSH_OUTCOME)
+            .remove(KEY_LAST_LOCATION_REQUEST_FAILURE_AT)
+            .remove(KEY_LAST_LOCATION_REQUEST_FAILURE)
 
     companion object {
         const val STATE_IDLE = "idle"
@@ -415,6 +590,23 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_SERVICE_STARTED_AT = "service_started_at"
         private const val KEY_SERVICE_HEARTBEAT_AT = "service_heartbeat_at"
         private const val KEY_HEARTBEAT_CAPTURE_ACTIVE = "heartbeat_capture_active"
+        private const val KEY_CAPTURE_GENERATION_ID = "capture_generation_id"
+        private const val KEY_NATIVE_SESSION_STARTED_AT = "native_session_started_at"
+        private const val KEY_CAPTURE_START_REASON = "capture_start_reason"
+        private const val KEY_LAST_PROVIDER_CALLBACK_AT = "last_provider_callback_at"
+        private const val KEY_LAST_PROFILE_TRANSITION_AT = "last_profile_transition_at"
+        private const val KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT =
+            "stationary_exit_probe_requested_at"
+        private const val KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT =
+            "stationary_exit_probe_completed_at"
+        private const val KEY_STATIONARY_EXIT_PROBE_OUTCOME =
+            "stationary_exit_probe_outcome"
+        private const val KEY_STATIONARY_EXIT_FLUSH_OUTCOME =
+            "stationary_exit_flush_outcome"
+        private const val KEY_LAST_LOCATION_REQUEST_FAILURE_AT =
+            "last_location_request_failure_at"
+        private const val KEY_LAST_LOCATION_REQUEST_FAILURE =
+            "last_location_request_failure"
         private const val KEY_MESSAGE = "status_message"
         private const val KEY_ACTIVITY_RECOGNITION_GENERATION =
             "activity_recognition_generation"
@@ -430,6 +622,8 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_LAST_COMMAND_ID = "last_command_id"
         private const val SERVICE_START_GRACE_MS = 90_000L
         private const val SERVICE_HEARTBEAT_STALE_AFTER_MS = 180_000L
+        private const val PROVIDER_CALLBACK_PERSIST_INTERVAL_MS = 15_000L
+        private const val PROBE_OUTCOME_PENDING = "pending"
 
         fun isLocationServiceEnabled(context: Context): Boolean {
             val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager

@@ -29,6 +29,10 @@ let package = Package(
       linkerSettings: [
         .linkedLibrary("sqlite3")
       ]
+    ),
+    .testTarget(
+      name: "flutter_background_location_trackerTests",
+      dependencies: ["flutter_background_location_tracker"]
     )
   ]
 )

@@ -5,29 +5,31 @@ This app demonstrates:
 - Android and iOS background-location permission recovery;
 - route-identifier entry when starting, with whitespace normalization and a
   unique UTC date-time suffix;
-- Start, Pause, Resume, and Complete lifecycle controls;
+- Start, Pause, Resume, End day, and confirmed Complete Trip controls;
 - read-only readiness checks, staged permission-step requests, and replaying
   session actions;
 - live status, activity, motion, mock-location, and point evidence;
-- latest-only and keep-all track retention;
-- recorded-track history with per-route actions;
+- latest-only and keep-all Trip-level retention;
+- one recorded-Trip history row with daily leg, segment, and gap counts;
 - owner-conflict recovery that pauses and preserves a previous owner’s local
   capture after explicit confirmation;
-- MapLibre street-map route display with red Start and green Destination
-  indicators;
-- user-named GeoJSON, KML, and GPX export;
-- confirmed deletion of a selected completed route.
+- MapLibre street-map whole-Trip display with red Start, green Destination,
+  orange gap indicators, and a disclosed connect-all toggle;
+- user-named combined Trip GeoJSON, KML, and GPX export;
+- confirmed deletion of a selected completed Trip and all of its local legs;
 - a coordinate-free diagnostics/setup-doctor panel;
 - dependency injection through the public testing fake for widget tests.
 
 The example is split into copyable integration units:
 
-- `lib/main.dart` owns exactly one owner-bound `TrackingController` and the
-  staged readiness/lifecycle flow;
+- `lib/main.dart` owns exactly one owner-bound `TrackingTripController` and the
+  staged readiness/multi-day lifecycle flow;
+- `lib/recorded_trips_section.dart` presents one Trip and its complete action
+  menu without exposing daily internal Tracks as separate journeys;
 - `lib/recorded_tracks_section.dart` contains paged route summaries and every
   overflow action;
-- `lib/route_map_page.dart` renders pause-safe segments with MapLibre and the
-  OpenFreeMap Liberty street style;
+- `lib/route_map_page.dart` uses the package's shared continuity assembler with
+  MapLibre and the OpenFreeMap Liberty street style;
 - `lib/tracking_controls.dart` contains session-driven controls, accuracy, and
   retention UI;
 - `lib/tracking_dialogs.dart` contains route/export naming gestures.
@@ -49,9 +51,17 @@ storing it as `Track.routeId`; for example, `Morning delivery route` becomes
 default export names use this readable identifier while the internal track ID
 continues to manage lifecycle operations.
 
-The retention selector starts with **Keep all** selected. Every completed route
-therefore remains in the recorded-route list until the user deletes it or
-changes the selector to **Latest only** before starting a new route.
+The retention selector starts with **Keep all** selected. Every completed Trip
+therefore remains in history until the user deletes it or changes the selector
+to **Latest only** before starting another Trip. Continuing a retained Trip
+never deletes its earlier daily legs.
+
+**End day** stops the native service, completes the current daily Track leg,
+and leaves the Trip suspended without active location battery use. **Start next
+day** creates one new immutable Track leg under the same Trip ID. **Complete
+Trip** is reserved for the final destination and requires confirmation. A
+completed Trip can be deliberately continued after another confirmation unless
+its final revision was already acknowledged by a configured Trip uploader.
 
 If a different signed-in owner previously left a live route on this device,
 the example shows **Pause other session**. After confirmation, it stops that
@@ -289,22 +299,24 @@ happened. Use `startNewTrack(...)` only when the user intentionally wants a
 fresh route and you want an explicit `active_track_conflict` if a resumable
 route already exists.
 
-## Recorded route actions
+## Recorded Trip actions
 
-Each item under **Recorded tracks** has an overflow menu with these actions:
+Each item under **Recorded Trips** has an overflow menu with these actions:
 
 - **Export GeoJSON**, **Export KML**, and **Export GPX** ask for an editable
   file name and export that selected route;
-- **View on map** opens the selected route on the MapLibre street map and
-  preserves pause/resume segments as separate lines;
-- **Delete** shows a confirmation dialog and permanently removes the selected
-  route, its segments, points, health events, lifecycle operations, pending
-  commands, and upload-outbox records through SQLite foreign-key cascades.
+- **View all days on map** opens the full Trip. The default joins only proven
+  automatic callback gaps. **Connect all** adds clearly marked inferred
+  straight connectors without changing raw points or measured distance;
+- **Start next day** or **Continue completed Trip** appends one daily leg after
+  the required confirmation;
+- **Delete Trip** shows a confirmation dialog and permanently removes all
+  daily legs, segments, points, gap evidence, lifecycle operations, native
+  journal entries where supported, and local upload-outbox rows.
 
-Export actions are enabled after a route is completed. Delete is enabled only
-for terminal routes (completed or failed). Active, paused, interrupted,
-starting, and stopping routes remain protected so the UI cannot orphan a
-native tracking session or remove a route that can still be resumed.
+Export actions are enabled after the Trip is completed. Delete is enabled only
+for terminal Trips. An active/suspended journey remains protected so the UI
+cannot orphan a native tracking session or remove a continuable Trip.
 
 On Android 10 and later, exports use MediaStore and do not need broad storage
 permission. On Android 9 and earlier, public Downloads export requires the

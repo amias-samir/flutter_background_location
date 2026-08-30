@@ -1,4 +1,5 @@
 import 'derived_geometry.dart';
+import 'route_geometry.dart';
 
 enum TrackExportFormat { geoJson, kml, gpx }
 
@@ -11,6 +12,7 @@ final class TrackExportOptions {
     this.allowIncompleteTrackSnapshot = false,
     this.includeGeoJsonPointFeatures = false,
     this.geometry = const TrackGeometrySelection.raw(),
+    this.geometryContinuity = RouteGeometryContinuity.preserveEvidenceSegments,
   });
 
   final bool includePointProperties;
@@ -23,6 +25,9 @@ final class TrackExportOptions {
   /// Coordinates to export. Raw evidence is the default; derived geometry is
   /// selected only by its immutable run identifier.
   final TrackGeometrySelection geometry;
+
+  /// Presentation topology. Raw evidence boundaries remain the default.
+  final RouteGeometryContinuity geometryContinuity;
 }
 
 final class TrackExportResult {
@@ -34,7 +39,13 @@ final class TrackExportResult {
     required this.path,
     required this.pointCount,
     required this.segmentCount,
-  });
+    this.gapCount = 0,
+    this.inferredConnectorCount = 0,
+    this.geometryContinuity = RouteGeometryContinuity.preserveEvidenceSegments,
+    int? sourceSegmentCount,
+    int? geometryPartCount,
+  })  : sourceSegmentCount = sourceSegmentCount ?? segmentCount,
+        geometryPartCount = geometryPartCount ?? segmentCount;
 
   final String trackId;
   final TrackExportFormat format;
@@ -43,6 +54,11 @@ final class TrackExportResult {
   final String path;
   final int pointCount;
   final int segmentCount;
+  final int sourceSegmentCount;
+  final int geometryPartCount;
+  final int gapCount;
+  final int inferredConnectorCount;
+  final RouteGeometryContinuity geometryContinuity;
 }
 
 final class TrackExportArtifact {
@@ -54,7 +70,13 @@ final class TrackExportArtifact {
     required this.contents,
     required this.pointCount,
     required this.segmentCount,
-  });
+    this.gapCount = 0,
+    this.inferredConnectorCount = 0,
+    this.geometryContinuity = RouteGeometryContinuity.preserveEvidenceSegments,
+    int? sourceSegmentCount,
+    int? geometryPartCount,
+  })  : sourceSegmentCount = sourceSegmentCount ?? segmentCount,
+        geometryPartCount = geometryPartCount ?? segmentCount;
 
   final String trackId;
   final TrackExportFormat format;
@@ -63,6 +85,11 @@ final class TrackExportArtifact {
   final String contents;
   final int pointCount;
   final int segmentCount;
+  final int sourceSegmentCount;
+  final int geometryPartCount;
+  final int gapCount;
+  final int inferredConnectorCount;
+  final RouteGeometryContinuity geometryContinuity;
 
   TrackExportResult toResult(String path) => TrackExportResult(
         trackId: trackId,
@@ -72,6 +99,11 @@ final class TrackExportArtifact {
         path: path,
         pointCount: pointCount,
         segmentCount: segmentCount,
+        sourceSegmentCount: sourceSegmentCount,
+        geometryPartCount: geometryPartCount,
+        gapCount: gapCount,
+        inferredConnectorCount: inferredConnectorCount,
+        geometryContinuity: geometryContinuity,
       );
 }
 
@@ -194,7 +226,13 @@ final class TrackExportResultV2 {
     required this.byteLength,
     required this.pointCount,
     required this.segmentCount,
-  });
+    this.gapCount = 0,
+    this.inferredConnectorCount = 0,
+    this.geometryContinuity = RouteGeometryContinuity.preserveEvidenceSegments,
+    int? sourceSegmentCount,
+    int? geometryPartCount,
+  })  : sourceSegmentCount = sourceSegmentCount ?? segmentCount,
+        geometryPartCount = geometryPartCount ?? segmentCount;
 
   /// Owner-scoped canonical inventory identifier for this artifact.
   final String managedExportId;
@@ -204,6 +242,11 @@ final class TrackExportResultV2 {
   final int byteLength;
   final int pointCount;
   final int segmentCount;
+  final int sourceSegmentCount;
+  final int geometryPartCount;
+  final int gapCount;
+  final int inferredConnectorCount;
+  final RouteGeometryContinuity geometryContinuity;
 }
 
 /// Cancellable V2 export handle.

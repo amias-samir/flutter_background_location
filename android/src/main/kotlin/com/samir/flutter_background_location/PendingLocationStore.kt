@@ -96,7 +96,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
     }
 
     @Synchronized
-    fun enqueue(event: Map<String, Any?>) {
+    fun enqueue(event: Map<String, Any?>): Boolean {
         val eventId = event["eventId"] as? String
             ?: throw IllegalArgumentException("A pending fix requires an eventId.")
         val trackId = event["trackId"] as? String
@@ -111,9 +111,10 @@ internal class PendingLocationStore(context: Context) : Closeable {
             throw PendingLocationCapacityException("A native location event exceeded its safety limit.")
         }
 
-        // A duplicate UUID is already durable, so it does not consume another
-        // row and may be emitted again safely for Dart-side de-duplication.
-        if (contains(eventId)) return
+        // A duplicate provider-fix identity is already durable. Returning false
+        // also prevents a flush/current-location overlap from being emitted a
+        // second time before Dart has a chance to acknowledge the first row.
+        if (contains(eventId)) return false
         if (isAtCapacity(stats(performMaintenance = false)) &&
             isAtCapacity(stats(performMaintenance = true))
         ) {
@@ -130,6 +131,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
             put(COLUMN_CREATED_AT, System.currentTimeMillis())
             put(COLUMN_JOURNAL_SEQUENCE, nextJournalSequence())
         }
+        var inserted = false
         database.beginTransaction()
         try {
             val rowId = database.insertWithOnConflict(
@@ -141,10 +143,12 @@ internal class PendingLocationStore(context: Context) : Closeable {
             if (rowId == -1L && !contains(eventId)) {
                 throw IllegalStateException("The native pending-location fix could not be stored.")
             }
+            inserted = rowId != -1L
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
         }
+        return inserted
     }
 
     @Synchronized

@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Added schema 12 continuity evidence and atomic point/topology persistence so
+  a healthy stationary or rejected-fix run no longer creates an artificial
+  route break solely because the accepted-point gap exceeded five minutes.
+- Added stable Android/iOS capture generations, coordinate-free continuity
+  health, and journal-deduplicated stationary-exit location probes.
+- Added owner-scoped multi-day `Trip` models, migration-backed implicit Trips,
+  crash-recoverable/idempotent Start/End day/Continue/Complete operations,
+  revisioned optional completion upload, Trip-level retention, and cascading
+  terminal deletion.
+- Added shared three-mode route geometry used by maps plus legacy/streaming
+  exports, typed inferred connectors excluded from measured distance, and
+  combined chronological GeoJSON/KML/GPX Trip export.
+- Updated the example to show one Trip with daily leg/segment/gap counts,
+  End day and confirmed completion/continuation controls, whole-Trip MapLibre
+  rendering, gap indicators, connect-all disclosure, export, and deletion.
 - Added red Start and green Destination indicators to the example route map.
 - Refreshed the example with clearer session, lifecycle, configuration, and
   recorded-route cards, plus a confirmed owner-conflict recovery prompt.

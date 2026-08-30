@@ -20,6 +20,9 @@ offline GeoJSON, KML, and GPX export.
 - Moving and stationary sampling profiles for lower battery use.
 - Per-fix mock/simulation evidence with allow, flag, or reject policies.
 - Pause and resume without adding false distance across the pause gap.
+- Healthy stationary/rejected-fix gaps remain one canonical segment when the
+  native capture generation is continuously active, with typed gap evidence.
+- Additive multi-day `Trip` lifecycle with immutable daily `Track` legs.
 - Durable, ordered SQLite persistence with crash recovery.
 - Track history with `keepLatestOnly` or `keepAll` retention.
 - Completed route export as GeoJSON, KML, or GPX.
@@ -130,6 +133,64 @@ The complete staged permission flow and platform declarations follow below.
 | `TrackingReadiness` | Present the next permission or Settings step |
 | `TrackingConfig` | Configure accuracy, sampling, and mock policy |
 | `TrackQuery` / `TrackPage` | Load bounded route-history pages |
+
+## Multi-day Trips and continuous presentation
+
+Use `openWithTrips()` when one user-visible journey can span independently
+completed days. Each day remains an immutable `Track` leg, while the `Trip.id`
+and readable route ID remain stable. A completed Track is never reopened.
+
+```dart
+final TrackingTripController tracking = await TrackingClient.openWithTrips(
+  owner: const TrackingOwner(
+    userId: 'signed-in-user',
+    organizationId: 'workspace-id',
+  ),
+);
+
+final started = await tracking.startTrip(
+  const TripStartRequest(routeId: 'Kathmandu field visit'),
+);
+
+// End of day 1: native capture stops and this daily Track becomes immutable.
+await tracking.endCurrentDay(reason: 'overnight');
+
+// Day 2: creates exactly one new Track leg under the same Trip.
+await tracking.continueTrip(started.trip.id);
+
+// Final destination: closes the current leg and the whole Trip.
+await tracking.completeTrip(started.trip.id);
+
+final result = await tracking.exportTrip(
+  tripId: started.trip.id,
+  format: TrackExportFormat.gpx,
+  fileName: 'complete_field_visit',
+  options: const TrackExportOptions(
+    geometryContinuity:
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+  ),
+);
+```
+
+Continuing an already completed Trip requires
+`confirmCompletedTripContinuation: true`. If a final Trip-completion upload was
+already acknowledged, the default revision contract returns
+`trip_already_finalized` instead of silently invalidating the remote state.
+
+Maps can feature-detect `TrackingGeometryController` and call
+`assembleTrackRouteGeometry()`. `TrackingTripController` provides
+`assembleTripRouteGeometry()`. Both use the same topology rules as export:
+
+- `preserveEvidenceSegments` keeps every captured lifecycle boundary;
+- `mergeAutomaticCallbackGaps` joins only typed automatic gaps whose durable
+  treatment retained continuity; this is the recommended normal map mode;
+- `connectAllChronologicalPoints` visibly connects every part and reports each
+  straight connector as inferred. It does not add synthetic raw points or
+  inferred length to measured distance.
+
+No package can reconstruct a road where the OS/provider supplied no usable
+fixes. A connected presentation is an auditable straight connector between
+known anchors, not recovered GPS data.
 
 ## Platform configuration
 
@@ -806,8 +867,10 @@ const options = TrackExportOptions(
 
 ### Export geometry
 
-- GeoJSON uses a `LineString` for one drawable segment and a
-  `MultiLineString` for multiple segments.
+- `TrackExportOptions.geometryContinuity` selects raw evidence, proven
+  automatic-gap merging, or explicit connect-all presentation.
+- GeoJSON uses a `LineString` for one presentation part and a
+  `MultiLineString` for multiple parts.
 - GeoJSON segments with fewer than two accepted coordinates are omitted from
   line geometry. Optional point features can preserve them for diagnostics.
 - KML writes a line per multi-point segment and a point for a one-fix segment.
@@ -1221,8 +1284,11 @@ is unavailable.
 
 ### Export is missing a pause-to-resume connection
 
-This is expected. Every resume creates a new segment so exports and map views
-do not draw a false straight line across the pause gap.
+This is expected in `preserveEvidenceSegments` and
+`mergeAutomaticCallbackGaps`: a user pause, interruption, permission loss, or
+overnight boundary is real evidence, not an automatic callback gap. Select
+`connectAllChronologicalPoints` only when the UI clearly labels inferred
+connectors and does not present their length as measured distance.
 
 ## Example application
 
@@ -1230,12 +1296,13 @@ See [`example/lib/main.dart`](example/lib/main.dart) for a complete Material
 example with:
 
 - staged permission recovery;
-- Start, Pause, Resume, and Complete button states;
+- Start, Pause, Resume, End day, and Complete Trip button states;
 - configurable retention policy;
 - live status, activity, and point data;
-- recorded-track history;
+- one recorded-Trip history item with daily leg/segment/gap summaries;
 - GeoJSON, KML, and GPX naming/export;
-- MapLibre route display with a street-map style.
+- MapLibre whole-Trip display with a street-map style, gap markers, and an
+  explicit connect-all toggle.
 
 ## Production checklist
 

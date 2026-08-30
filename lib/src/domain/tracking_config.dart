@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'tracking_continuity.dart';
 import 'tracking_error.dart';
 
 enum MockLocationPolicy { allow, flag, reject }
@@ -120,6 +121,7 @@ final class TrackingConfig {
   const TrackingConfig({
     this.accuracy = TrackingAccuracy.high,
     TrackingAccuracy? locationAccuracy,
+    TrackingAccuracy? stationaryLocationAccuracy,
     int? movingDistanceFilterMeters,
     Duration? movingInterval,
     int? stationaryDistanceFilterMeters,
@@ -135,7 +137,11 @@ final class TrackingConfig {
     this.mockLocationPolicy = MockLocationPolicy.flag,
     this.batchPointCount = 25,
     this.batchMaxAge = const Duration(minutes: 2),
-    this.largeGapThreshold = const Duration(minutes: 5),
+    Duration? largeGapThreshold,
+    Duration? maximumProviderFixAge,
+    this.callbackHealthWarningThreshold = const Duration(minutes: 2),
+    Duration? acceptedGeometryGapThreshold,
+    this.continuityPolicy = TrackingContinuityPolicy.conservative,
     Duration? firstFixTimeout,
     this.androidNotificationTitle = 'Location tracking active',
     this.androidNotificationText = 'Recording your route',
@@ -149,6 +155,13 @@ final class TrackingConfig {
                         ? const Duration(seconds: 45)
                         : const Duration(minutes: 1)),
         locationAccuracy = locationAccuracy ??
+            (accuracy == TrackingAccuracy.low
+                ? TrackingAccuracy.medium
+                : accuracy == TrackingAccuracy.medium
+                    ? TrackingAccuracy.high
+                    : TrackingAccuracy.precised),
+        stationaryLocationAccuracy = stationaryLocationAccuracy ??
+            locationAccuracy ??
             (accuracy == TrackingAccuracy.low
                 ? TrackingAccuracy.medium
                 : accuracy == TrackingAccuracy.medium
@@ -194,6 +207,12 @@ final class TrackingConfig {
                     : accuracy == TrackingAccuracy.precised
                         ? 15
                         : 20),
+        maximumProviderFixAge = maximumProviderFixAge ??
+            largeGapThreshold ??
+            const Duration(minutes: 5),
+        acceptedGeometryGapThreshold = acceptedGeometryGapThreshold ??
+            largeGapThreshold ??
+            const Duration(minutes: 5),
         assert(movingDistanceFilterMeters == null ||
             movingDistanceFilterMeters >= 0),
         assert(stationaryDistanceFilterMeters == null ||
@@ -215,6 +234,12 @@ final class TrackingConfig {
   /// The native provider accuracy, independently overridable from [accuracy].
   final TrackingAccuracy locationAccuracy;
 
+  /// Core Location accuracy used after the stationary transition.
+  ///
+  /// By default this matches [locationAccuracy], so a high/precised session
+  /// does not silently request fixes looser than its acceptance policy.
+  final TrackingAccuracy stationaryLocationAccuracy;
+
   final int movingDistanceFilterMeters;
   final Duration movingInterval;
   final int stationaryDistanceFilterMeters;
@@ -230,7 +255,26 @@ final class TrackingConfig {
   final MockLocationPolicy mockLocationPolicy;
   final int batchPointCount;
   final Duration batchMaxAge;
-  final Duration largeGapThreshold;
+
+  /// Maximum provider fix age accepted at native receipt.
+  final Duration maximumProviderFixAge;
+
+  /// Callback silence after which health may be reported as degraded.
+  final Duration callbackHealthWarningThreshold;
+
+  /// Accepted-anchor gap that should create durable diagnostic evidence.
+  ///
+  /// Exceeding this value is not by itself proof of an interruption.
+  final Duration acceptedGeometryGapThreshold;
+
+  /// Fallback used when capture continuity evidence is incomplete.
+  final TrackingContinuityPolicy continuityPolicy;
+
+  /// Legacy alias for [acceptedGeometryGapThreshold].
+  @Deprecated(
+    'Use maximumProviderFixAge and acceptedGeometryGapThreshold independently.',
+  )
+  Duration get largeGapThreshold => acceptedGeometryGapThreshold;
   final Duration firstFixTimeout;
   final String androidNotificationTitle;
   final String androidNotificationText;
@@ -248,6 +292,7 @@ final class TrackingConfig {
   TrackingConfig copyWith({
     TrackingAccuracy? accuracy,
     TrackingAccuracy? locationAccuracy,
+    TrackingAccuracy? stationaryLocationAccuracy,
     int? movingDistanceFilterMeters,
     Duration? movingInterval,
     int? stationaryDistanceFilterMeters,
@@ -264,6 +309,10 @@ final class TrackingConfig {
     int? batchPointCount,
     Duration? batchMaxAge,
     Duration? largeGapThreshold,
+    Duration? maximumProviderFixAge,
+    Duration? callbackHealthWarningThreshold,
+    Duration? acceptedGeometryGapThreshold,
+    TrackingContinuityPolicy? continuityPolicy,
     Duration? firstFixTimeout,
     String? androidNotificationTitle,
     String? androidNotificationText,
@@ -272,6 +321,8 @@ final class TrackingConfig {
       TrackingConfig(
         accuracy: accuracy ?? this.accuracy,
         locationAccuracy: locationAccuracy ?? this.locationAccuracy,
+        stationaryLocationAccuracy:
+            stationaryLocationAccuracy ?? this.stationaryLocationAccuracy,
         movingDistanceFilterMeters:
             movingDistanceFilterMeters ?? this.movingDistanceFilterMeters,
         movingInterval: movingInterval ?? this.movingInterval,
@@ -298,7 +349,14 @@ final class TrackingConfig {
         mockLocationPolicy: mockLocationPolicy ?? this.mockLocationPolicy,
         batchPointCount: batchPointCount ?? this.batchPointCount,
         batchMaxAge: batchMaxAge ?? this.batchMaxAge,
-        largeGapThreshold: largeGapThreshold ?? this.largeGapThreshold,
+        maximumProviderFixAge:
+            maximumProviderFixAge ?? this.maximumProviderFixAge,
+        callbackHealthWarningThreshold: callbackHealthWarningThreshold ??
+            this.callbackHealthWarningThreshold,
+        acceptedGeometryGapThreshold: acceptedGeometryGapThreshold ??
+            largeGapThreshold ??
+            this.acceptedGeometryGapThreshold,
+        continuityPolicy: continuityPolicy ?? this.continuityPolicy,
         firstFixTimeout: firstFixTimeout ?? this.firstFixTimeout,
         androidNotificationTitle:
             androidNotificationTitle ?? this.androidNotificationTitle,
@@ -329,7 +387,17 @@ final class TrackingConfig {
       activityRecognitionInterval,
     );
     _positiveDuration(errors, 'batchMaxAge', batchMaxAge);
-    _positiveDuration(errors, 'largeGapThreshold', largeGapThreshold);
+    _positiveDuration(errors, 'maximumProviderFixAge', maximumProviderFixAge);
+    _positiveDuration(
+      errors,
+      'callbackHealthWarningThreshold',
+      callbackHealthWarningThreshold,
+    );
+    _positiveDuration(
+      errors,
+      'acceptedGeometryGapThreshold',
+      acceptedGeometryGapThreshold,
+    );
     _positiveDuration(errors, 'firstFixTimeout', firstFixTimeout);
     _positiveFiniteDouble(
       errors,
@@ -370,6 +438,7 @@ final class TrackingConfig {
   Map<String, Object?> toMap() => <String, Object?>{
         'accuracy': accuracy.name,
         'desiredAccuracy': locationAccuracy.name,
+        'stationaryDesiredAccuracy': stationaryLocationAccuracy.name,
         'movingDistanceFilterMeters': movingDistanceFilterMeters,
         'movingIntervalMs': movingInterval.inMilliseconds,
         'stationaryDistanceFilterMeters': stationaryDistanceFilterMeters,
@@ -388,7 +457,15 @@ final class TrackingConfig {
         'mockLocationPolicy': mockLocationPolicy.name,
         'batchPointCount': batchPointCount,
         'batchMaxAgeMs': batchMaxAge.inMilliseconds,
-        'largeGapThresholdMs': largeGapThreshold.inMilliseconds,
+        // Keep the legacy key in resolved epoch JSON for older native/custom
+        // consumers while persisting the independent policy values as well.
+        'largeGapThresholdMs': acceptedGeometryGapThreshold.inMilliseconds,
+        'maximumProviderFixAgeMs': maximumProviderFixAge.inMilliseconds,
+        'callbackHealthWarningThresholdMs':
+            callbackHealthWarningThreshold.inMilliseconds,
+        'acceptedGeometryGapThresholdMs':
+            acceptedGeometryGapThreshold.inMilliseconds,
+        'continuityPolicy': continuityPolicy.name,
         'firstFixTimeoutMs': firstFixTimeout.inMilliseconds,
         'notificationTitle': androidNotificationTitle,
         'notificationText': androidNotificationText,
@@ -419,6 +496,17 @@ final class TrackingConfig {
               fallback: accuracy,
             )
           : null,
+      stationaryLocationAccuracy: map.containsKey('stationaryDesiredAccuracy')
+          ? TrackingAccuracy.parse(
+              map['stationaryDesiredAccuracy'],
+              fallback: map.containsKey('desiredAccuracy')
+                  ? TrackingAccuracy.parse(
+                      map['desiredAccuracy'],
+                      fallback: accuracy,
+                    )
+                  : accuracy,
+            )
+          : null,
       movingDistanceFilterMeters: integer('movingDistanceFilterMeters'),
       movingInterval: duration('movingIntervalMs'),
       stationaryDistanceFilterMeters: integer('stationaryDistanceFilterMeters'),
@@ -446,8 +534,16 @@ final class TrackingConfig {
       ),
       batchPointCount: integer('batchPointCount') ?? 25,
       batchMaxAge: Duration(milliseconds: integer('batchMaxAgeMs') ?? 120000),
-      largeGapThreshold: Duration(
-        milliseconds: integer('largeGapThresholdMs') ?? 300000,
+      largeGapThreshold: map.containsKey('largeGapThresholdMs')
+          ? Duration(milliseconds: integer('largeGapThresholdMs')!)
+          : null,
+      maximumProviderFixAge: duration('maximumProviderFixAgeMs'),
+      callbackHealthWarningThreshold:
+          duration('callbackHealthWarningThresholdMs') ??
+              const Duration(minutes: 2),
+      acceptedGeometryGapThreshold: duration('acceptedGeometryGapThresholdMs'),
+      continuityPolicy: TrackingContinuityPolicy.parse(
+        map['continuityPolicy'],
       ),
       firstFixTimeout: Duration(
         milliseconds: integer('firstFixTimeoutMs') ??

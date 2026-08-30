@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
 import 'recorded_tracks_section.dart';
+import 'recorded_trips_section.dart';
 import 'route_map_page.dart';
 import 'tracking_controls.dart';
 import 'tracking_dialogs.dart';
@@ -71,6 +72,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   TrackRecordRetentionPolicy _retention = TrackRecordRetentionPolicy.keepAll;
   TrackingAccuracy _accuracy = TrackingAccuracy.high;
   List<Track> _tracks = const <Track>[];
+  List<RecordedTripSummary> _trips = const <RecordedTripSummary>[];
   String? _historyCursor;
   bool _historyHasMore = false;
   bool _busy = true;
@@ -89,7 +91,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     try {
       final controller =
           await (widget.controllerFactory?.call(_owner, _retention) ??
-              TrackingClient.open(
+              TrackingClient.openWithTrips(
                 owner: _owner,
                 configuration: TrackingConfiguration(
                   recordRetentionPolicy: _retention,
@@ -104,11 +106,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         )
         ..add(
           controller.trackHistoryEvents.listen((_) {
-            unawaited(_refreshTracks());
+            unawaited(_refreshHistory());
           }),
         );
       _session = controller.currentSession;
-      await _refreshTracks();
+      await _refreshHistory();
       if (mounted) setState(() => _busy = false);
     } on Object catch (error) {
       _showError(error);
@@ -166,6 +168,50 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       _historyHasMore = page.hasMore;
     });
   }
+
+  Future<void> _refreshTrips({bool append = false}) async {
+    final tracking = _tracking;
+    if (tracking is! MultiDayTripController) return;
+    final tripTracking = tracking as MultiDayTripController;
+    final page = await tripTracking.listTripPage(
+      TripQuery(
+        owner: _owner,
+        limit: 25,
+        cursor: append ? _historyCursor : null,
+      ),
+    );
+    final summaries = await Future.wait<RecordedTripSummary>(
+      page.items.map((trip) async {
+        final bundle = await tripTracking.loadTripBundle(trip.id);
+        var segmentCount = 0;
+        for (final leg in bundle.legs) {
+          final track = await _tracking!.getTrack(leg.trackId);
+          segmentCount += track?.segmentCount ?? 0;
+        }
+        return RecordedTripSummary(
+          trip: trip,
+          segmentCount: segmentCount,
+          gapCount: bundle.gaps.length,
+        );
+      }),
+    );
+    if (!mounted) return;
+    setState(() {
+      _trips = append
+          ? List<RecordedTripSummary>.unmodifiable(<RecordedTripSummary>[
+              ..._trips,
+              ...summaries,
+            ])
+          : summaries;
+      _historyCursor = page.nextCursor;
+      _historyHasMore = page.nextCursor != null;
+    });
+  }
+
+  Future<void> _refreshHistory({bool append = false}) =>
+      _tracking is MultiDayTripController
+      ? _refreshTrips(append: append)
+      : _refreshTracks(append: append);
 
   Future<bool> _ensureReady() async {
     final tracking = _tracking!;
@@ -237,34 +283,105 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       builder: (_) => const RouteIdentifierDialog(),
     );
     if (routeId == null) return;
-    await _tracking!.startNewTrack(
-      TrackStartRequest(
-        owner: _owner,
-        routeId: routeId,
-        config: TrackingConfig(
-          accuracy: _accuracy,
-          mockLocationPolicy: MockLocationPolicy.flag,
-        ),
-      ),
+    final config = TrackingConfig(
+      accuracy: _accuracy,
+      mockLocationPolicy: MockLocationPolicy.flag,
     );
-    await _refreshTracks();
+    final tracking = _tracking!;
+    if (tracking is MultiDayTripController) {
+      await (tracking as MultiDayTripController).startTrip(
+        TripStartRequest(routeId: routeId, config: config, dayLabel: 'Day 1'),
+      );
+    } else {
+      await tracking.startNewTrack(
+        TrackStartRequest(owner: _owner, routeId: routeId, config: config),
+      );
+    }
+    await _refreshHistory();
   });
 
   Future<void> _pause() => _run(() async {
     await _tracking!.pauseCurrentTrack(reason: 'example_pause');
-    await _refreshTracks();
+    await _refreshHistory();
   });
 
   Future<void> _resume() => _run(() async {
     if (!await _ensureReady()) return;
     await _tracking!.resumeCurrentTrack();
-    await _refreshTracks();
+    await _refreshHistory();
   });
 
-  Future<void> _complete() => _run(() async {
-    await _tracking!.completeCurrentTrack(reason: 'example_completed');
-    await _refreshTracks();
+  Future<Trip?> _currentTrip() async {
+    final tracking = _tracking;
+    final trackId = _session?.currentTrack?.id;
+    if (tracking is! MultiDayTripController || trackId == null) return null;
+    final tripTracking = tracking as MultiDayTripController;
+    final active = await tripTracking.listTripPage(
+      const TripQuery(
+        owner: _owner,
+        limit: 10,
+        statuses: <TripStatus>{TripStatus.active},
+      ),
+    );
+    for (final trip in active.items) {
+      if (trip.currentLegTrackId == trackId) return trip;
+    }
+    return null;
+  }
+
+  Future<void> _endDay() => _run(() async {
+    final tracking = _tracking;
+    if (tracking is! MultiDayTripController) return;
+    await (tracking as MultiDayTripController).endCurrentDay(
+      reason: 'overnight',
+    );
+    await _refreshHistory();
   });
+
+  Future<void> _complete() async {
+    final tracking = _tracking;
+    if (tracking is MultiDayTripController) {
+      final tripTracking = tracking as MultiDayTripController;
+      final trip = await _currentTrip();
+      if (trip == null || !mounted) return;
+      final confirmed =
+          await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              icon: const Icon(Icons.flag_rounded),
+              title: const Text('Complete the whole Trip?'),
+              content: const Text(
+                'This closes the current day and marks the multi-day Trip as '
+                'finished. You can deliberately continue it later, but the '
+                'app will ask for confirmation.',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Complete Trip'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (!confirmed) return;
+      return _run(() async {
+        await tripTracking.completeTrip(
+          trip.id,
+          reason: 'example_trip_completed',
+        );
+        await _refreshHistory();
+      });
+    }
+    return _run(() async {
+      await tracking!.completeCurrentTrack(reason: 'example_completed');
+      await _refreshHistory();
+    });
+  }
 
   Future<void> _resolveOwnerConflict() async {
     final token = _session?.blockerRecoveryToken;
@@ -304,7 +421,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
           confirmed: true,
         ),
       );
-      await _refreshTracks();
+      await _refreshHistory();
     });
   }
 
@@ -358,7 +475,112 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     if (!confirmed) return;
     await _run(() async {
       await _tracking!.deleteTrack(track.id);
-      await _refreshTracks();
+      await _refreshHistory();
+    });
+  }
+
+  Future<void> _exportTrip(String tripId, TrackExportFormat format) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => ExportNameDialog(
+        format: format,
+        initialFileName:
+            'trip_${DateTime.now().toUtc().millisecondsSinceEpoch}',
+      ),
+    );
+    if (name == null) return;
+    await _run(() async {
+      final tracking = _tracking! as MultiDayTripController;
+      final result = await tracking.exportTrip(
+        tripId: tripId,
+        format: format,
+        fileName: name,
+        options: const TrackExportOptions(
+          geometryContinuity:
+              RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+        ),
+      );
+      if (mounted) {
+        setState(
+          () => _message =
+              'Exported ${result.pointCount} Trip points to ${result.path}',
+        );
+      }
+    });
+  }
+
+  Future<void> _continueTrip(Trip trip) async {
+    if (!await _ensureReady() || !mounted) return;
+    var confirmed = true;
+    if (trip.status == TripStatus.completed) {
+      confirmed =
+          await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              icon: const Icon(Icons.add_road_rounded),
+              title: const Text('Continue completed Trip?'),
+              content: const Text(
+                'A new day will be appended to this existing Trip. Its '
+                'lifecycle revision will change, while earlier legs remain '
+                'immutable.',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Continue Trip'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    }
+    if (!confirmed) return;
+    await _run(() async {
+      final tracking = _tracking! as MultiDayTripController;
+      await tracking.continueTrip(
+        trip.id,
+        config: TrackingConfig(
+          accuracy: _accuracy,
+          mockLocationPolicy: MockLocationPolicy.flag,
+        ),
+        confirmCompletedTripContinuation: trip.status == TripStatus.completed,
+      );
+      await _refreshHistory();
+    });
+  }
+
+  Future<void> _deleteTrip(Trip trip) async {
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            icon: const Icon(Icons.delete_forever_outlined),
+            title: const Text('Delete the whole Trip?'),
+            content: Text(
+              'This permanently removes all ${trip.legCount} day legs, '
+              'points, gap evidence, and local Trip records.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Delete Trip'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+    await _run(() async {
+      await (_tracking! as MultiDayTripController).deleteTrip(trip.id);
+      await _refreshHistory();
     });
   }
 
@@ -448,6 +670,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   @override
   Widget build(BuildContext context) {
     final tracking = _tracking;
+    final tripMode = tracking is MultiDayTripController;
     final actions = _session?.allowedActions;
     final canConfigure = !_busy && _session?.currentTrack == null;
     final hasOwnerConflict = _session?.blockerCode == 'owner_scope_conflict';
@@ -504,12 +727,15 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                   canPause: !_busy && actions?.canPause == true,
                   canResume: !_busy && actions?.canResume == true,
                   canComplete: !_busy && actions?.canComplete == true,
+                  canEndDay: tripMode && !_busy && actions?.canComplete == true,
+                  tripMode: tripMode,
                   settingsEnabled: !_busy && tracking != null,
                   showBatterySettings: _accuracy == TrackingAccuracy.precised,
                   onStart: _start,
                   onPause: _pause,
                   onResume: _resume,
                   onComplete: _complete,
+                  onEndDay: _endDay,
                   onAppSettings: () => tracking!.openSettings(
                     TrackingSettingsDestination.application,
                   ),
@@ -517,27 +743,55 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                 ),
 
                 const SizedBox(height: 12),
-                RecordedTracksSection(
-                  tracks: _tracks,
-                  hasMore: _historyHasMore,
-                  onRefresh: _busy ? null : _refreshTracks,
-                  onLoadMore: _busy ? null : () => _refreshTracks(append: true),
-                  onViewMap: _busy || tracking == null
-                      ? null
-                      : (track) async {
-                          await Navigator.push<void>(
-                            context,
-                            MaterialPageRoute<void>(
-                              builder: (_) => TrackMapPage(
-                                tracking: tracking,
-                                track: track,
+                if (tripMode)
+                  RecordedTripsSection(
+                    trips: _trips,
+                    hasMore: _historyHasMore,
+                    onRefresh: _busy ? null : _refreshTrips,
+                    onLoadMore: _busy
+                        ? null
+                        : () => _refreshTrips(append: true),
+                    onViewMap: _busy
+                        ? null
+                        : (trip) async {
+                            await Navigator.push<void>(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => TripMapPage(
+                                  tracking: tracking as MultiDayTripController,
+                                  trip: trip,
+                                ),
                               ),
-                            ),
-                          );
-                        },
-                  onExport: _busy ? null : _exportTrack,
-                  onDelete: _busy ? null : _deleteTrack,
-                ),
+                            );
+                          },
+                    onContinue: _busy ? null : _continueTrip,
+                    onExport: _busy ? null : _exportTrip,
+                    onDelete: _busy ? null : _deleteTrip,
+                  )
+                else
+                  RecordedTracksSection(
+                    tracks: _tracks,
+                    hasMore: _historyHasMore,
+                    onRefresh: _busy ? null : _refreshTracks,
+                    onLoadMore: _busy
+                        ? null
+                        : () => _refreshTracks(append: true),
+                    onViewMap: _busy || tracking == null
+                        ? null
+                        : (track) async {
+                            await Navigator.push<void>(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => TrackMapPage(
+                                  tracking: tracking,
+                                  track: track,
+                                ),
+                              ),
+                            );
+                          },
+                    onExport: _busy ? null : _exportTrack,
+                    onDelete: _busy ? null : _deleteTrack,
+                  ),
                 if (_busy) ...<Widget>[
                   const SizedBox(height: 16),
                   const LinearProgressIndicator(),

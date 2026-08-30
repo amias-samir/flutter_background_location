@@ -8,6 +8,7 @@ import 'package:flutter_background_location_tracker/src/domain/track_point.dart'
 import 'package:flutter_background_location_tracker/src/domain/track_query.dart';
 import 'package:flutter_background_location_tracker/src/domain/track_segment.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracker_status.dart';
+import 'package:flutter_background_location_tracker/src/domain/trip.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_error.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_config.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_configuration_epoch.dart';
@@ -45,7 +46,7 @@ void main() {
     );
   });
 
-  test('schema 10 upgrades add derived tables without changing route data',
+  test('schema 10 upgrades to current tables without changing route data',
       () async {
     sqfliteFfiInit();
     final directory = await Directory.systemTemp.createTemp('fbl-v10-v11-');
@@ -88,7 +89,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 11);
+    expect(await inspected.getVersion(), 12);
     final tables = await inspected.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
@@ -100,6 +101,75 @@ void main() {
       ]),
     );
     await inspected.close();
+    await directory.delete(recursive: true);
+  });
+
+  test('schema 11 migration backfills one retry-safe implicit Trip per Track',
+      () async {
+    sqfliteFfiInit();
+    final directory = await Directory.systemTemp.createTemp('fbl-v11-v12-');
+    final databasePath = '${directory.path}/route.sqlite';
+    final original = SqliteTrackRepository(
+      path: databasePath,
+      databaseFactoryOverride: databaseFactoryFfi,
+      singleInstance: false,
+    );
+    await original.initialize();
+    final trackId = await original.createTrack(
+      userId: 'migration-user',
+      organizationId: 'migration-org',
+      routeId: 'preserved-route-id',
+      config: const TrackingConfig(),
+      requestedTrackId: 'preserved-track-id',
+    );
+    await original.markTrackActive(trackId);
+    await original.completeTrack(trackId, reason: 'finished');
+    final sourceTrack = (await original.getTrack(trackId))!;
+    await original.close();
+
+    final version11 = await databaseFactoryFfi.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    for (final table in <String>[
+      'trip_upload_outbox',
+      'trip_operations',
+      'trip_legs',
+      'trips',
+      'track_continuity_gaps',
+    ]) {
+      await version11.execute('DROP TABLE $table');
+    }
+    await version11.setVersion(11);
+    await version11.close();
+
+    Future<void> verifyMigration() async {
+      final migrated = SqliteTrackRepository(
+        path: databasePath,
+        databaseFactoryOverride: databaseFactoryFfi,
+        singleInstance: false,
+      );
+      await migrated.initialize();
+      const owner = TrackingOwner(
+        userId: 'migration-user',
+        organizationId: 'migration-org',
+      );
+      final bundle = await migrated.loadTripBundleForOwner(owner, trackId);
+      expect(bundle.trip.id, trackId);
+      expect(bundle.trip.routeId, sourceTrack.routeId);
+      expect(bundle.trip.status, TripStatus.completed);
+      expect(bundle.trip.acceptedPointCount, sourceTrack.acceptedPointCount);
+      expect(bundle.trip.rejectedPointCount, sourceTrack.rejectedPointCount);
+      expect(
+          bundle.trip.measuredDistanceMeters, sourceTrack.totalDistanceMeters);
+      expect(bundle.legs, hasLength(1));
+      expect(bundle.legs.single.trackId, trackId);
+      expect((await migrated.getTrack(trackId))?.routeId, sourceTrack.routeId);
+      await migrated.close();
+    }
+
+    await verifyMigration();
+    await verifyMigration();
     await directory.delete(recursive: true);
   });
 
@@ -1183,7 +1253,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 11);
+    expect(version, 12);
     expect(
       tables.map((row) => row['name']),
       containsAll(<String>[
@@ -1338,7 +1408,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 11);
+    expect(version, 12);
     final preservedPoint = rows.singleWhere(
       (row) => row['id'] == 'preserved-point',
     );
@@ -1440,7 +1510,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 11);
+    expect(version, 12);
     expect(epoch['track_id'], 'v4-track');
     expect(point['id'], 'v4-point');
     expect(point['configuration_epoch_id'], epoch['id']);

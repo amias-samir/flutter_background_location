@@ -63,13 +63,17 @@ struct TrackingConfiguration {
       defaultValue: 20,
       minimum: 1
     )
-    movingDesiredAccuracy = Self.accuracy(
+    let resolvedMovingDesiredAccuracy = Self.accuracy(
       dictionary["desiredAccuracy"],
       defaultValue: kCLLocationAccuracyBestForNavigation
     )
+    movingDesiredAccuracy = resolvedMovingDesiredAccuracy
     stationaryDesiredAccuracy = Self.accuracy(
       dictionary["stationaryDesiredAccuracy"],
-      defaultValue: kCLLocationAccuracyHundredMeters
+      // A missing stationary override must not ask Core Location for fixes
+      // looser than the active moving/acceptance profile. The interval and
+      // distance filter still provide the stationary battery savings.
+      defaultValue: resolvedMovingDesiredAccuracy
     )
     activityType = Self.activityType(dictionary["activityType"])
     allowBackgroundLocationUpdates = Self.boolean(

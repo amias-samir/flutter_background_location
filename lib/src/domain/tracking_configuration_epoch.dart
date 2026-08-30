@@ -7,6 +7,9 @@ abstract final class TrackingPolicyVersions {
 
   /// Version of the point acceptance/rejection policy.
   static const int qualityPolicy = 1;
+
+  /// Version of accepted-gap classification and topology semantics.
+  static const int continuityPolicy = 1;
 }
 
 /// Immutable configuration and policy provenance for a sequence range.

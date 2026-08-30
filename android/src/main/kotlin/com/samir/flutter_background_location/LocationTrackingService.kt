@@ -27,6 +27,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import java.util.UUID
 
 class LocationTrackingService : Service() {
@@ -54,6 +55,11 @@ class LocationTrackingService : Service() {
     private var lastNotificationUpdateAt = 0L
     private var journalPrepareInProgress = false
     private var journalPrepareGeneration = 0
+    private var nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
+    private val recentFixDeduplicator = RecentFixDeduplicator()
+    private val stationaryExitProbeCoordinator = StationaryExitProbeCoordinator()
+    private var stationaryExitProbeCancellation: CancellationTokenSource? = null
+    private var stationaryExitProbeTimeout: Runnable? = null
 
     private val stationaryTransition = Runnable {
         tryEnterStationaryProfile()
@@ -204,6 +210,7 @@ class LocationTrackingService : Service() {
 
         stopCapture()
         stateStore.begin(trackId, configuration)
+        nextCaptureStartReason = CAPTURE_REASON_NEW_TRACK
         stateStore.emitCurrentStatus()
         startCapture()
     }
@@ -229,8 +236,10 @@ class LocationTrackingService : Service() {
         stopCapture()
         if (persistedTrackId == null) {
             stateStore.begin(trackId, configuration)
+            nextCaptureStartReason = CAPTURE_REASON_NEW_TRACK
         } else {
             stateStore.resume()
+            nextCaptureStartReason = CAPTURE_REASON_RESUME
         }
         stateStore.emitCurrentStatus()
         startCapture()
@@ -252,6 +261,7 @@ class LocationTrackingService : Service() {
             TrackingStateStore.PROFILE_MOVING,
             "Tracking service restored by Android.",
         )
+        nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
         stateStore.emitCurrentStatus()
         startCapture()
     }
@@ -382,6 +392,12 @@ class LocationTrackingService : Service() {
         stationaryReferenceLocation = null
         stationaryDisplacementWindow.reset()
 
+        // This commit precedes every provider subscription. Request/profile
+        // replacements below deliberately keep the same durable generation.
+        stateStore.beginCaptureGeneration(nextCaptureStartReason)
+        nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
+        recentFixDeduplicator.clear()
+
         requestActivityUpdates()
         requestLocationUpdates(currentProfile)
         stateStore.markServiceHeartbeat(captureActive = true)
@@ -416,6 +432,12 @@ class LocationTrackingService : Service() {
         lastLocationObservedAt = null
         stationaryReferenceLocation = null
         stationaryDisplacementWindow.reset()
+        stationaryExitProbeCoordinator.cancel()
+        stationaryExitProbeCancellation?.cancel()
+        stationaryExitProbeCancellation = null
+        stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
+        stationaryExitProbeTimeout = null
+        recentFixDeduplicator.clear()
         stateStore.markServiceHeartbeat(captureActive = false)
         PendingLocationCoordinator.closeAsync(this)
     }
@@ -536,11 +558,16 @@ class LocationTrackingService : Service() {
         }
     }
 
-    private fun handleLocation(location: Location) {
+    private fun handleLocation(location: Location, onDurablyHandled: (() -> Unit)? = null) {
         if (!captureStarted) return
         if (!checkActivePrerequisites()) return
         val trackId = stateStore.activeTrackId ?: return
+        val captureGenerationId = stateStore.captureGenerationId ?: run {
+            failCapture("Native capture generation is unavailable.")
+            return
+        }
         val nativeReceivedAt = System.currentTimeMillis()
+        stateStore.markProviderCallback(nativeReceivedAt)
         val monotonicReceivedNanos = SystemClock.elapsedRealtimeNanos()
         val timestamp = location.time.takeIf { it > 0L } ?: nativeReceivedAt
         val mocked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -550,8 +577,21 @@ class LocationTrackingService : Service() {
             location.isFromMockProvider
         }
 
+        val eventId = NativeLocationFixIdentity.eventId(
+            captureGenerationId = captureGenerationId,
+            provider = location.provider,
+            providerTimestampMs = timestamp,
+            elapsedRealtimeNanos = location.elapsedRealtimeNanos,
+            latitude = location.latitude,
+            longitude = location.longitude,
+        )
+        if (!recentFixDeduplicator.accept(eventId)) {
+            onDurablyHandled?.invoke()
+            return
+        }
+
         val event = linkedMapOf<String, Any?>(
-            "eventId" to UUID.randomUUID().toString(),
+            "eventId" to eventId,
             "trackId" to trackId,
             "lat" to location.latitude,
             "lon" to location.longitude,
@@ -586,6 +626,9 @@ class LocationTrackingService : Service() {
             "monotonicFixNanos" to location.elapsedRealtimeNanos,
             "monotonicReceivedNanos" to monotonicReceivedNanos,
             "monotonicDomainId" to monotonicDomainId,
+            "captureGenerationId" to captureGenerationId,
+            "nativeSessionStartedAt" to stateStore.nativeSessionStartedAt,
+            "nativeLifecycle" to TrackingStateStore.STATE_TRACKING,
             "isMocked" to mocked,
             "mockDetectionAvailable" to TrackingStateStore.MOCK_DETECTION_AVAILABLE,
             "mockEvidence" to if (mocked) {
@@ -611,6 +654,7 @@ class LocationTrackingService : Service() {
         val accepted = PendingLocationCoordinator.execute(
             applicationContext,
             onFailure = { error ->
+                recentFixDeduplicator.forget(eventId)
                 mainHandler.post {
                     if (captureStarted && stateStore.activeTrackId == trackId) {
                         failCapture(
@@ -620,12 +664,16 @@ class LocationTrackingService : Service() {
                 }
             },
         ) { store ->
-            store.enqueue(event)
+            val inserted = store.enqueue(event)
             mainHandler.post {
-                handleJournaledLocation(trackId, locationCopy, timestamp, event)
+                if (inserted) {
+                    handleJournaledLocation(trackId, locationCopy, timestamp, event)
+                }
+                onDurablyHandled?.invoke()
             }
         }
         if (!accepted) {
+            recentFixDeduplicator.forget(eventId)
             failCapture("The native pending-location worker is overloaded.")
         }
     }
@@ -738,7 +786,10 @@ class LocationTrackingService : Service() {
 
     private fun switchProfile(profile: String) {
         if (!captureStarted || profile == currentProfile) return
+        val previousProfile = currentProfile
         currentProfile = profile
+        val exitedStationary = previousProfile == TrackingStateStore.PROFILE_STATIONARY &&
+            profile == TrackingStateStore.PROFILE_MOVING
         if (profile == TrackingStateStore.PROFILE_STATIONARY) {
             stationaryReferenceLocation = lastLocation?.let(::Location)
             stationaryDisplacementWindow.reset()
@@ -752,7 +803,79 @@ class LocationTrackingService : Service() {
         }
         stateStore.emitCurrentStatus()
         requestLocationUpdates(profile)
+        if (exitedStationary) requestStationaryExitProbe()
         updateNotification(force = true)
+    }
+
+    private fun requestStationaryExitProbe() {
+        if (!captureStarted || !hasLocationPermission()) return
+        val token = stationaryExitProbeCoordinator.begin()
+        stateStore.markStationaryExitProbeRequested()
+        stateStore.emitCurrentStatus()
+
+        fusedLocationClient.flushLocations()
+            .addOnSuccessListener {
+                if (captureStarted) stateStore.markStationaryExitFlushOutcome("succeeded")
+            }
+            .addOnFailureListener { error ->
+                if (captureStarted) {
+                    stateStore.markStationaryExitFlushOutcome("failed")
+                    stateStore.markLocationRequestFailure(
+                        "Stationary-exit flush failed: ${error.message.orEmpty()}",
+                    )
+                }
+            }
+
+        if (!stationaryExitProbeCoordinator.beginCurrentFixRequest(token)) return
+        stationaryExitProbeCancellation?.cancel()
+        val cancellation = CancellationTokenSource()
+        stationaryExitProbeCancellation = cancellation
+
+        val timeout = Runnable {
+            if (!stationaryExitProbeCoordinator.complete(token)) return@Runnable
+            cancellation.cancel()
+            stationaryExitProbeCancellation = null
+            stationaryExitProbeTimeout = null
+            stateStore.markStationaryExitProbeCompleted("timed_out")
+            stateStore.emitCurrentStatus()
+        }
+        stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
+        stationaryExitProbeTimeout = timeout
+        mainHandler.postDelayed(timeout, STATIONARY_EXIT_PROBE_TIMEOUT_MS)
+
+        try {
+            fusedLocationClient.getCurrentLocation(
+                Priority.PRIORITY_HIGH_ACCURACY,
+                cancellation.token,
+            ).addOnSuccessListener { location ->
+                if (location == null) {
+                    completeStationaryExitProbe(token, "no_fix")
+                } else {
+                    handleLocation(location) {
+                        completeStationaryExitProbe(token, "succeeded")
+                    }
+                }
+            }.addOnFailureListener { error ->
+                stateStore.markLocationRequestFailure(
+                    "Stationary-exit probe failed: ${error.message.orEmpty()}",
+                )
+                completeStationaryExitProbe(token, "failed")
+            }
+        } catch (error: SecurityException) {
+            stateStore.markLocationRequestFailure(
+                "Stationary-exit probe permission failure: ${error.message.orEmpty()}",
+            )
+            completeStationaryExitProbe(token, "permission_unavailable")
+        }
+    }
+
+    private fun completeStationaryExitProbe(token: Long, outcome: String) {
+        if (!stationaryExitProbeCoordinator.complete(token)) return
+        stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
+        stationaryExitProbeTimeout = null
+        stationaryExitProbeCancellation = null
+        stateStore.markStationaryExitProbeCompleted(outcome)
+        stateStore.emitCurrentStatus()
     }
 
     private fun failCapture(message: String) {
@@ -1031,6 +1154,10 @@ class LocationTrackingService : Service() {
         private const val SERVICE_HEARTBEAT_INTERVAL_MS = 60_000L
         private const val PREREQUISITE_MONITOR_INTERVAL_MS = 60_000L
         private const val MINIMUM_BASELINE_FRESHNESS_MS = 30_000L
+        private const val STATIONARY_EXIT_PROBE_TIMEOUT_MS = 15_000L
+        private const val CAPTURE_REASON_NEW_TRACK = "new_track"
+        private const val CAPTURE_REASON_RESUME = "resume"
+        private const val CAPTURE_REASON_PROCESS_RECOVERY = "process_recovery"
         private const val COMMAND_SOURCE_NOTIFICATION = "notification"
         private const val MOVING_EVIDENCE_REQUIRED = 2
         private val MOVING_ACTIVITY_TYPES = setOf("walking", "running", "cycling", "automotive")

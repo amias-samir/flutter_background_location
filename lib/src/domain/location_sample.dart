@@ -44,6 +44,10 @@ final class LocationSample {
     this.monotonicFixNanos,
     this.monotonicReceivedNanos,
     this.monotonicDomainId,
+    this.captureGenerationId,
+    this.nativeSessionStartedAt,
+    this.nativeLifecycle,
+    this.samplingProfile,
   });
 
   /// Latitude in decimal degrees.
@@ -121,6 +125,18 @@ final class LocationSample {
   /// Opaque boot/process clock domain for safe monotonic comparisons.
   final String? monotonicDomainId;
 
+  /// Opaque identity of one uninterrupted native provider session.
+  final String? captureGenerationId;
+
+  /// UTC time at which that native capture generation began.
+  final DateTime? nativeSessionStartedAt;
+
+  /// Native lifecycle attached to this journaled callback.
+  final TrackerLifecycle? nativeLifecycle;
+
+  /// Native sampling profile attached to this journaled callback.
+  final SamplingProfile? samplingProfile;
+
   /// Three-state interpretation of the available mock-location evidence.
   MockLocationAssessment get mockAssessment {
     // A positive platform signal is authoritative even if an older adapter
@@ -151,6 +167,8 @@ final class LocationSample {
         map.containsKey('activityConfidence');
     final rawMotion =
         map['motionState'] ?? map['trackingProfile'] ?? map['samplingProfile'];
+    final rawLifecycle = map['nativeLifecycle']?.toString().toLowerCase();
+    final rawSampling = map['samplingProfile']?.toString().toLowerCase();
 
     return LocationSample(
       latitude: number('lat') ?? number('latitude') ?? double.nan,
@@ -180,6 +198,20 @@ final class LocationSample {
       monotonicFixNanos: (map['monotonicFixNanos'] as num?)?.toInt(),
       monotonicReceivedNanos: (map['monotonicReceivedNanos'] as num?)?.toInt(),
       monotonicDomainId: map['monotonicDomainId'] as String?,
+      captureGenerationId: map['captureGenerationId'] as String?,
+      nativeSessionStartedAt: map['nativeSessionStartedAt'] == null
+          ? null
+          : timestamp(map['nativeSessionStartedAt']),
+      nativeLifecycle:
+          TrackerLifecycle.values.cast<TrackerLifecycle?>().firstWhere(
+                (candidate) => candidate?.name == rawLifecycle,
+                orElse: () => null,
+              ),
+      samplingProfile: switch (rawSampling) {
+        'stationary' => SamplingProfile.stationary,
+        'moving' => SamplingProfile.moving,
+        _ => null,
+      },
       capturedActivity: hasActivity
           ? ActivitySnapshot(
               type: trackingActivityTypeFromValue(map['activityType']),

@@ -318,12 +318,15 @@ class TrackingActionPanel extends StatelessWidget {
     required this.canPause,
     required this.canResume,
     required this.canComplete,
+    this.canEndDay = false,
+    this.tripMode = false,
     required this.settingsEnabled,
     required this.showBatterySettings,
     required this.onStart,
     required this.onPause,
     required this.onResume,
     required this.onComplete,
+    this.onEndDay,
     required this.onAppSettings,
     required this.onBatterySettings,
   });
@@ -332,12 +335,15 @@ class TrackingActionPanel extends StatelessWidget {
   final bool canPause;
   final bool canResume;
   final bool canComplete;
+  final bool canEndDay;
+  final bool tripMode;
   final bool settingsEnabled;
   final bool showBatterySettings;
   final VoidCallback onStart;
   final VoidCallback onPause;
   final VoidCallback onResume;
   final VoidCallback onComplete;
+  final VoidCallback? onEndDay;
   final VoidCallback onAppSettings;
   final VoidCallback onBatterySettings;
 
@@ -392,8 +398,14 @@ class TrackingActionPanel extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: canComplete ? onComplete : null,
                 icon: const Icon(Icons.flag_outlined),
-                label: const Text('Complete'),
+                label: Text(tripMode ? 'Complete Trip' : 'Complete'),
               ),
+              if (tripMode)
+                FilledButton.tonalIcon(
+                  onPressed: canEndDay ? onEndDay : null,
+                  icon: const Icon(Icons.bedtime_outlined),
+                  label: const Text('End day'),
+                ),
             ],
           ),
           const Divider(height: 28),

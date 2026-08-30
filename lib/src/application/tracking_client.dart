@@ -13,12 +13,16 @@ import '../domain/fix_quality.dart';
 import '../domain/location_sample.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
+import '../domain/route_geometry.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
+import '../domain/trip.dart';
+import '../domain/trip_query.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
+import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_health.dart';
 import '../domain/tracking_readiness.dart';
@@ -26,14 +30,18 @@ import '../domain/tracking_session_snapshot.dart';
 import '../domain/tracking_settings.dart';
 import '../domain/tracking_start.dart';
 import '../export/track_export_service.dart';
+import '../export/track_export_v2_service.dart';
+import '../export/trip_export_service.dart';
 import '../platform/native_tracker_adapter.dart';
 import '../platform/tracker_adapter.dart';
 import '../storage/sqlite_track_repository.dart';
 import '../storage/track_repository.dart';
+import '../storage/trip_repository.dart';
 import '../upload/track_uploader.dart';
 import '../upload/tracking_batch_uploader.dart';
 import 'motion_gate.dart';
 import 'derived_geometry_service.dart';
+import 'route_geometry_assembler.dart';
 
 abstract interface class Tracking {
   Stream<TrackerStatus> get statusStream;
@@ -128,6 +136,51 @@ abstract interface class TrackingController implements Tracking {
   Future<void> dispose();
 }
 
+/// Additive multi-day lifecycle API. Existing [TrackingController]
+/// implementations remain source compatible because this is a separate
+/// capability.
+abstract interface class MultiDayTripController {
+  Future<TripStartResult> startTrip(TripStartRequest request);
+
+  Future<TripLifecycleResult> endCurrentDay({
+    String reason = 'day_completed',
+    String? operationId,
+  });
+
+  Future<TripContinueResult> continueTrip(
+    String tripId, {
+    TrackingConfig? config,
+    String? operationId,
+    bool confirmCompletedTripContinuation = false,
+  });
+
+  Future<TripLifecycleResult> completeTrip(
+    String tripId, {
+    String reason = 'trip_completed',
+    String? operationId,
+  });
+
+  Future<Trip?> getTrip(String tripId);
+  Future<TripPage> listTripPage(TripQuery query);
+  Future<TripBundle> loadTripBundle(String tripId);
+  Future<RouteGeometryReport> assembleTripRouteGeometry(
+    String tripId, {
+    RouteGeometryContinuity continuity =
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+  });
+  Future<TripExportResult> exportTrip({
+    required String tripId,
+    required TrackExportFormat format,
+    TrackExportOptions options = const TrackExportOptions(),
+    String? fileName,
+  });
+  Future<void> deleteTrip(String tripId);
+}
+
+/// Combined controller returned by [TrackingClient.openWithTrips].
+abstract interface class TrackingTripController
+    implements TrackingController, MultiDayTripController {}
+
 class TrackingClient implements Tracking {
   static Future<TrackingController> open({
     required TrackingOwner owner,
@@ -162,6 +215,27 @@ class TrackingClient implements Tracking {
       rethrow;
     }
   }
+
+  /// Opens the same owner-bound tracking client with the additive multi-day
+  /// Trip API exposed in its static type.
+  static Future<TrackingTripController> openWithTrips({
+    required TrackingOwner owner,
+    TrackingConfiguration configuration = const TrackingConfiguration(),
+    TrackerAdapter? trackerAdapter,
+    TrackRepository? repository,
+    ExportFileWriter? exportFileWriter,
+    TrackUploader? uploader,
+    DateTime Function()? clock,
+  }) async =>
+      (await open(
+        owner: owner,
+        configuration: configuration,
+        trackerAdapter: trackerAdapter,
+        repository: repository,
+        exportFileWriter: exportFileWriter,
+        uploader: uploader,
+        clock: clock,
+      )) as TrackingTripController;
 
   TrackingClient({
     this.configuration = const TrackingConfiguration(),
@@ -395,6 +469,7 @@ class TrackingClient implements Tracking {
     await _recoverPendingNativeUserAction();
     await _recoverPendingLifecycleCommand();
     await _recoverPendingConfigurationUpdates();
+    await _recoverPendingTripOperations();
     await _reconcile();
     await _drainPendingNativeLocations();
     await _drainPendingNativeLocations();
@@ -1544,6 +1619,204 @@ class TrackingClient implements Tracking {
     }
   }
 
+  Future<void> _recoverPendingTripOperations() async {
+    final repository = _store;
+    if (repository is! TripRepository) return;
+    final tripStore = repository as TripRepository;
+    for (final operation in await tripStore.pendingTripOperations()) {
+      try {
+        final trackId = operation.legTrackId;
+        if (trackId == null) {
+          await tripStore.markTripOperationStage(
+            operationRecordId: operation.id,
+            stage: TripOperationStage.failed,
+          );
+          continue;
+        }
+        final track = await _store.getTrack(trackId);
+        if (track == null) {
+          await tripStore.markTripOperationStage(
+            operationRecordId: operation.id,
+            stage: TripOperationStage.failed,
+          );
+          continue;
+        }
+        final owner = TrackingOwner(
+          userId: track.userId,
+          organizationId: track.organizationId,
+        );
+        switch (operation.type) {
+          case TripOperationType.start:
+          case TripOperationType.continueTrip:
+            await _recoverTripNativeStart(
+              tripStore: tripStore,
+              operation: operation,
+              track: track,
+            );
+          case TripOperationType.endDay:
+          case TripOperationType.complete:
+            await _recoverTripFinalization(
+              tripStore: tripStore,
+              operation: operation,
+              track: track,
+              owner: owner,
+            );
+        }
+      } on Object catch (error) {
+        await _safeHealthEvent(
+          trackId: operation.legTrackId,
+          type: 'trip_operation_recovery_deferred',
+          details: <String, Object?>{
+            'tripId': operation.tripId,
+            'operationType': operation.type.name,
+            'operationStage': operation.stage.name,
+            'errorType': error.runtimeType.toString(),
+          },
+        );
+      }
+    }
+  }
+
+  Future<void> _recoverTripNativeStart({
+    required TripRepository tripStore,
+    required TripOperationRecord operation,
+    required Track track,
+  }) async {
+    if (track.status == TrackStatus.completed ||
+        track.status == TrackStatus.failed) {
+      await tripStore.markTripOperationStage(
+        operationRecordId: operation.id,
+        stage: TripOperationStage.failed,
+      );
+      return;
+    }
+    final nativeRunning = await _tracker.isRunning();
+    final nativeState = await _tracker.runtimeState();
+    if (nativeRunning &&
+        nativeState.trackId != null &&
+        nativeState.trackId != track.id) {
+      throw TrackingTripException(
+        code: 'active_trip_conflict',
+        message: 'Native capture belongs to a different Trip.',
+        tripId: operation.tripId,
+      );
+    }
+
+    var refreshed = track;
+    if (!nativeRunning) {
+      final resume = refreshed.status == TrackStatus.paused ||
+          refreshed.status == TrackStatus.interrupted;
+      if (resume) {
+        refreshed = await _store.prepareResume(refreshed.id);
+      }
+      if (refreshed.status == TrackStatus.starting || resume) {
+        await _store.markTrackActive(refreshed.id);
+        refreshed = (await _store.getTrack(refreshed.id))!;
+      }
+      await _bindNativeCommandLease(refreshed.id);
+      if (resume) {
+        await _tracker.resume(
+          trackId: refreshed.id,
+          config: refreshed.config,
+        );
+      } else {
+        await _tracker.start(
+          trackId: refreshed.id,
+          config: refreshed.config,
+        );
+      }
+    } else if (refreshed.status == TrackStatus.starting) {
+      await _store.markTrackActive(refreshed.id);
+      refreshed = (await _store.getTrack(refreshed.id))!;
+    }
+
+    _motionGate = MotionGate(refreshed.config);
+    _acceptingLocations = true;
+    _beginFixAcquisition(refreshed);
+    _scheduleBatchUploads(refreshed.id, refreshed.config);
+    await tripStore.markTripOperationStage(
+      operationRecordId: operation.id,
+      stage: TripOperationStage.completed,
+    );
+    _emitStatus(
+      TrackerStatus(
+        lifecycle: TrackerLifecycle.tracking,
+        trackId: refreshed.id,
+        lastPointAt: refreshed.lastPointAt,
+      ),
+    );
+  }
+
+  Future<void> _recoverTripFinalization({
+    required TripRepository tripStore,
+    required TripOperationRecord operation,
+    required Track track,
+    required TrackingOwner owner,
+  }) async {
+    final nativeRunning = await _tracker.isRunning();
+    final nativeState = await _tracker.runtimeState();
+    if (nativeRunning &&
+        nativeState.trackId != null &&
+        nativeState.trackId != track.id) {
+      throw TrackingTripException(
+        code: 'active_trip_conflict',
+        message: 'Native capture belongs to a different Trip.',
+        tripId: operation.tripId,
+      );
+    }
+    _acceptingLocations = false;
+    if (nativeRunning || nativeState.trackId == track.id) {
+      await _bindNativeCommandLease(track.id);
+      await _tracker.stop(
+        trackId: track.id,
+        reason: operation.reason ?? 'trip_operation_recovery',
+      );
+      await _waitUntilNativeStopped();
+    }
+    await tripStore.markTripOperationStage(
+      operationRecordId: operation.id,
+      stage: TripOperationStage.nativeStopped,
+    );
+    await _pointTail;
+    await _drainPendingNativeLocations(trackId: track.id);
+    final reason = operation.reason ??
+        (operation.type == TripOperationType.complete
+            ? 'trip_completed_recovered'
+            : 'day_completed_recovered');
+    if (operation.type == TripOperationType.complete) {
+      await tripStore.completeTripAfterLegCompletion(
+        owner: owner,
+        tripId: operation.tripId,
+        trackId: track.id,
+        reason: reason,
+        operationId: operation.operationId,
+      );
+      final outbox = _store;
+      if (outbox is TripUploadOutboxRepository) {
+        await (outbox as TripUploadOutboxRepository).enqueueTripCompletion(
+          owner: owner,
+          tripId: operation.tripId,
+        );
+      }
+    } else {
+      await tripStore.suspendTripAfterLegCompletion(
+        owner: owner,
+        tripId: operation.tripId,
+        trackId: track.id,
+        reason: reason,
+        operationId: operation.operationId,
+      );
+    }
+    await _releaseNativeCommandLease(track.id);
+    _clearFixAcquisition();
+    _cancelBatchUploads(track.id);
+    final batchUploader = _batchUploader;
+    if (batchUploader != null) {
+      await batchUploader.enqueueCompletion(track.id);
+      unawaited(_finishUpload(track.id, batchUploader));
+    }
+  }
+
   Future<void> _recoverPendingNativeUserAction() async {
     final existing = _nativeUserActionRecovery;
     if (existing != null) return existing;
@@ -1712,41 +1985,68 @@ class TrackingClient implements Tracking {
     if (segmentId == null) {
       throw StateError('Active track has no current segment.');
     }
-    final previous = await _store.findLastAcceptedPoint(
+    final previousInSegment = await _store.findLastAcceptedPoint(
       track.id,
       segmentId: segmentId,
     );
+    final previousAccepted =
+        previousInSegment ?? await _store.findLastAcceptedPoint(track.id);
+    final continuityStore = _store is ContinuityTrackRepository
+        ? _store as ContinuityTrackRepository
+        : null;
+    final previousRaw = await continuityStore?.findLastRawPoint(track.id);
     final decision = FixQualityPolicy(track.config).evaluate(
       sample: sample,
-      previous: previous,
+      previous: previousInSegment,
       now: _clock(),
     );
-    if (decision.issues.contains(FixQualityIssue.largeGap)) {
-      final store = _store;
-      if (store is GapSegmentRepository) {
-        await (store as GapSegmentRepository).beginGapSegment(
-          trackId: track.id,
-          observedAt: sample.capturedAt,
-          reason: 'large_callback_gap',
-        );
-      }
-    }
+    final continuityDecision = _classifyContinuity(
+      track: track,
+      sample: sample,
+      quality: decision,
+      previousAccepted: previousAccepted,
+      previousRaw: previousRaw,
+      currentSegmentId: segmentId,
+    );
     final capturedActivity = sample.capturedActivity ??
         _recentActivityFor(sample.capturedAt) ??
         const ActivitySnapshot.unknown();
     final capturedMotionState =
         sample.capturedMotionState ?? _motionGate?.state ?? MotionState.unknown;
-    final point = await _store.appendPoint(
-      PointWriteRequest(
-        trackId: track.id,
-        sample: sample,
-        activity: capturedActivity,
-        motionState: capturedMotionState,
-        accepted: decision.acceptedForGeometry,
-        qualityFlags: decision.qualityFlags,
-        rejectionReason: decision.rejectionReason,
-      ),
+    final request = PointWriteRequest(
+      trackId: track.id,
+      sample: sample,
+      activity: capturedActivity,
+      motionState: capturedMotionState,
+      accepted: decision.acceptedForGeometry,
+      qualityFlags: decision.qualityFlags,
+      rejectionReason: decision.rejectionReason,
     );
+    final appendResult = continuityStore == null
+        ? PointAppendResult(
+            point: await _store.appendPoint(request),
+            segmentId: segmentId,
+            duplicate: false,
+          )
+        : await continuityStore.appendPointWithContinuity(
+            request,
+            continuityDecision,
+          );
+    final point = appendResult.point;
+    final gap = appendResult.gap;
+    if (gap != null) {
+      await _safeHealthEvent(
+        trackId: track.id,
+        type: 'continuity_gap_recorded',
+        details: <String, Object?>{
+          'cause': gap.cause.name,
+          'treatment': gap.treatment.name,
+          'providerGapMs': gap.providerGap?.inMilliseconds,
+          'rawReceiptGapMs': gap.rawReceiptGap?.inMilliseconds,
+          'continuityPolicyVersion': gap.continuityPolicyVersion,
+        },
+      );
+    }
     _lastCommittedAt = _clock();
     final eventId = sample.eventId;
     if (eventId != null) {
@@ -1782,6 +2082,84 @@ class TrackingClient implements Tracking {
         unawaited(_triggerUpload(track.id));
       }
     }
+  }
+
+  TrackingContinuityDecision? _classifyContinuity({
+    required Track track,
+    required LocationSample sample,
+    required FixQualityDecision quality,
+    required TrackPoint? previousAccepted,
+    required TrackPoint? previousRaw,
+    required String currentSegmentId,
+  }) {
+    if (previousAccepted == null) return null;
+
+    final acceptedGap = sample.capturedAt.difference(
+      previousAccepted.capturedAt,
+    );
+    final rawReceiptGap = previousRaw?.nativeReceivedAt == null ||
+            sample.nativeReceivedAt == null
+        ? null
+        : sample.nativeReceivedAt!.difference(previousRaw!.nativeReceivedAt!);
+    final generationChanged = previousRaw?.captureGenerationId != null &&
+        sample.captureGenerationId != null &&
+        previousRaw!.captureGenerationId != sample.captureGenerationId;
+    final monotonicDomainChanged = previousRaw?.monotonicDomainId != null &&
+        sample.monotonicDomainId != null &&
+        previousRaw!.monotonicDomainId != sample.monotonicDomainId;
+    final alreadyAcrossLifecycleBoundary =
+        previousAccepted.segmentId != currentSegmentId;
+    final hasInterveningRejectedFixes = previousRaw != null &&
+        previousRaw.sequence > previousAccepted.sequence &&
+        !previousRaw.accepted;
+    final acceptedGapDiagnostic =
+        acceptedGap > track.config.acceptedGeometryGapThreshold;
+    final rawGapDiagnostic = rawReceiptGap != null &&
+        rawReceiptGap > track.config.callbackHealthWarningThreshold;
+
+    if (!acceptedGapDiagnostic &&
+        !rawGapDiagnostic &&
+        !quality.issues.contains(FixQualityIssue.largeGap) &&
+        !generationChanged &&
+        !monotonicDomainChanged &&
+        !alreadyAcrossLifecycleBoundary &&
+        !hasInterveningRejectedFixes) {
+      return null;
+    }
+
+    final lifecycle = sample.nativeLifecycle ?? _currentStatus.lifecycle;
+    final sampling = sample.samplingProfile ?? _currentStatus.samplingProfile;
+    final callbackHealthy = rawReceiptGap == null ||
+        rawReceiptGap <= track.config.callbackHealthWarningThreshold;
+    final batchingObserved = acceptedGapDiagnostic && callbackHealthy;
+    return TrackingContinuityClassifier(
+      policy: track.config.continuityPolicy,
+      policyVersion: TrackingPolicyVersions.continuityPolicy,
+    ).classify(
+      TrackingContinuityEvidence(
+        currentAcceptedForGeometry: quality.acceptedForGeometry,
+        expectedTrackId: track.id,
+        currentTrackId: sample.trackId ?? track.id,
+        previousCaptureGenerationId: previousRaw?.captureGenerationId,
+        currentCaptureGenerationId: sample.captureGenerationId,
+        previousMonotonicDomainId: previousRaw?.monotonicDomainId,
+        currentMonotonicDomainId: sample.monotonicDomainId,
+        nativeLifecycle: lifecycle,
+        samplingProfile: sampling,
+        serviceHealthy: lifecycle == TrackerLifecycle.tracking ||
+            lifecycle == TrackerLifecycle.starting,
+        permissionAndServiceAvailable: lifecycle != TrackerLifecycle.failed,
+        hasInterveningRejectedFixes: hasInterveningRejectedFixes,
+        providerBatchingObserved: batchingObserved,
+        providerAvailable:
+            sample.provider != null && sample.provider!.trim().isNotEmpty,
+        explicitBoundaryCause: alreadyAcrossLifecycleBoundary
+            ? TrackingGapCause.explicitPause
+            : null,
+        acceptedGeometryGap: acceptedGap,
+        rawReceiptGap: rawReceiptGap,
+      ),
+    );
   }
 
   Future<TrackPoint?> _quarantineMismatchedLocation({
@@ -2445,7 +2823,7 @@ class TrackingClient implements Tracking {
 
 final class _OwnerBoundTrackingController
     implements
-        TrackingController,
+        TrackingTripController,
         TrackingDiagnosticsController,
         TrackingConfigurationController,
         TrackingGeometryController {
@@ -2698,6 +3076,450 @@ final class _OwnerBoundTrackingController
     );
   }
 
+  TripRepository get _tripStore {
+    final repository = _client._repository;
+    if (repository is TripRepository) return repository as TripRepository;
+    throw const TrackingStorageException(
+      code: 'capability_unsupported',
+      message: 'This repository does not support multi-day Trips.',
+    );
+  }
+
+  @override
+  Future<TripStartResult> startTrip(TripStartRequest request) async {
+    final operationId = request.operationId ?? const Uuid().v4();
+    final existing = await _tripStore.findTripOperationForOwner(
+      owner: _owner,
+      operationId: operationId,
+      type: TripOperationType.start,
+    );
+    if (existing != null) {
+      final bundle =
+          await _tripStore.loadTripBundleForOwner(_owner, existing.tripId);
+      return TripStartResult(
+        trip: bundle.trip,
+        leg: bundle.legs.firstWhere(
+          (leg) => leg.trackId == existing.legTrackId,
+          orElse: () => bundle.legs.first,
+        ),
+      );
+    }
+    final trackResult = await startNewTrack(
+      TrackStartRequest(
+        owner: _owner,
+        routeId: request.routeId,
+        requestedTrackId: request.requestedTripId,
+        config: request.config,
+      ),
+    );
+    final prepared = await _tripStore.registerImplicitTripStart(
+      owner: _owner,
+      tripId: trackResult.trackId,
+      operationId: operationId,
+      reason: 'trip_started',
+    );
+    await _tripStore.markTripOperationStage(
+      operationRecordId: prepared.operation.id,
+      stage: TripOperationStage.completed,
+    );
+    return TripStartResult(
+      trip: (await _tripStore.getTripForOwner(_owner, prepared.trip.id))!,
+      leg: prepared.leg,
+    );
+  }
+
+  @override
+  Future<TripLifecycleResult> endCurrentDay({
+    String reason = 'day_completed',
+    String? operationId,
+  }) async {
+    final page = await _tripStore.listTripPage(
+      TripQuery(owner: _owner, limit: 1, statuses: const {TripStatus.active}),
+    );
+    if (page.items.isEmpty) {
+      if (operationId != null) {
+        final existing = await _tripStore.findTripOperationForOwner(
+          owner: _owner,
+          operationId: operationId,
+          type: TripOperationType.endDay,
+        );
+        if (existing?.stage == TripOperationStage.completed &&
+            existing?.legTrackId != null) {
+          final bundle =
+              await _tripStore.loadTripBundleForOwner(_owner, existing!.tripId);
+          return TripLifecycleResult(
+            trip: bundle.trip,
+            leg: bundle.legs.firstWhere(
+              (leg) => leg.trackId == existing.legTrackId,
+            ),
+            status: _client.currentStatus,
+          );
+        }
+      }
+      throw const TrackingTripException(
+        code: 'trip_not_active',
+        message: 'There is no active Trip to end for the day.',
+      );
+    }
+    return _finishTrip(
+      page.items.single,
+      reason: reason,
+      operationId: operationId ?? const Uuid().v4(),
+      completeTrip: false,
+    );
+  }
+
+  @override
+  Future<TripContinueResult> continueTrip(
+    String tripId, {
+    TrackingConfig? config,
+    String? operationId,
+    bool confirmCompletedTripContinuation = false,
+  }) async {
+    await _client.initialize();
+    return _client._serializeCommand(() async {
+      final trip = await _tripStore.getTripForOwner(_owner, tripId);
+      if (trip == null) {
+        throw const TrackingOwnershipException(
+          code: 'owner_scope_conflict',
+          message: 'The Trip is not available in this owner scope.',
+        );
+      }
+      final readiness = await _client._requireReadinessForNativeStart();
+      final selectedConfig = config ??
+          (trip.currentLegTrackId == null
+              ? _client.configuration.defaultTrackingConfig
+              : (await _client._store.getTrack(trip.currentLegTrackId!))
+                      ?.config ??
+                  _client.configuration.defaultTrackingConfig);
+      final prepared = await _tripStore.prepareNextTripLeg(
+        owner: _owner,
+        tripId: trip.id,
+        config: selectedConfig,
+        operationId: operationId ?? const Uuid().v4(),
+        confirmCompletedTripContinuation: confirmCompletedTripContinuation,
+      );
+      final initialStatus = prepared.track.status;
+      final disposition = prepared.created
+          ? TripContinueDisposition.createdLeg
+          : initialStatus == TrackStatus.interrupted ||
+                  initialStatus == TrackStatus.paused
+              ? TripContinueDisposition.resumedInterruptedLeg
+              : TripContinueDisposition.reusedActiveLeg;
+      try {
+        if (prepared.created) {
+          await _client._store.markTrackActive(prepared.track.id);
+          _client._motionGate = MotionGate(selectedConfig);
+          _client._acceptingLocations = true;
+          await _client._bindNativeCommandLease(prepared.track.id);
+          await _client._tracker.start(
+            trackId: prepared.track.id,
+            config: selectedConfig,
+          );
+          _client._beginFixAcquisition(
+            (await _client._store.getTrack(prepared.track.id))!,
+          );
+          _client._scheduleBatchUploads(prepared.track.id, selectedConfig);
+        } else if (initialStatus == TrackStatus.interrupted ||
+            initialStatus == TrackStatus.paused) {
+          await _client._resumeTrack(
+            prepared.track.id,
+            requestPermission: false,
+            precheckedReadiness: readiness,
+          );
+        } else {
+          await _client._activateExistingActiveTrack(prepared.track);
+        }
+        await _tripStore.markTripOperationStage(
+          operationRecordId: prepared.operation.id,
+          stage: TripOperationStage.completed,
+        );
+      } on Object {
+        final current = await _client._store.getTrack(prepared.track.id);
+        if (current != null &&
+            (current.status == TrackStatus.starting ||
+                current.status == TrackStatus.active)) {
+          await _client._store.interruptTrack(
+            current.id,
+            reason: 'trip_continue_native_start_failed',
+          );
+        }
+        await _tripStore.markTripOperationStage(
+          operationRecordId: prepared.operation.id,
+          stage: TripOperationStage.failed,
+        );
+        rethrow;
+      }
+      _client._emitStatus(
+        TrackerStatus(
+          lifecycle: TrackerLifecycle.tracking,
+          trackId: prepared.track.id,
+        ),
+      );
+      _history.add(TrackHistoryEvent(
+        kind: prepared.created
+            ? TrackHistoryChangeKind.created
+            : TrackHistoryChangeKind.updated,
+        trackId: prepared.track.id,
+      ));
+      final bundle = await _tripStore.loadTripBundleForOwner(_owner, trip.id);
+      return TripContinueResult(
+        trip: bundle.trip,
+        leg: bundle.legs.firstWhere(
+          (leg) => leg.trackId == prepared.track.id,
+        ),
+        disposition: disposition,
+      );
+    });
+  }
+
+  @override
+  Future<TripLifecycleResult> completeTrip(
+    String tripId, {
+    String reason = 'trip_completed',
+    String? operationId,
+  }) async {
+    final trip = await _tripStore.getTripForOwner(_owner, tripId);
+    if (trip == null) {
+      throw const TrackingOwnershipException(
+        code: 'owner_scope_conflict',
+        message: 'The Trip is not available in this owner scope.',
+      );
+    }
+    if (trip.status == TripStatus.completed) {
+      final outbox = _client._store;
+      if (outbox is TripUploadOutboxRepository) {
+        await (outbox as TripUploadOutboxRepository).enqueueTripCompletion(
+          owner: _owner,
+          tripId: trip.id,
+        );
+      }
+      final bundle = await _tripStore.loadTripBundleForOwner(_owner, trip.id);
+      return TripLifecycleResult(
+        trip: bundle.trip,
+        leg: bundle.legs.last,
+        status: _client.currentStatus,
+      );
+    }
+    return _finishTrip(
+      trip,
+      reason: reason,
+      operationId: operationId ?? const Uuid().v4(),
+      completeTrip: true,
+    );
+  }
+
+  Future<TripLifecycleResult> _finishTrip(
+    Trip trip, {
+    required String reason,
+    required String operationId,
+    required bool completeTrip,
+  }) async {
+    await _client.initialize();
+    return _client._serializeCommand(() async {
+      final refreshed = await _tripStore.getTripForOwner(_owner, trip.id);
+      if (refreshed == null || refreshed.currentLegTrackId == null) {
+        throw const TrackingTripException(
+          code: 'trip_operation_conflict',
+          message: 'The Trip has no current leg.',
+        );
+      }
+      final trackId = refreshed.currentLegTrackId!;
+      final track = await _requireOwnedTrack(trackId);
+      final operation = await _tripStore.beginTripOperation(
+        owner: _owner,
+        tripId: refreshed.id,
+        trackId: track.id,
+        type: completeTrip
+            ? TripOperationType.complete
+            : TripOperationType.endDay,
+        operationId: operationId,
+        reason: reason,
+      );
+      final nativeRunning = await _client._tracker.isRunning();
+      final nativeState = await _client._tracker.runtimeState();
+      if (nativeRunning &&
+          nativeState.trackId != null &&
+          nativeState.trackId != track.id) {
+        throw TrackingTripException(
+          code: 'active_trip_conflict',
+          message: 'Native capture belongs to a different Trip.',
+          tripId: refreshed.id,
+        );
+      }
+      _client._acceptingLocations = false;
+      try {
+        if (nativeRunning || nativeState.trackId == track.id) {
+          await _client._bindNativeCommandLease(track.id);
+          await _client._tracker.stop(trackId: track.id, reason: reason);
+          await _client._waitUntilNativeStopped();
+        }
+      } on Object {
+        _client._acceptingLocations = true;
+        rethrow;
+      }
+      await _tripStore.markTripOperationStage(
+        operationRecordId: operation.id,
+        stage: TripOperationStage.nativeStopped,
+      );
+      await _client._pointTail;
+      await _client._drainPendingNativeLocations(trackId: track.id);
+      if (completeTrip) {
+        await _tripStore.completeTripAfterLegCompletion(
+          owner: _owner,
+          tripId: refreshed.id,
+          trackId: track.id,
+          reason: reason,
+          operationId: operationId,
+        );
+        final outbox = _client._store;
+        if (outbox is TripUploadOutboxRepository) {
+          await (outbox as TripUploadOutboxRepository).enqueueTripCompletion(
+            owner: _owner,
+            tripId: refreshed.id,
+          );
+        }
+      } else {
+        await _tripStore.suspendTripAfterLegCompletion(
+          owner: _owner,
+          tripId: refreshed.id,
+          trackId: track.id,
+          reason: reason,
+          operationId: operationId,
+        );
+      }
+      await _client._releaseNativeCommandLease(track.id);
+      _client._clearFixAcquisition();
+      _client._cancelBatchUploads(track.id);
+      _client
+          ._emitStatus(const TrackerStatus(lifecycle: TrackerLifecycle.idle));
+      final batchUploader = _client._batchUploader;
+      if (batchUploader != null) {
+        await batchUploader.enqueueCompletion(track.id);
+        unawaited(_client._finishUpload(track.id, batchUploader));
+      }
+      _history.add(TrackHistoryEvent(
+        kind: TrackHistoryChangeKind.updated,
+        trackId: track.id,
+      ));
+      final bundle =
+          await _tripStore.loadTripBundleForOwner(_owner, refreshed.id);
+      return TripLifecycleResult(
+        trip: bundle.trip,
+        leg: bundle.legs.firstWhere((leg) => leg.trackId == track.id),
+        status: _client.currentStatus,
+      );
+    });
+  }
+
+  @override
+  Future<Trip?> getTrip(String tripId) =>
+      _tripStore.getTripForOwner(_owner, tripId);
+
+  @override
+  Future<TripPage> listTripPage(TripQuery query) {
+    _requireOwner(query.owner);
+    return _tripStore.listTripPage(query);
+  }
+
+  @override
+  Future<TripBundle> loadTripBundle(String tripId) =>
+      _tripStore.loadTripBundleForOwner(_owner, tripId);
+
+  @override
+  Future<RouteGeometryReport> assembleTripRouteGeometry(
+    String tripId, {
+    RouteGeometryContinuity continuity =
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+  }) async {
+    final tripBundle = await _tripStore.loadTripBundleForOwner(_owner, tripId);
+    final sourceParts = <RouteGeometrySourcePart>[];
+    for (final leg in tripBundle.legs) {
+      final trackBundle = await _client._store.loadTrackBundle(leg.trackId);
+      final safeLegacyAfterIds = _client._store is LegacyGapEvidenceRepository
+          ? await (_client._store as LegacyGapEvidenceRepository)
+              .safeLegacyAutomaticAfterSegmentIds(leg.trackId)
+          : const <String>{};
+      sourceParts.addAll(
+        trackBundle.segments.map(
+          (source) => RouteGeometrySourcePart(
+            legNumber: leg.legNumber,
+            segment: source.segment,
+            points: source.points,
+            legacyAutomaticGapEligible:
+                safeLegacyAfterIds.contains(source.segment.id),
+          ),
+        ),
+      );
+    }
+    return const RouteGeometryAssembler().assemble(
+      sourceParts: sourceParts,
+      gaps: tripBundle.gaps,
+      continuity: continuity,
+    );
+  }
+
+  @override
+  Future<TripExportResult> exportTrip({
+    required String tripId,
+    required TrackExportFormat format,
+    TrackExportOptions options = const TrackExportOptions(),
+    String? fileName,
+  }) async {
+    await _client.initialize();
+    return TripExportService(
+      repository: _client._store,
+      fileWriter: _client._exportFileWriter!,
+    ).exportTrip(
+      owner: _owner,
+      tripId: tripId,
+      format: format,
+      options: options,
+      fileName: fileName,
+    );
+  }
+
+  @override
+  Future<void> deleteTrip(String tripId) async {
+    await _client.initialize();
+    final bundle = await _tripStore.loadTripBundleForOwner(_owner, tripId);
+    if (bundle.trip.status == TripStatus.active ||
+        bundle.trip.status == TripStatus.suspended) {
+      throw TrackingTripException(
+        code: 'trip_not_terminal',
+        message: 'Only a terminal Trip can be deleted.',
+        tripId: tripId,
+      );
+    }
+
+    // Managed snapshots and native journal entries live outside the Trip
+    // relational cascade, so remove them before the irreversible DB delete.
+    final managedExports = TrackExportServiceV2(
+      repository: _client._store,
+      owner: _owner,
+      directoryName: _client.configuration.exportDirectoryName,
+    );
+    for (final leg in bundle.legs) {
+      if (_client._store is ManagedExportRepository) {
+        final exports = await managedExports.listManagedExports(leg.trackId);
+        for (final export in exports.where(
+          (item) => item.state == ManagedExportState.committed.name,
+        )) {
+          await managedExports.deleteManagedExport(export.id);
+        }
+      }
+      final tracker = _client._tracker;
+      if (tracker is TrackScopedNativeDataAdapter) {
+        await (tracker as TrackScopedNativeDataAdapter)
+            .clearNativeTrackData(leg.trackId);
+      }
+    }
+    await _tripStore.deleteTripForOwner(_owner, tripId);
+    _history.add(
+      TrackHistoryEvent(kind: TrackHistoryChangeKind.deleted),
+    );
+  }
+
   @override
   Future<TrackStartResult> startNewTrack(TrackStartRequest request) async {
     _requireOwner(request.owner);
@@ -2930,6 +3752,40 @@ final class _OwnerBoundTrackingController
       owner: _owner,
       trackId: trackId,
       geometry: geometry,
+    );
+  }
+
+  @override
+  Future<RouteGeometryReport> assembleTrackRouteGeometry(
+    String trackId, {
+    RouteGeometryContinuity continuity =
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+  }) async {
+    await _requireOwnedTrack(trackId);
+    final bundle = await _client._store.loadTrackBundle(trackId);
+    final continuityStore = _client._store is ContinuityTrackRepository
+        ? _client._store as ContinuityTrackRepository
+        : null;
+    final legacyStore = _client._store is LegacyGapEvidenceRepository
+        ? _client._store as LegacyGapEvidenceRepository
+        : null;
+    final gaps = await continuityStore?.listContinuityGaps(trackId) ??
+        const <TrackingContinuityGap>[];
+    final safeLegacyAfterIds =
+        await legacyStore?.safeLegacyAutomaticAfterSegmentIds(trackId) ??
+            const <String>{};
+    return const RouteGeometryAssembler().assemble(
+      sourceParts: bundle.segments.map(
+        (source) => RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: source.segment,
+          points: source.points,
+          legacyAutomaticGapEligible:
+              safeLegacyAfterIds.contains(source.segment.id),
+        ),
+      ),
+      gaps: gaps,
+      continuity: continuity,
     );
   }
 
