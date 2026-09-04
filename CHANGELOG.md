@@ -1,5 +1,32 @@
 ## Unreleased
 
+- Added schema 13 activity provenance/freshness, bounded coordinate-free
+  motion-evidence persistence, severity-rated rejected-fix quality runs, and
+  privacy-safe quality summaries.
+- Added opt-in low-power and enhanced sensor fusion on Android/iOS using
+  steps/pedometer, significant motion, and bounded ambiguity probes; compass
+  and gyro never generate coordinates, and all listeners stop with capture.
+- Added Android Activity Transition input, probable-activity distributions,
+  fresh high-fidelity requests, and stale/unknown moving-profile fallback;
+  added equivalent iOS freshness, pedometer, and immediate-fix behavior.
+- Added `RouteCaptureIntent` and walking/cycling/vehicle sampling defaults while
+  preserving individual configuration overrides.
+- Added persisted `MultiDayRoutePresentation` modes and shared
+  `connectDailyLegs` topology across maps and GeoJSON/KML/GPX Trip exports.
+- Added deterministic uncertainty-aware spike smoothing plus a bounded,
+  vendor-neutral `RouteGeometryProcessor` adapter with raw fallback and
+  immutable processor provenance.
+- Updated the example with start-time capture/fusion/presentation controls,
+  distinct activity confidence and GPS uncertainty, fused-motion sources,
+  quality/visible-gap counts, filtered markers, and stored Trip map defaults.
+- Added a coordinate-free physical-qualification template generator and
+  strengthened its validator to enforce fusion, capture-intent, carry-state,
+  power-state, metric-range, and zero-raw-sensor-persistence coverage.
+- Added a physical-device lifecycle harness with a bounded post-install
+  permission window for checking active/pause/resume/complete service and
+  optional-sensor teardown without treating simulator runs as accuracy or
+  battery evidence.
+
 - Added schema 12 continuity evidence and atomic point/topology persistence so
   a healthy stationary or rejected-fix run no longer creates an artificial
   route break solely because the accepted-point gap exceeded five minutes.

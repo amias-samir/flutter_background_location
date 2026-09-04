@@ -8,11 +8,15 @@ final class RecordedTripSummary {
     required this.trip,
     required this.segmentCount,
     required this.gapCount,
+    this.qualityEventCount = 0,
+    this.visibleGapCount = 0,
   });
 
   final Trip trip;
   final int segmentCount;
   final int gapCount;
+  final int qualityEventCount;
+  final int visibleGapCount;
 }
 
 enum RecordedTripAction {
@@ -180,7 +184,11 @@ class RecordedTripsSection extends StatelessWidget {
               ),
               _TripDetail(
                 icon: Icons.warning_amber_rounded,
-                label: '${summary.gapCount} gap(s)',
+                label: '${summary.qualityEventCount} quality event(s)',
+              ),
+              _TripDetail(
+                icon: Icons.broken_image_outlined,
+                label: '${summary.visibleGapCount} visible gap(s)',
               ),
             ],
           ),

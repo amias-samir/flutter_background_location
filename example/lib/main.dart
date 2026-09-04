@@ -71,6 +71,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   TrackingSessionSnapshot? _session;
   TrackRecordRetentionPolicy _retention = TrackRecordRetentionPolicy.keepAll;
   TrackingAccuracy _accuracy = TrackingAccuracy.high;
+  RouteCaptureIntent _captureIntent = RouteCaptureIntent.adaptive;
+  MotionFusionMode _motionFusionMode = MotionFusionMode.platformActivityOnly;
+  MultiDayRoutePresentation _routePresentation =
+      MultiDayRoutePresentation.separateRecordedParts;
   List<Track> _tracks = const <Track>[];
   List<RecordedTripSummary> _trips = const <RecordedTripSummary>[];
   String? _historyCursor;
@@ -183,6 +187,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final summaries = await Future.wait<RecordedTripSummary>(
       page.items.map((trip) async {
         final bundle = await tripTracking.loadTripBundle(trip.id);
+        final quality = tracking is TrackingQualityController
+            ? await (tracking as TrackingQualityController).tripQualitySummary(
+                trip.id,
+              )
+            : null;
         var segmentCount = 0;
         for (final leg in bundle.legs) {
           final track = await _tracking!.getTrack(leg.trackId);
@@ -192,6 +201,9 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
           trip: trip,
           segmentCount: segmentCount,
           gapCount: bundle.gaps.length,
+          qualityEventCount: quality?.qualityRunCount ?? bundle.gaps.length,
+          visibleGapCount:
+              quality?.visibleQualityRunCount ?? bundle.gaps.length,
         );
       }),
     );
@@ -285,12 +297,19 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     if (routeId == null) return;
     final config = TrackingConfig(
       accuracy: _accuracy,
+      captureIntent: _captureIntent,
+      motionFusionMode: _motionFusionMode,
       mockLocationPolicy: MockLocationPolicy.flag,
     );
     final tracking = _tracking!;
     if (tracking is MultiDayTripController) {
       await (tracking as MultiDayTripController).startTrip(
-        TripStartRequest(routeId: routeId, config: config, dayLabel: 'Day 1'),
+        TripStartRequest(
+          routeId: routeId,
+          config: config,
+          dayLabel: 'Day 1',
+          routePresentation: _routePresentation,
+        ),
       );
     } else {
       await tracking.startNewTrack(
@@ -495,10 +514,6 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         tripId: tripId,
         format: format,
         fileName: name,
-        options: const TrackExportOptions(
-          geometryContinuity:
-              RouteGeometryContinuity.mergeAutomaticCallbackGaps,
-        ),
       );
       if (mounted) {
         setState(
@@ -545,6 +560,8 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         trip.id,
         config: TrackingConfig(
           accuracy: _accuracy,
+          captureIntent: trip.captureIntent,
+          motionFusionMode: _motionFusionMode,
           mockLocationPolicy: MockLocationPolicy.flag,
         ),
         confirmCompletedTripContinuation: trip.status == TripStatus.completed,
@@ -717,9 +734,18 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                 TrackingConfigurationControls(
                   retention: _retention,
                   accuracy: _accuracy,
+                  captureIntent: _captureIntent,
+                  routePresentation: _routePresentation,
+                  motionFusionMode: _motionFusionMode,
                   enabled: canConfigure,
                   onRetentionChanged: _changeRetention,
                   onAccuracyChanged: _changeAccuracy,
+                  onCaptureIntentChanged: (value) =>
+                      setState(() => _captureIntent = value),
+                  onRoutePresentationChanged: (value) =>
+                      setState(() => _routePresentation = value),
+                  onMotionFusionModeChanged: (value) =>
+                      setState(() => _motionFusionMode = value),
                 ),
                 const SizedBox(height: 12),
                 TrackingActionPanel(

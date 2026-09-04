@@ -54,6 +54,8 @@ void main() {
       const TripStartRequest(
         routeId: 'three_day_route',
         operationId: 'start-operation',
+        routePresentation: MultiDayRoutePresentation.connectDailyLegs,
+        config: TrackingConfig(captureIntent: RouteCaptureIntent.walking),
       ),
     );
     final replayedStart = await controller.startTrip(
@@ -105,6 +107,11 @@ void main() {
       everyElement(TrackStatus.completed),
     );
     expect(bundle.trip.routeId, started.trip.routeId);
+    expect(
+      bundle.trip.routePresentation,
+      MultiDayRoutePresentation.connectDailyLegs,
+    );
+    expect(bundle.trip.captureIntent, RouteCaptureIntent.walking);
 
     await harness.repository.deleteTracksExceptForOwner(
       _owner,

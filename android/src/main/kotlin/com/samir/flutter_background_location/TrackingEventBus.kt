@@ -22,6 +22,10 @@ internal object TrackingEventBus {
     var lastStatus: Map<String, Any?>? = null
         private set
 
+    @Volatile
+    var lastMotionEvidence: Map<String, Any?>? = null
+        private set
+
     fun addLocationListener(listener: (Map<String, Any?>) -> Unit) {
         locationListeners.add(listener)
         lastLocation?.let { dispatch(listener, it) }
@@ -67,6 +71,14 @@ internal object TrackingEventBus {
         dispatch(statusListeners, immutableEvent)
     }
 
+    fun emitMotionEvidence(event: Map<String, Any?>) {
+        lastMotionEvidence = LinkedHashMap(event)
+    }
+
+    fun clearMotionEvidence() {
+        lastMotionEvidence = null
+    }
+
     private fun dispatch(
         listeners: Set<(Map<String, Any?>) -> Unit>,
         event: Map<String, Any?>,
@@ -93,4 +105,3 @@ internal object TrackingEventBus {
         }
     }
 }
-

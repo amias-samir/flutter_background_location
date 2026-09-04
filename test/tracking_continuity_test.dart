@@ -172,6 +172,65 @@ void main() {
     expect(connected.inferredConnectorCount, 1);
   });
 
+  test('connect-days joins only boundaries between different Trip legs',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    addTearDown(harness.repository.close);
+    final trackId = await harness.createActiveTrack(trackId: 'daily-topology');
+    for (var segment = 0; segment < 3; segment += 1) {
+      if (segment > 0) {
+        await harness.repository.pauseTrack(trackId, reason: 'boundary');
+        await harness.repository.prepareResume(trackId);
+        await harness.repository.markTrackActive(trackId);
+      }
+      await harness.append(
+        trackId: trackId,
+        latitude: segment.toDouble(),
+        longitude: 0,
+      );
+      await harness.append(
+        trackId: trackId,
+        latitude: segment.toDouble(),
+        longitude: 0.001,
+      );
+    }
+    final bundle = await harness.repository.loadTrackBundle(trackId);
+    final sources = <RouteGeometrySourcePart>[
+      RouteGeometrySourcePart(
+        legNumber: 1,
+        segment: bundle.segments[0].segment,
+        points: bundle.segments[0].points,
+      ),
+      RouteGeometrySourcePart(
+        legNumber: 1,
+        segment: bundle.segments[1].segment,
+        points: bundle.segments[1].points,
+      ),
+      RouteGeometrySourcePart(
+        legNumber: 2,
+        segment: bundle.segments[2].segment,
+        points: bundle.segments[2].points,
+      ),
+    ];
+    final connectedDays = const RouteGeometryAssembler().assemble(
+      sourceParts: sources,
+      continuity: RouteGeometryContinuity.connectDailyLegs,
+    );
+    expect(connectedDays.geometryPartCount, 2);
+    expect(connectedDays.inferredConnectorCount, 1);
+    expect(
+      connectedDays.inferredConnectors.single.cause,
+      TrackingGapCause.overnightBoundary,
+    );
+    final continuous = const RouteGeometryAssembler().assemble(
+      sourceParts: sources,
+      continuity: RouteGeometryContinuity.connectAllChronologicalPoints,
+    );
+    expect(continuous.geometryPartCount, 1);
+    expect(continuous.inferredConnectorCount, 2);
+  });
+
   test(
     '266 accepted and 53 rejected fixes across 6:25 stay one segment',
     () async {

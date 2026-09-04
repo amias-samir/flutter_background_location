@@ -8,11 +8,13 @@ import 'package:uuid/uuid.dart';
 import '../domain/activity_snapshot.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
+import '../domain/motion_evidence.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
 import '../domain/track_segment.dart';
+import '../domain/tracker_status.dart';
 import '../domain/trip.dart';
 import '../domain/trip_query.dart';
 import '../domain/tracking_config.dart';
@@ -20,6 +22,7 @@ import '../domain/tracking_configuration_epoch.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_privacy.dart';
+import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 import 'track_repository.dart';
 import 'trip_repository.dart';
@@ -52,6 +55,7 @@ final class SqliteTrackRepository
         TripRepository,
         TripUploadOutboxRepository,
         TripPrivacyRepository,
+        QualityDiagnosticsRepository,
         DerivedGeometryRepository {
   SqliteTrackRepository({
     required this.path,
@@ -103,6 +107,8 @@ final class SqliteTrackRepository
 
   static DateTime _utcNow() => DateTime.now().toUtc();
   static String _newId() => const Uuid().v4();
+  static int? _sqliteBool(bool? value) =>
+      value == null ? null : (value ? 1 : 0);
 
   Database get _db {
     final value = _database;
@@ -134,7 +140,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 12,
+        version: 13,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -145,6 +151,7 @@ final class SqliteTrackRepository
     // local database opened by an earlier schema-12 build gains the additive
     // Trip completion outbox without a destructive version bump.
     await _createTripUploadOutboxSchema(_db);
+    await _createSchema13EvidenceTables(_db);
     await _repairInitialConfigurationEpochs(_db);
     await _emitCurrentTrack();
   }
@@ -231,6 +238,15 @@ final class SqliteTrackRepository
         persisted_at TEXT NOT NULL,
         activity_type TEXT NOT NULL,
         activity_confidence INTEGER NOT NULL,
+        activity_source TEXT,
+        activity_raw_type TEXT,
+        activity_evidence_state TEXT,
+        activity_age_ms INTEGER,
+        activity_probabilities_json TEXT,
+        native_foreground_state TEXT,
+        screen_interactive INTEGER,
+        battery_saver_active INTEGER,
+        motion_evidence_id TEXT,
         motion_state TEXT NOT NULL,
         provider TEXT,
         is_mocked INTEGER NOT NULL,
@@ -325,6 +341,7 @@ final class SqliteTrackRepository
     await _createUploadOutboxSchema(database);
     await _createDerivedGeometrySchema(database);
     await _createContinuityAndTripSchema(database);
+    await _createSchema13EvidenceTables(database);
   }
 
   static Future<void> _upgradeSchema(
@@ -481,6 +498,59 @@ final class SqliteTrackRepository
       await _createContinuityAndTripSchema(database);
       await _backfillImplicitTrips(database);
     }
+    if (oldVersion < 13) {
+      final tripColumns = await database.rawQuery('PRAGMA table_info(trips)');
+      final tripNames = tripColumns.map((row) => row['name']).toSet();
+      const tripAdditions = <String, String>{
+        'route_presentation': "TEXT NOT NULL DEFAULT 'separateRecordedParts'",
+        'capture_intent': "TEXT NOT NULL DEFAULT 'adaptive'",
+        'quality_policy_version': 'INTEGER NOT NULL DEFAULT 1',
+      };
+      for (final addition in tripAdditions.entries) {
+        if (tripColumns.isNotEmpty && !tripNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE trips ADD COLUMN ${addition.key} ${addition.value}',
+          );
+        }
+      }
+      final pointColumns =
+          await database.rawQuery('PRAGMA table_info(track_points)');
+      final pointNames = pointColumns.map((row) => row['name']).toSet();
+      const pointAdditions = <String, String>{
+        'activity_source': 'TEXT',
+        'activity_raw_type': 'TEXT',
+        'activity_evidence_state': 'TEXT',
+        'activity_age_ms': 'INTEGER',
+        'activity_probabilities_json': 'TEXT',
+        'native_foreground_state': 'TEXT',
+        'screen_interactive': 'INTEGER',
+        'battery_saver_active': 'INTEGER',
+        'motion_evidence_id': 'TEXT',
+      };
+      for (final addition in pointAdditions.entries) {
+        if (pointColumns.isNotEmpty && !pointNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE track_points ADD COLUMN ${addition.key} ${addition.value}',
+          );
+        }
+      }
+      final derivedColumns =
+          await database.rawQuery('PRAGMA table_info(derived_geometry_points)');
+      final derivedNames = derivedColumns.map((row) => row['name']).toSet();
+      const derivedAdditions = <String, String>{
+        'processor_confidence': 'REAL',
+        'matched': 'INTEGER NOT NULL DEFAULT 1',
+      };
+      for (final addition in derivedAdditions.entries) {
+        if (derivedColumns.isNotEmpty && !derivedNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE derived_geometry_points ADD COLUMN '
+            '${addition.key} ${addition.value}',
+          );
+        }
+      }
+      await _createSchema13EvidenceTables(database);
+    }
   }
 
   static Future<void> _createContinuityAndTripSchema(
@@ -543,6 +613,9 @@ final class SqliteTrackRepository
         rejected_point_count INTEGER NOT NULL DEFAULT 0,
         measured_distance_m REAL NOT NULL DEFAULT 0,
         lifecycle_revision INTEGER NOT NULL DEFAULT 1,
+        route_presentation TEXT NOT NULL DEFAULT 'separateRecordedParts',
+        capture_intent TEXT NOT NULL DEFAULT 'adaptive',
+        quality_policy_version INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(current_leg_track_id) REFERENCES tracks(id) ON DELETE SET NULL,
@@ -602,6 +675,80 @@ final class SqliteTrackRepository
       ON trip_operations(stage, created_at)
     ''');
     await _createTripUploadOutboxSchema(database);
+  }
+
+  static Future<void> _createSchema13EvidenceTables(Database database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS track_motion_evidence (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        configuration_epoch_id TEXT,
+        fused_state TEXT NOT NULL,
+        confidence INTEGER NOT NULL,
+        policy_version INTEGER NOT NULL,
+        observed_at TEXT NOT NULL,
+        window_started_at TEXT,
+        window_ended_at TEXT,
+        supporting_sources_json TEXT NOT NULL,
+        conflicting_sources_json TEXT NOT NULL,
+        step_delta INTEGER NOT NULL DEFAULT 0,
+        significant_motion INTEGER NOT NULL DEFAULT 0,
+        accelerometer_sample_count INTEGER NOT NULL DEFAULT 0,
+        acceleration_motion_energy REAL,
+        gyroscope_sample_count INTEGER NOT NULL DEFAULT 0,
+        rotation_energy REAL,
+        compass_available INTEGER NOT NULL DEFAULT 0,
+        gps_displacement_evidence TEXT,
+        native_foreground_state TEXT,
+        screen_interactive INTEGER,
+        battery_saver_active INTEGER,
+        transition_reason TEXT NOT NULL,
+        selected_sampling_profile TEXT,
+        generation INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        FOREIGN KEY(configuration_epoch_id)
+          REFERENCES tracking_configuration_epochs(id) ON DELETE CASCADE,
+        CHECK(confidence >= 0 AND confidence <= 100),
+        CHECK(policy_version > 0),
+        CHECK(accelerometer_sample_count >= 0),
+        CHECK(gyroscope_sample_count >= 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_motion_evidence_track_observed
+      ON track_motion_evidence(track_id, observed_at DESC)
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS track_quality_runs (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        first_raw_sequence INTEGER NOT NULL,
+        last_raw_sequence INTEGER NOT NULL,
+        rejected_count INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        maximum_uncertainty_m REAL,
+        median_uncertainty_m REAL,
+        before_point_id TEXT,
+        after_point_id TEXT,
+        severity TEXT NOT NULL,
+        threshold_reason TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        FOREIGN KEY(before_point_id) REFERENCES track_points(id) ON DELETE SET NULL,
+        FOREIGN KEY(after_point_id) REFERENCES track_points(id) ON DELETE SET NULL,
+        CHECK(first_raw_sequence > 0),
+        CHECK(last_raw_sequence >= first_raw_sequence),
+        CHECK(rejected_count > 0),
+        CHECK(duration_ms >= 0),
+        CHECK(policy_version > 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_quality_runs_track_sequence
+      ON track_quality_runs(track_id, first_raw_sequence)
+    ''');
   }
 
   static Future<void> _createTripUploadOutboxSchema(
@@ -721,6 +868,8 @@ final class SqliteTrackRepository
         sequence INTEGER NOT NULL,
         latitude REAL NOT NULL,
         longitude REAL NOT NULL,
+        processor_confidence REAL,
+        matched INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY(run_id, source_point_id),
         FOREIGN KEY(run_id) REFERENCES derived_geometry_runs(id)
           ON DELETE CASCADE,
@@ -1108,6 +1257,8 @@ final class SqliteTrackRepository
         'current_leg_track_id': trackId,
         'leg_count': 1,
         'lifecycle_revision': 1,
+        'capture_intent': config.captureIntent.name,
+        'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
         'created_at': _timestamp(now),
         'updated_at': _timestamp(now),
       });
@@ -1638,6 +1789,18 @@ final class SqliteTrackRepository
               !(continuity?.excludeConnectorFromMeasuredDistance ?? false)
           ? connectorDistance
           : 0.0;
+      final activity = request.activity.evaluatedAt(
+        request.sample.capturedAt,
+        configurationEpoch.resolvedConfig.activityFreshnessThreshold,
+      );
+      final motionEvidenceId = await _persistMotionEvidence(
+        transaction,
+        trackId: request.trackId,
+        configurationEpochId: configurationEpoch.id,
+        evidence: request.sample.capturedMotionEvidence,
+        samplingProfile: request.sample.samplingProfile,
+        now: now,
+      );
       final id = _idGenerator();
       await transaction.insert('track_points', <String, Object?>{
         'id': id,
@@ -1655,8 +1818,25 @@ final class SqliteTrackRepository
         'heading_accuracy': request.sample.headingAccuracy,
         'captured_at': _timestamp(request.sample.capturedAt),
         'persisted_at': _timestamp(now),
-        'activity_type': request.activity.type.value,
-        'activity_confidence': request.activity.confidence,
+        'activity_type': activity.type.value,
+        'activity_confidence': activity.confidence,
+        'activity_source': activity.source,
+        'activity_raw_type': activity.rawType,
+        'activity_evidence_state': activity.evidenceState.name,
+        'activity_age_ms': activity.age?.inMilliseconds,
+        'activity_probabilities_json': jsonEncode(<String, int>{
+          for (final entry in activity.probabilities.entries)
+            entry.key.value: entry.value,
+        }),
+        'native_foreground_state':
+            request.sample.capturedMotionEvidence?.nativeForegroundState,
+        'screen_interactive': _sqliteBool(
+          request.sample.capturedMotionEvidence?.screenInteractive,
+        ),
+        'battery_saver_active': _sqliteBool(
+          request.sample.capturedMotionEvidence?.batterySaverActive,
+        ),
+        'motion_evidence_id': motionEvidenceId,
         'motion_state': request.motionState.name,
         'provider': request.sample.provider,
         'is_mocked': request.sample.isMocked ? 1 : 0,
@@ -1806,6 +1986,20 @@ final class SqliteTrackRepository
         }
       }
 
+      if (request.accepted && previousAccepted != null) {
+        await _persistQualityRun(
+          transaction,
+          trackId: request.trackId,
+          beforePoint: previousAccepted,
+          afterPointId: id,
+          afterSequence: sequence,
+          maximumAcceptedAccuracyMeters:
+              configurationEpoch.resolvedConfig.maximumAcceptedAccuracyMeters,
+          policyVersion: configurationEpoch.qualityPolicyVersion,
+          now: now,
+        );
+      }
+
       await transaction.rawUpdate(
         '''
         UPDATE trips
@@ -1841,6 +2035,154 @@ final class SqliteTrackRepository
     });
     await _emitCurrentTrack();
     return result;
+  }
+
+  Future<String?> _persistMotionEvidence(
+    Transaction transaction, {
+    required String trackId,
+    required String configurationEpochId,
+    required MotionEvidenceSnapshot? evidence,
+    required SamplingProfile? samplingProfile,
+    required DateTime now,
+  }) async {
+    if (evidence == null) return null;
+    final observedAt = _timestamp(evidence.observedAt);
+    final recent = await transaction.query(
+      'track_motion_evidence',
+      columns: <String>['id', 'generation', 'fused_state', 'policy_version'],
+      where: 'track_id = ? AND observed_at = ?',
+      whereArgs: <Object?>[trackId, observedAt],
+      orderBy: 'created_at DESC',
+      limit: 1,
+    );
+    if (recent.isNotEmpty &&
+        recent.single['generation'] == evidence.generation &&
+        recent.single['fused_state'] == evidence.state.name &&
+        recent.single['policy_version'] == evidence.policyVersion) {
+      return recent.single['id']! as String;
+    }
+
+    final id = _idGenerator();
+    final duration = evidence.probeDuration;
+    await transaction.insert('track_motion_evidence', <String, Object?>{
+      'id': id,
+      'track_id': trackId,
+      'configuration_epoch_id': configurationEpochId,
+      'fused_state': evidence.state.name,
+      'confidence': evidence.confidence,
+      'policy_version': evidence.policyVersion,
+      'observed_at': observedAt,
+      'window_started_at': duration == null
+          ? null
+          : _timestamp(evidence.observedAt.subtract(duration)),
+      'window_ended_at': duration == null ? null : observedAt,
+      'supporting_sources_json': jsonEncode(
+        evidence.supportingSources.map((source) => source.name).toList(),
+      ),
+      'conflicting_sources_json': jsonEncode(
+        evidence.conflictingSources.map((source) => source.name).toList(),
+      ),
+      'step_delta': evidence.stepDetected ? 1 : 0,
+      'significant_motion': evidence.significantMotionDetected ? 1 : 0,
+      'accelerometer_sample_count': evidence.accelerometerSampleCount,
+      'acceleration_motion_energy': evidence.accelerationMotionEnergy,
+      'gyroscope_sample_count': evidence.gyroscopeSampleCount,
+      'rotation_energy': evidence.rotationEnergy,
+      'compass_available': evidence.compassAvailable ? 1 : 0,
+      'gps_displacement_evidence': evidence.gpsDisplacementEvidence,
+      'native_foreground_state': evidence.nativeForegroundState,
+      'screen_interactive': _sqliteBool(evidence.screenInteractive),
+      'battery_saver_active': _sqliteBool(evidence.batterySaverActive),
+      'transition_reason': evidence.reason,
+      'selected_sampling_profile': samplingProfile?.name,
+      'generation': evidence.generation,
+      'created_at': _timestamp(now),
+    });
+    // Retain only the newest coordinate-free summaries. Raw sensor samples are
+    // never stored, and long Trips cannot grow this table without a bound.
+    await transaction.rawDelete(
+      '''
+      DELETE FROM track_motion_evidence
+      WHERE track_id = ? AND id NOT IN (
+        SELECT id FROM track_motion_evidence
+        WHERE track_id = ?
+        ORDER BY observed_at DESC, created_at DESC
+        LIMIT 512
+      )
+      ''',
+      <Object?>[trackId, trackId],
+    );
+    return id;
+  }
+
+  Future<void> _persistQualityRun(
+    Transaction transaction, {
+    required String trackId,
+    required TrackPoint beforePoint,
+    required String afterPointId,
+    required int afterSequence,
+    required double maximumAcceptedAccuracyMeters,
+    required int policyVersion,
+    required DateTime now,
+  }) async {
+    final rows = await transaction.query(
+      'track_points',
+      columns: <String>[
+        'sequence',
+        'captured_at',
+        'horizontal_accuracy',
+        'rejection_reason',
+      ],
+      where: 'track_id = ? AND sequence > ? AND sequence < ? '
+          'AND accepted = 0',
+      whereArgs: <Object?>[trackId, beforePoint.sequence, afterSequence],
+      orderBy: 'sequence ASC',
+    );
+    if (rows.isEmpty) return;
+    final accuracy = rows
+        .map((row) => (row['horizontal_accuracy'] as num?)?.toDouble())
+        .whereType<double>()
+        .where((value) => value.isFinite && value >= 0)
+        .toList()
+      ..sort();
+    final firstAt =
+        DateTime.parse(rows.first['captured_at']! as String).toUtc();
+    final lastAt = DateTime.parse(rows.last['captured_at']! as String).toUtc();
+    final duration = lastAt.difference(firstAt);
+    final maximum = accuracy.isEmpty ? null : accuracy.last;
+    final median = accuracy.isEmpty
+        ? null
+        : accuracy.length.isOdd
+            ? accuracy[accuracy.length ~/ 2]
+            : (accuracy[accuracy.length ~/ 2 - 1] +
+                    accuracy[accuracy.length ~/ 2]) /
+                2;
+    final visible = rows.length >= 3 ||
+        duration >= const Duration(seconds: 30) ||
+        (maximum != null && maximum > maximumAcceptedAccuracyMeters * 1.5);
+    final reasons = rows
+        .map((row) => row['rejection_reason']?.toString())
+        .whereType<String>()
+        .toSet()
+        .toList()
+      ..sort();
+    await transaction.insert('track_quality_runs', <String, Object?>{
+      'id': _idGenerator(),
+      'track_id': trackId,
+      'first_raw_sequence': (rows.first['sequence']! as num).toInt(),
+      'last_raw_sequence': (rows.last['sequence']! as num).toInt(),
+      'rejected_count': rows.length,
+      'duration_ms': duration.isNegative ? 0 : duration.inMilliseconds,
+      'maximum_uncertainty_m': maximum,
+      'median_uncertainty_m': median,
+      'before_point_id': beforePoint.id,
+      'after_point_id': afterPointId,
+      'severity': visible ? 'visibleGap' : 'informational',
+      'threshold_reason':
+          reasons.isEmpty ? 'rejected_fix_run' : reasons.join(','),
+      'policy_version': policyVersion,
+      'created_at': _timestamp(now),
+    });
   }
 
   @override
@@ -1980,6 +2322,9 @@ final class SqliteTrackRepository
     required TrackingOwner owner,
     required String tripId,
     required String operationId,
+    MultiDayRoutePresentation routePresentation =
+        MultiDayRoutePresentation.separateRecordedParts,
+    RouteCaptureIntent captureIntent = RouteCaptureIntent.adaptive,
     String? reason,
   }) async {
     final operationRecordId = await _db.transaction((transaction) async {
@@ -1993,6 +2338,17 @@ final class SqliteTrackRepository
       );
       if (existing != null) return existing.id;
       final now = _clock();
+      await transaction.update(
+        'trips',
+        <String, Object?>{
+          'route_presentation': routePresentation.name,
+          'capture_intent': captureIntent.name,
+          'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+          'updated_at': _timestamp(now),
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[trip.id],
+      );
       final id = _idGenerator();
       await transaction.insert('trip_operations', <String, Object?>{
         'id': id,
@@ -5410,7 +5766,11 @@ final class SqliteTrackRepository
             point.latitude < -90 ||
             point.latitude > 90 ||
             point.longitude < -180 ||
-            point.longitude > 180) {
+            point.longitude > 180 ||
+            (point.confidence != null &&
+                (!point.confidence!.isFinite ||
+                    point.confidence! < 0 ||
+                    point.confidence! > 1))) {
           throw const TrackingStorageException(
             code: 'invalid_derived_geometry_point',
             message: 'A derived coordinate is invalid for this run.',
@@ -5443,6 +5803,8 @@ final class SqliteTrackRepository
             'sequence': point.sequence,
             'latitude': point.latitude,
             'longitude': point.longitude,
+            'processor_confidence': point.confidence,
+            'matched': point.matched ? 1 : 0,
           },
         );
       }
@@ -5600,6 +5962,8 @@ final class SqliteTrackRepository
         sequence: (row['sequence']! as num).toInt(),
         latitude: (row['latitude']! as num).toDouble(),
         longitude: (row['longitude']! as num).toDouble(),
+        confidence: (row['processor_confidence'] as num?)?.toDouble(),
+        matched: row['matched'] != 0,
       );
       result[point.sourcePointId] = point;
     }
@@ -5656,6 +6020,125 @@ final class SqliteTrackRepository
           ? null
           : DateTime.parse(row['completed_at']! as String).toUtc(),
     );
+  }
+
+  @override
+  Future<TrackingQualitySummary> trackQualitySummary({
+    required TrackingOwner owner,
+    required String trackId,
+  }) async {
+    final track = await getTrackForOwner(owner, trackId);
+    if (track == null) {
+      throw const TrackingOwnershipException(
+        code: 'track_not_found_in_owner_scope',
+        message: 'The route is not available in the current owner scope.',
+      );
+    }
+    return _qualitySummaryForTrackIds(<String>[trackId]);
+  }
+
+  @override
+  Future<TrackingQualitySummary> tripQualitySummary({
+    required TrackingOwner owner,
+    required String tripId,
+  }) async {
+    final trip = await getTripForOwner(owner, tripId);
+    if (trip == null) {
+      throw const TrackingOwnershipException(
+        code: 'trip_not_found_in_owner_scope',
+        message: 'The Trip is not available in the current owner scope.',
+      );
+    }
+    final rows = await _db.query(
+      'trip_legs',
+      columns: <String>['track_id'],
+      where: 'trip_id = ?',
+      whereArgs: <Object?>[tripId],
+      orderBy: 'leg_number ASC',
+    );
+    return _qualitySummaryForTrackIds(
+      rows.map((row) => row['track_id']! as String).toList(growable: false),
+    );
+  }
+
+  Future<TrackingQualitySummary> _qualitySummaryForTrackIds(
+    List<String> trackIds,
+  ) async {
+    if (trackIds.isEmpty) {
+      return const TrackingQualitySummary(
+        rawCallbackCount: 0,
+        acceptedPointCount: 0,
+        rejectedPointCount: 0,
+        qualityRunCount: 0,
+        visibleQualityRunCount: 0,
+        continuityGapCount: 0,
+        lifecycleBoundaryCount: 0,
+        staleActivityCount: 0,
+      );
+    }
+    final placeholders = List<String>.filled(trackIds.length, '?').join(',');
+    final pointRows = await _db.rawQuery('''
+      SELECT accepted, horizontal_accuracy, activity_evidence_state
+      FROM track_points WHERE track_id IN ($placeholders)
+      ''', trackIds);
+    final qualityRows = await _db.rawQuery('''
+      SELECT severity FROM track_quality_runs
+      WHERE track_id IN ($placeholders)
+      ''', trackIds);
+    final gapRows = await _db.rawQuery('''
+      SELECT cause FROM track_continuity_gaps
+      WHERE track_id IN ($placeholders)
+      ''', trackIds);
+    final acceptedAccuracy = <double>[];
+    final rejectedAccuracy = <double>[];
+    var accepted = 0;
+    var rejected = 0;
+    var stale = 0;
+    for (final row in pointRows) {
+      final isAccepted = row['accepted'] == 1;
+      if (isAccepted) {
+        accepted += 1;
+      } else {
+        rejected += 1;
+      }
+      if (row['activity_evidence_state'] == ActivityEvidenceState.stale.name) {
+        stale += 1;
+      }
+      final accuracy = (row['horizontal_accuracy'] as num?)?.toDouble();
+      if (accuracy != null && accuracy.isFinite && accuracy >= 0) {
+        (isAccepted ? acceptedAccuracy : rejectedAccuracy).add(accuracy);
+      }
+    }
+    const lifecycleCauses = <String>{
+      'explicitPause',
+      'nativeInterruption',
+      'processRestart',
+      'permissionOrServiceLoss',
+      'overnightBoundary',
+    };
+    return TrackingQualitySummary(
+      rawCallbackCount: pointRows.length,
+      acceptedPointCount: accepted,
+      rejectedPointCount: rejected,
+      qualityRunCount: qualityRows.length,
+      visibleQualityRunCount:
+          qualityRows.where((row) => row['severity'] != 'informational').length,
+      continuityGapCount: gapRows.length,
+      lifecycleBoundaryCount:
+          gapRows.where((row) => lifecycleCauses.contains(row['cause'])).length,
+      staleActivityCount: stale,
+      acceptedAccuracyP50Meters: _percentile(acceptedAccuracy, 0.50),
+      acceptedAccuracyP95Meters: _percentile(acceptedAccuracy, 0.95),
+      rejectedAccuracyP50Meters: _percentile(rejectedAccuracy, 0.50),
+      rejectedAccuracyP95Meters: _percentile(rejectedAccuracy, 0.95),
+    );
+  }
+
+  static double? _percentile(List<double> values, double percentile) {
+    if (values.isEmpty) return null;
+    values.sort();
+    final index = ((values.length - 1) * percentile).round();
+    return values[index];
   }
 
   @override

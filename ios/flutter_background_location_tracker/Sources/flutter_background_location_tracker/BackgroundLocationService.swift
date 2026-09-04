@@ -156,6 +156,22 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var configuration = TrackingConfiguration.defaults
   private var lastLocationEvent: [String: Any]?
   private var lastActivityEvent: [String: Any]?
+  private var lastMotionEvidence: [String: Any]?
+  private lazy var motionSensorFusion = MotionSensorFusion { [weak self] evidence in
+    DispatchQueue.main.async {
+      guard let self, self.lifecycle == .tracking || self.lifecycle == .starting else { return }
+      self.lastMotionEvidence = evidence
+      if evidence["state"] as? String == "moving" {
+        self.stationaryTransitionWorkItem?.cancel()
+        self.stationaryTransitionWorkItem = nil
+        self.resetStationaryCandidate()
+        self.transition(to: .moving)
+      } else if evidence["state"] as? String == "stationary" {
+        self.finishStationaryTransitionIfQualified()
+      }
+      self.emitStatus()
+    }
+  }
   private var lastEmittedLocation: CLLocation?
   private var lastReliableLocation: CLLocation?
   private var stationaryReferenceLocation: CLLocation?
@@ -416,7 +432,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     configureLocationManager(for: .moving)
     startBackgroundActivitySessionIfNeeded()
     startMotionUpdatesIfPossible()
+    motionSensorFusion.start(configuration: configuration)
     startConfiguredLocationUpdates()
+    // Start/Continue should actively acquire a fresh fix instead of waiting
+    // for a cached or deferred standard-location callback.
+    requestStationaryExitProbe()
 
     lifecycle = .tracking
     persistState()
@@ -522,6 +542,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         stopBackgroundActivitySession()
       }
       startConfiguredLocationUpdates()
+      motionSensorFusion.start(configuration: configuration)
     }
     persistState()
     emitStatus(message: "configuration_updated")
@@ -561,6 +582,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "iosTerminationRecoveryMode": configuration.terminationRecoveryMode.rawValue,
       "recoveredFromTermination": recoveredFromTermination,
     ]
+    if let lastMotionEvidence {
+      state["motionEvidence"] = lastMotionEvidence
+    }
     if let captureGenerationId = captureGeneration.id {
       state["captureGenerationId"] = captureGenerationId
     }
@@ -860,6 +884,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     stopBackgroundActivitySession()
     motionManager?.stopActivityUpdates()
     motionManager = nil
+    motionSensorFusion.stop()
+    lastMotionEvidence = nil
     stationaryTransitionWorkItem?.cancel()
     stationaryTransitionWorkItem = nil
     movingEvidence = 0
@@ -947,9 +973,25 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
     let type = event["type"] as? String ?? "unknown"
     let confidence = event["confidence"] as? Int ?? 0
+    let evidenceState = event["evidenceState"] as? String ?? "unavailable"
+
+    guard evidenceState == "fresh" else {
+      stationaryTransitionWorkItem?.cancel()
+      stationaryTransitionWorkItem = nil
+      resetStationaryCandidate()
+      movingEvidence = 0
+      motionSensorFusion.requestAmbiguityProbe()
+      if configuration.staleActivityFallback == "keepMovingProfile"
+        || configuration.captureIntent != "adaptive"
+      {
+        transition(to: .moving)
+      }
+      return
+    }
 
     if type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold {
       movingEvidence = 0
+      motionSensorFusion.requestAmbiguityProbe(stationaryCandidate: true)
       scheduleStationaryTransition()
       return
     }
@@ -961,6 +1003,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       confidence >= configuration.movingConfidenceThreshold
     else {
       movingEvidence = 0
+      motionSensorFusion.requestAmbiguityProbe()
+      if configuration.unknownMotionFallback == "keepMovingProfile"
+        || configuration.captureIntent != "adaptive"
+      {
+        transition(to: .moving)
+      }
       return
     }
 
@@ -986,18 +1034,37 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         return
       }
       self.stationaryTransitionWorkItem = nil
-      guard self.hasLowStationaryDisplacementEvidence() else {
-        self.resetStationaryCandidate()
-        self.emitStatus(message: "stationary_entry_rejected_gps_evidence")
-        return
-      }
-      self.transition(to: .stationary)
+      self.finishStationaryTransitionIfQualified()
     }
     stationaryTransitionWorkItem = workItem
     DispatchQueue.main.asyncAfter(
       deadline: .now() + configuration.stationaryTimeoutMs / 1_000,
       execute: workItem
     )
+  }
+
+  private func finishStationaryTransitionIfQualified() {
+    guard lifecycle == .tracking,
+      lastActivityEvent?["type"] as? String == "stationary"
+    else {
+      return
+    }
+    if configuration.motionFusionMode == "enhancedSensorFusion" {
+      guard let evidence = lastMotionEvidence,
+        evidence["state"] as? String == "stationary",
+        let observedAt = evidence["observedAt"] as? NSNumber,
+        max(0, Date().timeIntervalSince1970 * 1_000 - observedAt.doubleValue)
+          <= configuration.motionEvidenceFreshnessMs
+      else {
+        return
+      }
+    }
+    guard hasLowStationaryDisplacementEvidence() else {
+      resetStationaryCandidate()
+      emitStatus(message: "stationary_entry_rejected_gps_evidence")
+      return
+    }
+    transition(to: .stationary)
   }
 
   private func transition(to newProfile: TrackingProfile) {
@@ -1217,9 +1284,17 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       event["activityType"] = activity["type"]
       event["activityConfidence"] = activity["confidence"]
       event["activityTimestamp"] = activity["timestamp"]
+      event["activitySource"] = activity["source"]
+      event["activityRawType"] = activity["rawType"]
+      event["activityEvidenceState"] = activity["evidenceState"]
+      event["activityAgeMs"] = activity["ageMs"]
+      event["activityProbabilities"] = activity["probabilities"]
     } else {
       event["activityType"] = "unknown"
       event["activityConfidence"] = 0
+    }
+    if let lastMotionEvidence {
+      event["motionEvidence"] = lastMotionEvidence
     }
 
     if #available(iOS 15.0, *) {
@@ -1261,11 +1336,28 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       type = "unknown"
     }
 
+    let timestamp = epochMilliseconds(activity.startDate)
+    let ageMs = max(0, epochMilliseconds(Date()) - timestamp)
+    let evidenceState = Double(ageMs) <= configuration.activityFreshnessThresholdMs
+      ? "fresh" : "stale"
+    let normalizedConfidence = motionConfidence(activity.confidence)
+    var probabilities: [String: Int] = [:]
+    if activity.stationary { probabilities["stationary"] = normalizedConfidence }
+    if activity.walking { probabilities["walking"] = normalizedConfidence }
+    if activity.running { probabilities["running"] = normalizedConfidence }
+    if activity.cycling { probabilities["cycling"] = normalizedConfidence }
+    if activity.automotive { probabilities["automotive"] = normalizedConfidence }
+    if activity.unknown { probabilities["unknown"] = normalizedConfidence }
+
     var event: [String: Any] = [
       "type": type,
       "rawType": type,
-      "confidence": motionConfidence(activity.confidence),
-      "timestamp": epochMilliseconds(activity.startDate),
+      "confidence": normalizedConfidence,
+      "timestamp": timestamp,
+      "source": "ios_core_motion_activity",
+      "evidenceState": evidenceState,
+      "ageMs": ageMs,
+      "probabilities": probabilities,
       "stationary": activity.stationary,
       "walking": activity.walking,
       "running": activity.running,

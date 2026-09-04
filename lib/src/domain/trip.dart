@@ -9,6 +9,30 @@ import 'tracking_start.dart';
 /// Lifecycle of one user-visible journey containing one or more Track legs.
 enum TripStatus { active, suspended, completed, failed }
 
+/// Persisted presentation preference for a multi-day Trip.
+enum MultiDayRoutePresentation {
+  /// Preserve every recorded daily/lifecycle part.
+  separateRecordedParts,
+
+  /// Join only boundaries between consecutive daily legs.
+  connectDailyLegs,
+
+  /// Join every chronological accepted part with inferred connectors.
+  continuousPresentation,
+}
+
+/// Maps a persisted Trip preference to the shared geometry assembler.
+extension MultiDayRoutePresentationGeometry on MultiDayRoutePresentation {
+  RouteGeometryContinuity get geometryContinuity => switch (this) {
+        MultiDayRoutePresentation.separateRecordedParts =>
+          RouteGeometryContinuity.preserveEvidenceSegments,
+        MultiDayRoutePresentation.connectDailyLegs =>
+          RouteGeometryContinuity.connectDailyLegs,
+        MultiDayRoutePresentation.continuousPresentation =>
+          RouteGeometryContinuity.connectAllChronologicalPoints,
+      };
+}
+
 /// User-visible multi-day journey aggregate.
 final class Trip {
   const Trip({
@@ -24,6 +48,9 @@ final class Trip {
     required this.lifecycleRevision,
     required this.createdAt,
     required this.updatedAt,
+    this.routePresentation = MultiDayRoutePresentation.separateRecordedParts,
+    this.captureIntent = RouteCaptureIntent.adaptive,
+    this.qualityPolicyVersion = 1,
     this.routeId,
     this.suspendedAt,
     this.endedAt,
@@ -46,6 +73,9 @@ final class Trip {
   final int lifecycleRevision;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final MultiDayRoutePresentation routePresentation;
+  final RouteCaptureIntent captureIntent;
+  final int qualityPolicyVersion;
 
   bool get isContinuable =>
       status == TripStatus.suspended || status == TripStatus.completed;
@@ -70,6 +100,16 @@ final class Trip {
         lifecycleRevision: (row['lifecycle_revision']! as num).toInt(),
         createdAt: DateTime.parse(row['created_at']! as String).toUtc(),
         updatedAt: DateTime.parse(row['updated_at']! as String).toUtc(),
+        routePresentation: MultiDayRoutePresentation.values.firstWhere(
+          (value) => value.name == row['route_presentation'],
+          orElse: () => MultiDayRoutePresentation.separateRecordedParts,
+        ),
+        captureIntent: RouteCaptureIntent.values.firstWhere(
+          (value) => value.name == row['capture_intent'],
+          orElse: () => RouteCaptureIntent.adaptive,
+        ),
+        qualityPolicyVersion:
+            (row['quality_policy_version'] as num?)?.toInt() ?? 1,
       );
 }
 
@@ -83,6 +123,7 @@ final class TripLeg {
     required this.trackStatus,
     this.endedAt,
     this.dayLabel,
+    this.routePresentation = MultiDayRoutePresentation.separateRecordedParts,
   });
 
   final String tripId;
@@ -91,6 +132,7 @@ final class TripLeg {
   final DateTime startedAt;
   final DateTime? endedAt;
   final String? dayLabel;
+  final MultiDayRoutePresentation routePresentation;
   final TrackStatus trackStatus;
 
   factory TripLeg.fromDatabase(Map<String, Object?> row) => TripLeg(
@@ -126,6 +168,7 @@ final class TripStartRequest {
     this.requestedTripId,
     this.operationId,
     this.dayLabel,
+    this.routePresentation = MultiDayRoutePresentation.separateRecordedParts,
   });
 
   final String? routeId;
@@ -133,6 +176,12 @@ final class TripStartRequest {
   final String? requestedTripId;
   final String? operationId;
   final String? dayLabel;
+
+  /// Default topology used when this Trip is viewed or exported.
+  ///
+  /// Connected modes add labeled straight inferred connectors; they do not
+  /// create captured points or add their length to measured distance.
+  final MultiDayRoutePresentation routePresentation;
 }
 
 /// Result after the first Trip leg has entered native capture.

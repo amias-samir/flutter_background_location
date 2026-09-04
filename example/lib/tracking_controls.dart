@@ -91,13 +91,33 @@ class TrackingStatusCard extends StatelessWidget {
                 ),
                 _StatusMetric(
                   icon: Icons.query_stats,
-                  label: 'Confidence',
+                  label: 'Activity confidence',
                   value: value == null
                       ? 'unknown'
-                      : '${value.activity.confidence}%',
+                      : value.activity.evidenceState ==
+                            ActivityEvidenceState.fresh
+                      ? '${value.activity.confidence}% • fresh'
+                      : value.activity.evidenceState.name,
                 ),
                 _StatusMetric(
                   icon: Icons.gps_fixed,
+                  label: 'Location uncertainty',
+                  value: value?.lastPoint?.horizontalAccuracy == null
+                      ? 'unavailable'
+                      : '${value!.lastPoint!.horizontalAccuracy!.toStringAsFixed(1)} m',
+                ),
+                _StatusMetric(
+                  icon: Icons.sensors_rounded,
+                  label: 'Motion evidence',
+                  value: _motionEvidenceLabel(value?.motionEvidence),
+                ),
+                _StatusMetric(
+                  icon: Icons.battery_saver_outlined,
+                  label: 'Capture profile',
+                  value: value?.status.samplingProfile.name ?? 'unknown',
+                ),
+                _StatusMetric(
+                  icon: Icons.health_and_safety_outlined,
                   label: 'Fix',
                   value: value?.fixState.name ?? 'idle',
                 ),
@@ -151,6 +171,17 @@ class TrackingStatusCard extends StatelessWidget {
 
   static String _displayName(String value) =>
       value.isEmpty ? value : '${value[0].toUpperCase()}${value.substring(1)}';
+
+  static String _motionEvidenceLabel(MotionEvidenceSnapshot? evidence) {
+    if (evidence == null) return 'unavailable';
+    final sources = evidence.supportingSources
+        .map((source) => source.name)
+        .take(2)
+        .join('+');
+    return sources.isEmpty
+        ? evidence.state.name
+        : '${evidence.state.name} • $sources';
+  }
 }
 
 class _StatusMetric extends StatelessWidget {
@@ -196,16 +227,28 @@ class TrackingConfigurationControls extends StatelessWidget {
     super.key,
     required this.retention,
     required this.accuracy,
+    required this.captureIntent,
+    required this.routePresentation,
+    required this.motionFusionMode,
     required this.enabled,
     required this.onRetentionChanged,
     required this.onAccuracyChanged,
+    required this.onCaptureIntentChanged,
+    required this.onRoutePresentationChanged,
+    required this.onMotionFusionModeChanged,
   });
 
   final TrackRecordRetentionPolicy retention;
   final TrackingAccuracy accuracy;
+  final RouteCaptureIntent captureIntent;
+  final MultiDayRoutePresentation routePresentation;
+  final MotionFusionMode motionFusionMode;
   final bool enabled;
   final ValueChanged<TrackRecordRetentionPolicy> onRetentionChanged;
   final ValueChanged<TrackingAccuracy> onAccuracyChanged;
+  final ValueChanged<RouteCaptureIntent> onCaptureIntentChanged;
+  final ValueChanged<MultiDayRoutePresentation> onRoutePresentationChanged;
+  final ValueChanged<MotionFusionMode> onMotionFusionModeChanged;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -276,6 +319,81 @@ class TrackingConfigurationControls extends StatelessWidget {
             onChanged: enabled
                 ? (value) {
                     if (value != null) onAccuracyChanged(value);
+                  }
+                : null,
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<RouteCaptureIntent>(
+            initialValue: captureIntent,
+            decoration: const InputDecoration(
+              labelText: 'Capture intent',
+              helperText:
+                  'Walking keeps dense fixes when activity evidence is uncertain.',
+              prefixIcon: Icon(Icons.directions_walk_rounded),
+              border: OutlineInputBorder(),
+            ),
+            items: RouteCaptureIntent.values
+                .map(
+                  (value) =>
+                      DropdownMenuItem(value: value, child: Text(value.name)),
+                )
+                .toList(growable: false),
+            onChanged: enabled
+                ? (value) {
+                    if (value != null) onCaptureIntentChanged(value);
+                  }
+                : null,
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<MotionFusionMode>(
+            initialValue: motionFusionMode,
+            decoration: const InputDecoration(
+              labelText: 'Motion evidence',
+              helperText:
+                  'Optional sensors improve moving/stationary decisions, not coordinates.',
+              prefixIcon: Icon(Icons.sensors_rounded),
+              border: OutlineInputBorder(),
+            ),
+            items: MotionFusionMode.values
+                .map(
+                  (value) =>
+                      DropdownMenuItem(value: value, child: Text(value.name)),
+                )
+                .toList(growable: false),
+            onChanged: enabled
+                ? (value) {
+                    if (value != null) onMotionFusionModeChanged(value);
+                  }
+                : null,
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<MultiDayRoutePresentation>(
+            initialValue: routePresentation,
+            decoration: const InputDecoration(
+              labelText: 'Multi-day route display',
+              helperText:
+                  'Connected modes add labeled straight inferred lines.',
+              prefixIcon: Icon(Icons.route_rounded),
+              border: OutlineInputBorder(),
+            ),
+            items: MultiDayRoutePresentation.values
+                .map(
+                  (value) => DropdownMenuItem(
+                    value: value,
+                    child: Text(switch (value) {
+                      MultiDayRoutePresentation.separateRecordedParts =>
+                        'Keep recorded parts separate',
+                      MultiDayRoutePresentation.connectDailyLegs =>
+                        'Connect daily legs',
+                      MultiDayRoutePresentation.continuousPresentation =>
+                        'Continuous presentation',
+                    }),
+                  ),
+                )
+                .toList(growable: false),
+            onChanged: enabled
+                ? (value) {
+                    if (value != null) onRoutePresentationChanged(value);
                   }
                 : null,
           ),

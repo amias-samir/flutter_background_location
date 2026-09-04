@@ -109,6 +109,43 @@ normal presentation should select
 `RouteGeometryContinuity.mergeAutomaticCallbackGaps`; raw evidence remains
 available through `preserveEvidenceSegments`.
 
+## Schema 13 activity, sensor fusion, quality runs, and presentation
+
+Schema 13 is additive and migrates automatically. Existing Trips default to
+`MultiDayRoutePresentation.separateRecordedParts`, existing configurations
+decode with `RouteCaptureIntent.adaptive` and
+`MotionFusionMode.platformActivityOnly`, and raw Track/point coordinates are
+not rewritten.
+
+New point columns preserve activity source, raw type, probable distribution,
+age/freshness, and relevant foreground/power state. Coordinate-free fused
+motion transitions and bounded probe summaries use `track_motion_evidence`;
+the store retains at most 512 summaries per Track and never stores raw sensor
+vectors. Consecutive rejected fixes are grouped in `track_quality_runs` so a
+single minor rejection need not appear as a broken route marker.
+
+For a known walking workflow, opt in explicitly:
+
+```dart
+const TrackingConfig(
+  accuracy: TrackingAccuracy.high,
+  captureIntent: RouteCaptureIntent.walking,
+  motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
+);
+```
+
+To preserve the old topology, omit `routePresentation`. To join only the end
+of one day to the start of the next, pass
+`MultiDayRoutePresentation.connectDailyLegs` in `TripStartRequest`. A connected
+line is presentation-only; it does not add raw points or measured distance.
+
+Built-in derived geometry now also accepts
+`algorithm: 'uncertainty_weighted_smoothing'`. Hosts can implement
+`RouteGeometryProcessor` for opt-in road/footpath alignment. Processor pages
+are bounded and overlapping; invalid, distant, missing, or low-confidence
+matches fall back to raw anchors. Host applications remain responsible for
+network consent, credentials, licensing, cancellation, and privacy policy.
+
 ## Runtime configuration
 
 Feature-detect `TrackingConfigurationController` and call

@@ -172,6 +172,34 @@ void main() {
     );
   });
 
+  test('motion fusion is migration-safe and all controls round-trip', () {
+    const defaults = TrackingConfig();
+    const configured = TrackingConfig(
+      captureIntent: RouteCaptureIntent.walking,
+      motionFusionMode: MotionFusionMode.enhancedSensorFusion,
+      unknownMotionFallback: UnknownMotionFallback.preserveCurrentProfile,
+      activityFreshnessThreshold: Duration(seconds: 35),
+      motionEvidenceFreshness: Duration(seconds: 40),
+      sensorProbeDuration: Duration(seconds: 3),
+      sensorProbeCooldown: Duration(seconds: 25),
+      sensorProbeMaximumDurationPerHour: Duration(minutes: 1),
+    );
+
+    expect(defaults.captureIntent, RouteCaptureIntent.adaptive);
+    expect(defaults.motionFusionMode, MotionFusionMode.platformActivityOnly);
+    final restored = TrackingConfig.fromJson(configured.toJson());
+    expect(restored.captureIntent, RouteCaptureIntent.walking);
+    expect(restored.motionFusionMode, MotionFusionMode.enhancedSensorFusion);
+    expect(restored.unknownMotionFallback,
+        UnknownMotionFallback.preserveCurrentProfile);
+    expect(restored.activityFreshnessThreshold, const Duration(seconds: 35));
+    expect(restored.motionEvidenceFreshness, const Duration(seconds: 40));
+    expect(restored.sensorProbeDuration, const Duration(seconds: 3));
+    expect(restored.sensorProbeCooldown, const Duration(seconds: 25));
+    expect(
+        restored.sensorProbeMaximumDurationPerHour, const Duration(minutes: 1));
+  });
+
   test('legacy maps without a profile use the current high defaults', () {
     final config = TrackingConfig.fromMap(<String, Object?>{
       'movingIntervalMs': 12000,

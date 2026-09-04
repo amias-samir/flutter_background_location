@@ -1,4 +1,5 @@
 import 'activity_snapshot.dart';
+import 'motion_evidence.dart';
 import 'tracker_status.dart';
 
 /// What the operating system reported about mock/simulated location.
@@ -39,6 +40,7 @@ final class LocationSample {
     this.trackId,
     this.capturedActivity,
     this.capturedMotionState,
+    this.capturedMotionEvidence,
     this.nativeReceivedAt,
     this.providerTimeDeltaMsAtReceipt,
     this.monotonicFixNanos,
@@ -110,6 +112,9 @@ final class LocationSample {
   /// Native moving/stationary state captured with this fix.
   final MotionState? capturedMotionState;
 
+  /// Bounded sensor-fusion decision captured with this fix, when available.
+  final MotionEvidenceSnapshot? capturedMotionEvidence;
+
   /// Wall-clock time at which the native callback received this fix.
   final DateTime? nativeReceivedAt;
 
@@ -169,6 +174,7 @@ final class LocationSample {
         map['motionState'] ?? map['trackingProfile'] ?? map['samplingProfile'];
     final rawLifecycle = map['nativeLifecycle']?.toString().toLowerCase();
     final rawSampling = map['samplingProfile']?.toString().toLowerCase();
+    final rawMotionEvidence = map['motionEvidence'];
 
     return LocationSample(
       latitude: number('lat') ?? number('latitude') ?? double.nan,
@@ -212,22 +218,17 @@ final class LocationSample {
         'moving' => SamplingProfile.moving,
         _ => null,
       },
-      capturedActivity: hasActivity
-          ? ActivitySnapshot(
-              type: trackingActivityTypeFromValue(map['activityType']),
-              confidence: ((map['activityConfidence'] as num?)?.round() ?? 0)
-                  .clamp(0, 100),
-              recordedAt: timestamp(
-                map['activityTimestamp'],
-                fallback: capturedAt,
-              ),
-            )
-          : null,
+      capturedActivity: hasActivity ? ActivitySnapshot.fromMap(map) : null,
       capturedMotionState: switch (rawMotion?.toString().toLowerCase()) {
         'moving' => MotionState.moving,
         'stationary' => MotionState.stationary,
         _ => null,
       },
+      capturedMotionEvidence: rawMotionEvidence is Map
+          ? MotionEvidenceSnapshot.fromMap(
+              rawMotionEvidence.cast<Object?, Object?>(),
+            )
+          : null,
     );
   }
 }

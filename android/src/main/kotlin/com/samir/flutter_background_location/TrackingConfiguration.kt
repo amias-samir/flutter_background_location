@@ -13,6 +13,15 @@ internal data class TrackingConfiguration(
     val movingConfidenceThreshold: Int = 60,
     val movingConfirmationCount: Int = 2,
     val activityRecognitionIntervalMs: Long = 10_000L,
+    val captureIntent: String = "adaptive",
+    val activityFreshnessThresholdMs: Long = 45_000L,
+    val staleActivityFallback: String = "keepMovingProfile",
+    val motionFusionMode: String = "platformActivityOnly",
+    val unknownMotionFallback: String = "keepMovingProfile",
+    val motionEvidenceFreshnessMs: Long = 45_000L,
+    val sensorProbeDurationMs: Long = 4_000L,
+    val sensorProbeCooldownMs: Long = 30_000L,
+    val sensorProbeMaximumDurationPerHourMs: Long = 120_000L,
     val desiredAccuracy: String = "precised",
     val maximumAcceptedAccuracyMeters: Double = 20.0,
     val notificationChannelId: String = "active_location_tracking",
@@ -33,6 +42,15 @@ internal data class TrackingConfiguration(
         put(KEY_MOVING_CONFIDENCE, movingConfidenceThreshold)
         put(KEY_MOVING_CONFIRMATION_COUNT, movingConfirmationCount)
         put(KEY_ACTIVITY_INTERVAL, activityRecognitionIntervalMs)
+        put(KEY_CAPTURE_INTENT, captureIntent)
+        put(KEY_ACTIVITY_FRESHNESS, activityFreshnessThresholdMs)
+        put(KEY_STALE_ACTIVITY_FALLBACK, staleActivityFallback)
+        put(KEY_MOTION_FUSION_MODE, motionFusionMode)
+        put(KEY_UNKNOWN_MOTION_FALLBACK, unknownMotionFallback)
+        put(KEY_MOTION_EVIDENCE_FRESHNESS, motionEvidenceFreshnessMs)
+        put(KEY_SENSOR_PROBE_DURATION, sensorProbeDurationMs)
+        put(KEY_SENSOR_PROBE_COOLDOWN, sensorProbeCooldownMs)
+        put(KEY_SENSOR_PROBE_MAXIMUM_PER_HOUR, sensorProbeMaximumDurationPerHourMs)
         put(KEY_DESIRED_ACCURACY, desiredAccuracy)
         put(KEY_MAXIMUM_ACCEPTED_ACCURACY, maximumAcceptedAccuracyMeters)
         put(KEY_NOTIFICATION_CHANNEL_ID, notificationChannelId)
@@ -54,6 +72,16 @@ internal data class TrackingConfiguration(
         private const val KEY_MOVING_CONFIDENCE = "movingConfidenceThreshold"
         private const val KEY_MOVING_CONFIRMATION_COUNT = "movingConfirmationCount"
         private const val KEY_ACTIVITY_INTERVAL = "activityRecognitionIntervalMs"
+        private const val KEY_CAPTURE_INTENT = "captureIntent"
+        private const val KEY_ACTIVITY_FRESHNESS = "activityFreshnessThresholdMs"
+        private const val KEY_STALE_ACTIVITY_FALLBACK = "staleActivityFallback"
+        private const val KEY_MOTION_FUSION_MODE = "motionFusionMode"
+        private const val KEY_UNKNOWN_MOTION_FALLBACK = "unknownMotionFallback"
+        private const val KEY_MOTION_EVIDENCE_FRESHNESS = "motionEvidenceFreshnessMs"
+        private const val KEY_SENSOR_PROBE_DURATION = "sensorProbeDurationMs"
+        private const val KEY_SENSOR_PROBE_COOLDOWN = "sensorProbeCooldownMs"
+        private const val KEY_SENSOR_PROBE_MAXIMUM_PER_HOUR =
+            "sensorProbeMaximumDurationPerHourMs"
         private const val KEY_DESIRED_ACCURACY = "desiredAccuracy"
         private const val KEY_MAXIMUM_ACCEPTED_ACCURACY = "maximumAcceptedAccuracyMeters"
         private const val KEY_NOTIFICATION_CHANNEL_ID = "notificationChannelId"
@@ -101,6 +129,32 @@ internal data class TrackingConfiguration(
                 activityRecognitionIntervalMs =
                     values.long(KEY_ACTIVITY_INTERVAL, defaults.activityRecognitionIntervalMs)
                         .coerceAtLeast(1_000L),
+                captureIntent = values.string(KEY_CAPTURE_INTENT, defaults.captureIntent),
+                activityFreshnessThresholdMs =
+                    values.long(KEY_ACTIVITY_FRESHNESS, defaults.activityFreshnessThresholdMs)
+                        .coerceAtLeast(1_000L),
+                staleActivityFallback =
+                    values.string(KEY_STALE_ACTIVITY_FALLBACK, defaults.staleActivityFallback),
+                motionFusionMode =
+                    values.string(KEY_MOTION_FUSION_MODE, defaults.motionFusionMode),
+                unknownMotionFallback =
+                    values.string(KEY_UNKNOWN_MOTION_FALLBACK, defaults.unknownMotionFallback),
+                motionEvidenceFreshnessMs =
+                    values.long(
+                        KEY_MOTION_EVIDENCE_FRESHNESS,
+                        defaults.motionEvidenceFreshnessMs,
+                    ).coerceAtLeast(1_000L),
+                sensorProbeDurationMs =
+                    values.long(KEY_SENSOR_PROBE_DURATION, defaults.sensorProbeDurationMs)
+                        .coerceIn(500L, 30_000L),
+                sensorProbeCooldownMs =
+                    values.long(KEY_SENSOR_PROBE_COOLDOWN, defaults.sensorProbeCooldownMs)
+                        .coerceAtLeast(1_000L),
+                sensorProbeMaximumDurationPerHourMs =
+                    values.long(
+                        KEY_SENSOR_PROBE_MAXIMUM_PER_HOUR,
+                        defaults.sensorProbeMaximumDurationPerHourMs,
+                    ).coerceIn(1_000L, 3_600_000L),
                 desiredAccuracy = values.string(KEY_DESIRED_ACCURACY, defaults.desiredAccuracy),
                 maximumAcceptedAccuracyMeters = values.double(
                     KEY_MAXIMUM_ACCEPTED_ACCURACY,

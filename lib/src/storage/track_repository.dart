@@ -10,6 +10,7 @@ import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_privacy.dart';
+import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 
 final class TrackBundle {
@@ -227,6 +228,19 @@ abstract interface class StreamingTrackRepository {
     String? cursor,
     bool acceptedOnly = false,
     TrackDataSnapshot? snapshot,
+  });
+}
+
+/// Optional privacy-safe quality diagnostics supported by schema 13 stores.
+abstract interface class QualityDiagnosticsRepository {
+  Future<TrackingQualitySummary> trackQualitySummary({
+    required TrackingOwner owner,
+    required String trackId,
+  });
+
+  Future<TrackingQualitySummary> tripQualitySummary({
+    required TrackingOwner owner,
+    required String tripId,
   });
 }
 

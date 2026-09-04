@@ -23,6 +23,15 @@ struct TrackingConfiguration {
   let stationaryConfidenceThreshold: Int
   let movingConfidenceThreshold: Int
   let movingConfirmationCount: Int
+  let captureIntent: String
+  let activityFreshnessThresholdMs: Double
+  let staleActivityFallback: String
+  let motionFusionMode: String
+  let unknownMotionFallback: String
+  let motionEvidenceFreshnessMs: Double
+  let sensorProbeDurationMs: Double
+  let sensorProbeCooldownMs: Double
+  let sensorProbeMaximumDurationPerHourMs: Double
   let terminationRecoveryMode: IOSTerminationRecoveryMode
 
   static let defaults = TrackingConfiguration(dictionary: [:])
@@ -106,6 +115,40 @@ struct TrackingConfiguration {
       minimum: 1,
       maximum: 20
     )
+    captureIntent = (dictionary["captureIntent"] as? String) ?? "adaptive"
+    activityFreshnessThresholdMs = Self.number(
+      dictionary["activityFreshnessThresholdMs"],
+      defaultValue: 45_000,
+      minimum: 1_000
+    )
+    staleActivityFallback =
+      (dictionary["staleActivityFallback"] as? String) ?? "keepMovingProfile"
+    motionFusionMode =
+      (dictionary["motionFusionMode"] as? String) ?? "platformActivityOnly"
+    unknownMotionFallback =
+      (dictionary["unknownMotionFallback"] as? String) ?? "keepMovingProfile"
+    motionEvidenceFreshnessMs = Self.number(
+      dictionary["motionEvidenceFreshnessMs"],
+      defaultValue: 45_000,
+      minimum: 1_000
+    )
+    sensorProbeDurationMs = min(
+      Self.number(dictionary["sensorProbeDurationMs"], defaultValue: 4_000, minimum: 500),
+      30_000
+    )
+    sensorProbeCooldownMs = Self.number(
+      dictionary["sensorProbeCooldownMs"],
+      defaultValue: 30_000,
+      minimum: 1_000
+    )
+    sensorProbeMaximumDurationPerHourMs = min(
+      Self.number(
+        dictionary["sensorProbeMaximumDurationPerHourMs"],
+        defaultValue: 120_000,
+        minimum: 1_000
+      ),
+      3_600_000
+    )
     terminationRecoveryMode = IOSTerminationRecoveryMode(
       rawValue: (dictionary["iosTerminationRecoveryMode"] as? String) ?? ""
     ) ?? .interrupted
@@ -130,6 +173,15 @@ struct TrackingConfiguration {
       "stationaryConfidenceThreshold": stationaryConfidenceThreshold,
       "movingConfidenceThreshold": movingConfidenceThreshold,
       "movingConfirmationCount": movingConfirmationCount,
+      "captureIntent": captureIntent,
+      "activityFreshnessThresholdMs": activityFreshnessThresholdMs,
+      "staleActivityFallback": staleActivityFallback,
+      "motionFusionMode": motionFusionMode,
+      "unknownMotionFallback": unknownMotionFallback,
+      "motionEvidenceFreshnessMs": motionEvidenceFreshnessMs,
+      "sensorProbeDurationMs": sensorProbeDurationMs,
+      "sensorProbeCooldownMs": sensorProbeCooldownMs,
+      "sensorProbeMaximumDurationPerHourMs": sensorProbeMaximumDurationPerHourMs,
       "iosTerminationRecoveryMode": terminationRecoveryMode.rawValue,
     ]
   }

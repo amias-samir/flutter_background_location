@@ -41,6 +41,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await _scrollHome(tester, 500);
+
     final accuracySelector = find.byType(
       DropdownButtonFormField<TrackingAccuracy>,
     );
@@ -64,6 +66,7 @@ void main() {
       ),
       isTrue,
     );
+    await _scrollHome(tester, 700);
     final batterySettings = find.widgetWithText(
       OutlinedButton,
       'Battery settings',
@@ -76,6 +79,8 @@ void main() {
   testWidgets('start asks for a non-empty route identifier', (tester) async {
     await tester.pumpWidget(testApp());
     await tester.pumpAndSettle();
+
+    await _scrollHome(tester, 1000);
 
     final start = find.widgetWithText(FilledButton, 'Start').first;
     await tester.ensureVisible(start);
@@ -108,6 +113,8 @@ void main() {
       TrackingExampleApp(controllerFactory: (_, _) async => controller),
     );
     await tester.pumpAndSettle();
+
+    await _scrollHome(tester, 1000);
 
     expect(
       tester
@@ -275,6 +282,7 @@ void main() {
       treatment: TrackingGapTreatment.retainCurrentSegment,
       distanceTreatment: TrackingGapDistanceTreatment.excluded,
       continuityPolicyVersion: 1,
+      providerGap: const Duration(seconds: 31),
       createdAt: DateTime.utc(2026),
     );
     final report = const RouteGeometryAssembler().assemble(
@@ -295,6 +303,11 @@ void main() {
     expect(geometry.gapMarkers, hasLength(1));
     expect(geometry.gapCount, 1);
   });
+}
+
+Future<void> _scrollHome(WidgetTester tester, double distance) async {
+  await tester.drag(find.byType(ListView), Offset(0, -distance));
+  await tester.pumpAndSettle();
 }
 
 Track _completedTrack({int segmentCount = 1}) => Track(

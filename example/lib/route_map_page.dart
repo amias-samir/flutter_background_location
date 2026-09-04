@@ -64,7 +64,13 @@ class TripMapPage extends StatefulWidget {
 }
 
 class _TripMapPageState extends State<TripMapPage> {
-  var _continuity = RouteGeometryContinuity.mergeAutomaticCallbackGaps;
+  late RouteGeometryContinuity _continuity;
+
+  @override
+  void initState() {
+    super.initState();
+    _continuity = widget.trip.routePresentation.geometryContinuity;
+  }
 
   Future<RouteGeometry> _load() async {
     final results = await Future.wait<Object>(<Future<Object>>[
@@ -130,37 +136,48 @@ class _RouteMapScaffold extends StatelessWidget {
                         child: Text(
                           '${route.pointCount} points • '
                           '${route.geometryPartCount} drawable part(s) • '
-                          '${route.gapCount} gap(s)',
+                          '${route.gapCount} quality event(s) • '
+                          '${route.visibleGapCount} visible gap(s)',
                         ),
                       ),
                       const SizedBox(width: 8),
-                      FilterChip(
-                        avatar: const Icon(Icons.link_rounded, size: 18),
-                        label: const Text('Connect all'),
-                        selected:
-                            continuity ==
-                            RouteGeometryContinuity
-                                .connectAllChronologicalPoints,
-                        onSelected: (selected) => onContinuityChanged(
-                          selected
-                              ? RouteGeometryContinuity
-                                    .connectAllChronologicalPoints
-                              : RouteGeometryContinuity
-                                    .mergeAutomaticCallbackGaps,
-                        ),
+                      PopupMenuButton<RouteGeometryContinuity>(
+                        tooltip: 'Route continuity',
+                        initialValue: continuity,
+                        onSelected: onContinuityChanged,
+                        itemBuilder: (_) =>
+                            const <PopupMenuEntry<RouteGeometryContinuity>>[
+                              PopupMenuItem(
+                                value: RouteGeometryContinuity
+                                    .preserveEvidenceSegments,
+                                child: Text('Keep parts separate'),
+                              ),
+                              PopupMenuItem(
+                                value: RouteGeometryContinuity.connectDailyLegs,
+                                child: Text('Connect days'),
+                              ),
+                              PopupMenuItem(
+                                value: RouteGeometryContinuity
+                                    .connectAllChronologicalPoints,
+                                child: Text('Connect all'),
+                              ),
+                            ],
+                        icon: const Icon(Icons.alt_route_rounded),
                       ),
                     ],
                   ),
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: Text(
-                      continuity ==
-                              RouteGeometryContinuity
-                                  .connectAllChronologicalPoints
-                          ? 'Straight connectors are inferred and are not added to measured distance.'
-                          : 'Only proven automatic callback gaps are joined.',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
+                    child: Text(switch (continuity) {
+                      RouteGeometryContinuity.preserveEvidenceSegments =>
+                        'Recorded daily and lifecycle parts stay separate.',
+                      RouteGeometryContinuity.connectDailyLegs =>
+                        'Only daily boundaries receive straight inferred connectors.',
+                      RouteGeometryContinuity.connectAllChronologicalPoints =>
+                        'All parts receive straight inferred connectors; inferred distance is excluded.',
+                      RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
+                        'Only proven automatic callback gaps are joined.',
+                    }, style: Theme.of(context).textTheme.bodySmall),
                   ),
                 ],
               ),
@@ -360,6 +377,8 @@ class RouteGeometry {
   final int gapCount;
   final int inferredConnectorCount;
 
+  int get visibleGapCount => gapMarkers.length;
+
   maplibre.LatLng get start => points.first;
   maplibre.LatLng get destination => points.last;
 
@@ -387,6 +406,7 @@ class RouteGeometry {
     final markers = <maplibre.LatLng>[];
     final representedBoundaries = <String>{};
     for (final gap in gaps ?? report.gaps) {
+      if (!_isVisibleGap(gap)) continue;
       final beforeId = gap.beforePointId;
       final before = beforeId == null ? null : pointCoordinates[beforeId];
       final after = pointCoordinates[gap.afterPointId];
@@ -467,6 +487,18 @@ class RouteGeometry {
       point.latitude <= 90 &&
       point.longitude >= -180 &&
       point.longitude <= 180;
+
+  static bool _isVisibleGap(TrackingContinuityGap gap) {
+    if (gap.cause == TrackingGapCause.explicitPause ||
+        gap.cause == TrackingGapCause.nativeInterruption ||
+        gap.cause == TrackingGapCause.processRestart ||
+        gap.cause == TrackingGapCause.permissionOrServiceLoss ||
+        gap.cause == TrackingGapCause.overnightBoundary) {
+      return true;
+    }
+    return (gap.providerGap ?? Duration.zero) >= const Duration(seconds: 30) ||
+        (gap.straightLineDistanceMeters ?? 0) >= 30;
+  }
 
   static maplibre.LatLngBounds _bounds(List<maplibre.LatLng> points) {
     if (points.isEmpty) {

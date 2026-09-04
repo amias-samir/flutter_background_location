@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 11
+  route_database_schema: 13
   android_journal_schema: 2
   ios_journal_schema: 1
 change_classifications:
@@ -579,3 +579,70 @@ work_packages:
       - tool/quality/generate_release_evidence.dart
       - tool/quality/physical_qualification_protocol.json
       - tool/quality/validate_physical_qualification.dart
+  - id: ARQ-01-02A
+    phase: ARQ
+    title: Fresh activity evidence and battery-aware device sensor fusion
+    release_gate: stale evidence fails open and optional sensors remain bounded
+    required_before: sensor-fusion promotion
+    evidence:
+      - lib/src/domain/activity_snapshot.dart
+      - lib/src/domain/motion_evidence.dart
+      - lib/src/application/motion_evidence_reducer.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/MotionSensorFusion.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/MotionSensorFusion.swift
+      - test/motion_evidence_reducer_test.dart
+  - id: ARQ-00
+    phase: ARQ
+    title: Sanitized sparse multi-day characterization fixture
+    release_gate: supplied counts and discrepancy reproduce without geography
+    required_before: route-quality tuning
+    evidence:
+      - test/fixtures/multiday_sparse_route_v1.json
+      - test/multiday_sparse_fixture_test.dart
+  - id: ARQ-03-04
+    phase: ARQ
+    title: Coordinate-free quality diagnostics and capture intent
+    release_gate: rejected fixes and profile decisions are explainable
+    required_before: capture-preset promotion
+    evidence:
+      - lib/src/domain/tracking_quality.dart
+      - lib/src/domain/tracking_config.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/tracking_quality_persistence_test.dart
+      - test/tracking_config_test.dart
+  - id: ARQ-05-08
+    phase: ARQ
+    title: Truthful derived smoothing and host map matching
+    release_gate: spikes improve while real turns and raw fallback remain
+    required_before: derived geometry recommendation
+    evidence:
+      - lib/src/application/uncertainty_route_smoother.dart
+      - lib/src/domain/route_geometry_processor.dart
+      - lib/src/application/derived_geometry_service.dart
+      - test/uncertainty_route_smoother_test.dart
+      - test/route_geometry_processor_test.dart
+  - id: ARQ-06-09
+    phase: ARQ
+    title: Persisted multi-day topology and clarified example UX
+    release_gate: map and all Trip exports use the same topology decision
+    required_before: multi-day continuity release
+    evidence:
+      - lib/src/domain/trip.dart
+      - lib/src/application/route_geometry_assembler.dart
+      - lib/src/export/trip_export_service.dart
+      - test/tracking_continuity_test.dart
+      - test/trip_lifecycle_test.dart
+      - example/lib/route_map_page.dart
+      - example/lib/tracking_controls.dart
+  - id: ARQ-11
+    phase: ARQ
+    title: Physical pocket, background, accuracy, and battery qualification
+    release_gate: device matrix passes before changing compatibility defaults
+    required_before: low-power or enhanced fusion becomes default
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/physical_qualification_protocol.json
+      - tool/quality/generate_physical_qualification_template.dart
+      - tool/quality/validate_physical_qualification.dart
+      - test/physical_qualification_validator_test.dart
+      - example/integration_test/physical_device_lifecycle_test.dart

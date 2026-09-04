@@ -54,16 +54,21 @@ final class RouteGeometryAssembler {
     required RouteGeometryContinuity continuity,
     TrackingContinuityGap? gap,
     bool legacyAutomaticGapEligible = false,
+    bool crossesDailyLegBoundary = false,
   }) {
     final connect = switch (continuity) {
       RouteGeometryContinuity.preserveEvidenceSegments => false,
       RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
         isAutomaticGap(gap) || legacyAutomaticGapEligible,
+      RouteGeometryContinuity.connectDailyLegs => crossesDailyLegBoundary,
       RouteGeometryContinuity.connectAllChronologicalPoints => true,
     };
     return RouteGeometryBoundaryDecision(
       connect: connect,
-      cause: gap?.cause ?? TrackingGapCause.unknown,
+      cause: gap?.cause ??
+          (crossesDailyLegBoundary
+              ? TrackingGapCause.overnightBoundary
+              : TrackingGapCause.unknown),
       gapRepresented: gap != null,
     );
   }
@@ -75,6 +80,7 @@ final class RouteGeometryAssembler {
     required int beforeLegNumber,
     required int afterLegNumber,
     TrackingContinuityGap? gap,
+    TrackingGapCause? inferredCause,
   }) {
     final elapsed = after.capturedAt.difference(before.capturedAt);
     return InferredRouteConnector(
@@ -82,7 +88,7 @@ final class RouteGeometryAssembler {
       afterPointId: after.id,
       beforeSegmentId: before.segmentId,
       afterSegmentId: after.segmentId,
-      cause: gap?.cause ?? TrackingGapCause.unknown,
+      cause: gap?.cause ?? inferredCause ?? TrackingGapCause.unknown,
       duration: elapsed.isNegative ? Duration.zero : elapsed,
       straightLineDistanceMeters: gap?.straightLineDistanceMeters ??
           _distanceMeters(
@@ -187,6 +193,7 @@ final class RouteGeometryAssembler {
         continuity: continuity,
         gap: gap,
         legacyAutomaticGapEligible: source.legacyAutomaticGapEligible,
+        crossesDailyLegBoundary: prior.legNumber != source.legNumber,
       );
 
       if (!decision.connect) {
@@ -201,6 +208,7 @@ final class RouteGeometryAssembler {
             beforeLegNumber: prior.legNumber,
             afterLegNumber: source.legNumber,
             gap: gap,
+            inferredCause: decision.cause,
           ),
         );
       }

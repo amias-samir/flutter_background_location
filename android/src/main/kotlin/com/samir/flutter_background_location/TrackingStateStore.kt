@@ -522,6 +522,7 @@ internal class TrackingStateStore(context: Context) {
             "samplingProfile" to profile,
             "batteryMode" to profile,
             "motionState" to motionState,
+            "motionEvidence" to TrackingEventBus.lastMotionEvidence,
             "lastPointAt" to TrackingEventBus.lastLocation?.get("timestamp"),
             "serviceStartedAt" to serviceStartedAt,
             "pendingUserAction" to pendingUserAction(),

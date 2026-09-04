@@ -9,6 +9,9 @@ enum RouteGeometryContinuity {
   /// Join only typed or safely recognized legacy automatic callback gaps.
   mergeAutomaticCallbackGaps,
 
+  /// Join only boundaries between consecutive multi-day Trip legs.
+  connectDailyLegs,
+
   /// Join all chronological points and report every inferred connector.
   connectAllChronologicalPoints,
 }

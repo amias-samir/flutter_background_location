@@ -165,6 +165,9 @@ abstract interface class TripRepository {
     required TrackingOwner owner,
     required String tripId,
     required String operationId,
+    MultiDayRoutePresentation routePresentation =
+        MultiDayRoutePresentation.separateRecordedParts,
+    RouteCaptureIntent captureIntent = RouteCaptureIntent.adaptive,
     String? reason,
   });
 

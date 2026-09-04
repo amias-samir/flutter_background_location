@@ -3,6 +3,7 @@ import 'package:path/path.dart' as path_util;
 import '../application/route_geometry_assembler.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
+import '../domain/route_geometry.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
 import '../domain/trip.dart';
@@ -56,6 +57,7 @@ final class TripExportService {
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
+    MultiDayRoutePresentation? routePresentationOverride,
   }) async {
     if (options.geometry is! RawTrackGeometry) {
       throw const TrackingStorageException(
@@ -127,7 +129,11 @@ final class TripExportService {
     final report = const RouteGeometryAssembler().assemble(
       sourceParts: sourceParts,
       gaps: allGaps,
-      continuity: options.geometryContinuity,
+      continuity: routePresentationOverride?.geometryContinuity ??
+          (options.geometryContinuity ==
+                  RouteGeometryContinuity.preserveEvidenceSegments
+              ? trip.routePresentation.geometryContinuity
+              : options.geometryContinuity),
     );
     final syntheticTrack = Track(
       id: trip.id,

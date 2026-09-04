@@ -7,6 +7,51 @@ enum MockLocationPolicy { allow, flag, reject }
 
 enum TrackRecordRetentionPolicy { keepLatestOnly, keepAll }
 
+/// User-declared route mode used when motion evidence is unavailable.
+enum RouteCaptureIntent {
+  /// Select moving/stationary behavior from available motion evidence.
+  adaptive,
+
+  /// Prefer dense walking capture when evidence is stale or ambiguous.
+  walking,
+
+  /// Prefer dense bicycle/two-wheeler capture bounds.
+  cycling,
+
+  /// Prefer vehicle-qualified moving capture bounds.
+  vehicle,
+}
+
+/// Sampling fallback applied to stale platform activity evidence.
+enum StaleActivityFallback {
+  /// Fail open to the moving profile while actively recording.
+  keepMovingProfile,
+
+  /// Retain the current profile until fresh evidence arrives.
+  preserveCurrentProfile,
+}
+
+/// Native sensor sources allowed to supplement activity and GPS evidence.
+enum MotionFusionMode {
+  /// Existing platform activity plus GPS displacement only.
+  platformActivityOnly,
+
+  /// Adds hardware step/pedometer and significant-motion events.
+  lowPowerSensorFusion,
+
+  /// Adds bounded accelerometer/gyro probes during ambiguous windows.
+  enhancedSensorFusion,
+}
+
+/// Sampling fallback applied when the fused decision remains unknown.
+enum UnknownMotionFallback {
+  /// Fail open to the moving profile while actively recording.
+  keepMovingProfile,
+
+  /// Retain the current profile while evidence remains inconclusive.
+  preserveCurrentProfile,
+}
+
 /// iOS behavior after operating-system process termination.
 ///
 /// [interrupted] keeps normal continuous tracking and requires an explicit
@@ -134,6 +179,15 @@ final class TrackingConfig {
     this.movingConfidenceThreshold = 60,
     this.movingConfirmationCount = 2,
     this.activityRecognitionInterval = const Duration(seconds: 10),
+    this.captureIntent = RouteCaptureIntent.adaptive,
+    this.activityFreshnessThreshold = const Duration(seconds: 45),
+    this.staleActivityFallback = StaleActivityFallback.keepMovingProfile,
+    this.motionFusionMode = MotionFusionMode.platformActivityOnly,
+    this.unknownMotionFallback = UnknownMotionFallback.keepMovingProfile,
+    this.motionEvidenceFreshness = const Duration(seconds: 45),
+    this.sensorProbeDuration = const Duration(seconds: 4),
+    this.sensorProbeCooldown = const Duration(seconds: 30),
+    this.sensorProbeMaximumDurationPerHour = const Duration(minutes: 2),
     this.mockLocationPolicy = MockLocationPolicy.flag,
     this.batchPointCount = 25,
     this.batchMaxAge = const Duration(minutes: 2),
@@ -168,21 +222,29 @@ final class TrackingConfig {
                     ? TrackingAccuracy.high
                     : TrackingAccuracy.precised),
         movingDistanceFilterMeters = movingDistanceFilterMeters ??
-            (accuracy == TrackingAccuracy.low
-                ? 25
-                : accuracy == TrackingAccuracy.medium
-                    ? 15
-                    : accuracy == TrackingAccuracy.precised
-                        ? 5
-                        : 5),
+            (captureIntent == RouteCaptureIntent.walking ||
+                    captureIntent == RouteCaptureIntent.cycling
+                ? 5
+                : captureIntent == RouteCaptureIntent.vehicle
+                    ? 10
+                    : accuracy == TrackingAccuracy.low
+                        ? 25
+                        : accuracy == TrackingAccuracy.medium
+                            ? 15
+                            : 5),
         movingInterval = movingInterval ??
-            (accuracy == TrackingAccuracy.low
-                ? const Duration(seconds: 30)
-                : accuracy == TrackingAccuracy.medium
-                    ? const Duration(seconds: 15)
-                    : accuracy == TrackingAccuracy.precised
-                        ? const Duration(seconds: 5)
-                        : const Duration(seconds: 10)),
+            (captureIntent == RouteCaptureIntent.walking ||
+                    captureIntent == RouteCaptureIntent.cycling
+                ? const Duration(seconds: 5)
+                : captureIntent == RouteCaptureIntent.vehicle
+                    ? const Duration(seconds: 10)
+                    : accuracy == TrackingAccuracy.low
+                        ? const Duration(seconds: 30)
+                        : accuracy == TrackingAccuracy.medium
+                            ? const Duration(seconds: 15)
+                            : accuracy == TrackingAccuracy.precised
+                                ? const Duration(seconds: 5)
+                                : const Duration(seconds: 10)),
         stationaryDistanceFilterMeters = stationaryDistanceFilterMeters ??
             (accuracy == TrackingAccuracy.low
                 ? 100
@@ -252,6 +314,17 @@ final class TrackingConfig {
   final int movingConfidenceThreshold;
   final int movingConfirmationCount;
   final Duration activityRecognitionInterval;
+  final RouteCaptureIntent captureIntent;
+  final Duration activityFreshnessThreshold;
+  final StaleActivityFallback staleActivityFallback;
+  final MotionFusionMode motionFusionMode;
+  final UnknownMotionFallback unknownMotionFallback;
+  final Duration motionEvidenceFreshness;
+  final Duration sensorProbeDuration;
+  final Duration sensorProbeCooldown;
+
+  /// Maximum cumulative enhanced-sensor probe time in each rolling hour.
+  final Duration sensorProbeMaximumDurationPerHour;
   final MockLocationPolicy mockLocationPolicy;
   final int batchPointCount;
   final Duration batchMaxAge;
@@ -305,6 +378,15 @@ final class TrackingConfig {
     int? movingConfidenceThreshold,
     int? movingConfirmationCount,
     Duration? activityRecognitionInterval,
+    RouteCaptureIntent? captureIntent,
+    Duration? activityFreshnessThreshold,
+    StaleActivityFallback? staleActivityFallback,
+    MotionFusionMode? motionFusionMode,
+    UnknownMotionFallback? unknownMotionFallback,
+    Duration? motionEvidenceFreshness,
+    Duration? sensorProbeDuration,
+    Duration? sensorProbeCooldown,
+    Duration? sensorProbeMaximumDurationPerHour,
     MockLocationPolicy? mockLocationPolicy,
     int? batchPointCount,
     Duration? batchMaxAge,
@@ -346,6 +428,20 @@ final class TrackingConfig {
             movingConfirmationCount ?? this.movingConfirmationCount,
         activityRecognitionInterval:
             activityRecognitionInterval ?? this.activityRecognitionInterval,
+        captureIntent: captureIntent ?? this.captureIntent,
+        activityFreshnessThreshold:
+            activityFreshnessThreshold ?? this.activityFreshnessThreshold,
+        staleActivityFallback:
+            staleActivityFallback ?? this.staleActivityFallback,
+        motionFusionMode: motionFusionMode ?? this.motionFusionMode,
+        unknownMotionFallback:
+            unknownMotionFallback ?? this.unknownMotionFallback,
+        motionEvidenceFreshness:
+            motionEvidenceFreshness ?? this.motionEvidenceFreshness,
+        sensorProbeDuration: sensorProbeDuration ?? this.sensorProbeDuration,
+        sensorProbeCooldown: sensorProbeCooldown ?? this.sensorProbeCooldown,
+        sensorProbeMaximumDurationPerHour: sensorProbeMaximumDurationPerHour ??
+            this.sensorProbeMaximumDurationPerHour,
         mockLocationPolicy: mockLocationPolicy ?? this.mockLocationPolicy,
         batchPointCount: batchPointCount ?? this.batchPointCount,
         batchMaxAge: batchMaxAge ?? this.batchMaxAge,
@@ -386,6 +482,26 @@ final class TrackingConfig {
       'activityRecognitionInterval',
       activityRecognitionInterval,
     );
+    _positiveDuration(
+      errors,
+      'activityFreshnessThreshold',
+      activityFreshnessThreshold,
+    );
+    _positiveDuration(
+      errors,
+      'motionEvidenceFreshness',
+      motionEvidenceFreshness,
+    );
+    _positiveDuration(errors, 'sensorProbeDuration', sensorProbeDuration);
+    _positiveDuration(errors, 'sensorProbeCooldown', sensorProbeCooldown);
+    _positiveDuration(
+      errors,
+      'sensorProbeMaximumDurationPerHour',
+      sensorProbeMaximumDurationPerHour,
+    );
+    if (sensorProbeMaximumDurationPerHour > const Duration(hours: 1)) {
+      errors.add('sensorProbeMaximumDurationPerHour must not exceed one hour');
+    }
     _positiveDuration(errors, 'batchMaxAge', batchMaxAge);
     _positiveDuration(errors, 'maximumProviderFixAge', maximumProviderFixAge);
     _positiveDuration(
@@ -454,6 +570,17 @@ final class TrackingConfig {
         'movingConfirmationCount': movingConfirmationCount,
         'activityRecognitionIntervalMs':
             activityRecognitionInterval.inMilliseconds,
+        'captureIntent': captureIntent.name,
+        'activityFreshnessThresholdMs':
+            activityFreshnessThreshold.inMilliseconds,
+        'staleActivityFallback': staleActivityFallback.name,
+        'motionFusionMode': motionFusionMode.name,
+        'unknownMotionFallback': unknownMotionFallback.name,
+        'motionEvidenceFreshnessMs': motionEvidenceFreshness.inMilliseconds,
+        'sensorProbeDurationMs': sensorProbeDuration.inMilliseconds,
+        'sensorProbeCooldownMs': sensorProbeCooldown.inMilliseconds,
+        'sensorProbeMaximumDurationPerHourMs':
+            sensorProbeMaximumDurationPerHour.inMilliseconds,
         'mockLocationPolicy': mockLocationPolicy.name,
         'batchPointCount': batchPointCount,
         'batchMaxAgeMs': batchMaxAge.inMilliseconds,
@@ -525,6 +652,37 @@ final class TrackingConfig {
       movingConfirmationCount: integer('movingConfirmationCount') ?? 2,
       activityRecognitionInterval: Duration(
         milliseconds: integer('activityRecognitionIntervalMs') ?? 10000,
+      ),
+      captureIntent: RouteCaptureIntent.values.firstWhere(
+        (value) => value.name == map['captureIntent'],
+        orElse: () => RouteCaptureIntent.adaptive,
+      ),
+      activityFreshnessThreshold: Duration(
+        milliseconds: integer('activityFreshnessThresholdMs') ?? 45000,
+      ),
+      staleActivityFallback: StaleActivityFallback.values.firstWhere(
+        (value) => value.name == map['staleActivityFallback'],
+        orElse: () => StaleActivityFallback.keepMovingProfile,
+      ),
+      motionFusionMode: MotionFusionMode.values.firstWhere(
+        (value) => value.name == map['motionFusionMode'],
+        orElse: () => MotionFusionMode.platformActivityOnly,
+      ),
+      unknownMotionFallback: UnknownMotionFallback.values.firstWhere(
+        (value) => value.name == map['unknownMotionFallback'],
+        orElse: () => UnknownMotionFallback.keepMovingProfile,
+      ),
+      motionEvidenceFreshness: Duration(
+        milliseconds: integer('motionEvidenceFreshnessMs') ?? 45000,
+      ),
+      sensorProbeDuration: Duration(
+        milliseconds: integer('sensorProbeDurationMs') ?? 4000,
+      ),
+      sensorProbeCooldown: Duration(
+        milliseconds: integer('sensorProbeCooldownMs') ?? 30000,
+      ),
+      sensorProbeMaximumDurationPerHour: Duration(
+        milliseconds: integer('sensorProbeMaximumDurationPerHourMs') ?? 120000,
       ),
       mockLocationPolicy: MockLocationPolicy.values.firstWhere(
         (value) => value.name == map['mockLocationPolicy'],

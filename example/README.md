@@ -8,13 +8,17 @@ This app demonstrates:
 - Start, Pause, Resume, End day, and confirmed Complete Trip controls;
 - read-only readiness checks, staged permission-step requests, and replaying
   session actions;
-- live status, activity, motion, mock-location, and point evidence;
+- live activity confidence/freshness, GPS uncertainty in metres, fused motion
+  sources, capture profile, mock-location, and point evidence;
+- start-time capture intent, platform/low-power/enhanced sensor-fusion, and
+  separate/connect-days/continuous multi-day presentation controls;
 - latest-only and keep-all Trip-level retention;
-- one recorded-Trip history row with daily leg, segment, and gap counts;
+- one recorded-Trip history row with daily leg, segment, quality-event, and
+  filtered visible-gap counts;
 - owner-conflict recovery that pauses and preserves a previous owner’s local
   capture after explicit confirmation;
 - MapLibre street-map whole-Trip display with red Start, green Destination,
-  orange gap indicators, and a disclosed connect-all toggle;
+  filtered orange gap indicators, and a three-mode continuity selector;
 - user-named combined Trip GeoJSON, KML, and GPX export;
 - confirmed deletion of a selected completed Trip and all of its local legs;
 - a coordinate-free diagnostics/setup-doctor panel;
@@ -76,6 +80,24 @@ user-initiated shortcut to Android battery-optimization settings, where OEMs
 may label the relevant choice **Unrestricted** or **No restrictions**. The
 exemption is optional, is never granted automatically, and can increase battery
 use. Individual `TrackingConfig` fields still override the selected preset.
+
+The example also exposes `RouteCaptureIntent`, `MotionFusionMode`, and
+`MultiDayRoutePresentation` before Start. Select Walking when a known walking
+route should keep dense moving-profile requests despite an `unknown` pocket
+classification. Low-power fusion adds step/pedometer evidence; enhanced fusion
+adds only bounded ambiguity probes. These sensors improve the moving versus
+stationary decision, not GPS coordinates.
+
+The selected Trip presentation survives End day, process restart, and Start
+next day. Connect days joins only daily boundaries. Continuous presentation
+also joins lifecycle/outage parts. Every joined edge is disclosed as inferred
+and excluded from measured distance. The map menu can temporarily override
+the stored choice without changing the Trip.
+
+Activity confidence and location uncertainty are intentionally separate in
+the status card. `unknown 40%` means the platform is unsure about the activity;
+it does not mean location is 40% accurate. GPS uncertainty is shown in metres,
+and stale activity is labeled stale instead of repeating an old percentage.
 
 The example widget tests inject `FakeTrackingController` from
 `flutter_background_location_tracker_testing.dart`; they exercise interrupted

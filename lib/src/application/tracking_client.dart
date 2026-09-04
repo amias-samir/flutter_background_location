@@ -26,6 +26,7 @@ import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_health.dart';
 import '../domain/tracking_readiness.dart';
+import '../domain/tracking_quality.dart';
 import '../domain/tracking_session_snapshot.dart';
 import '../domain/tracking_settings.dart';
 import '../domain/tracking_start.dart';
@@ -165,14 +166,14 @@ abstract interface class MultiDayTripController {
   Future<TripBundle> loadTripBundle(String tripId);
   Future<RouteGeometryReport> assembleTripRouteGeometry(
     String tripId, {
-    RouteGeometryContinuity continuity =
-        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    RouteGeometryContinuity? continuity,
   });
   Future<TripExportResult> exportTrip({
     required String tripId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
+    MultiDayRoutePresentation? routePresentationOverride,
   });
   Future<void> deleteTrip(String tripId);
 }
@@ -180,6 +181,12 @@ abstract interface class MultiDayTripController {
 /// Combined controller returned by [TrackingClient.openWithTrips].
 abstract interface class TrackingTripController
     implements TrackingController, MultiDayTripController {}
+
+/// Additive, coordinate-free quality diagnostics for recorded routes.
+abstract interface class TrackingQualityController {
+  Future<TrackingQualitySummary> trackQualitySummary(String trackId);
+  Future<TrackingQualitySummary> tripQualitySummary(String tripId);
+}
 
 class TrackingClient implements Tracking {
   static Future<TrackingController> open({
@@ -324,7 +331,11 @@ class TrackingClient implements Tracking {
   }
 
   TrackerStatus get currentStatus => _currentStatus;
-  ActivitySnapshot get currentActivity => _latestActivity;
+  ActivitySnapshot get currentActivity => _latestActivity.evaluatedAt(
+        _clock(),
+        _motionGate?.config.activityFreshnessThreshold ??
+            const Duration(seconds: 45),
+      );
   TrackingSessionSnapshot? get currentSession => _currentSession;
   TrackingHealthSnapshot? get currentHealth => _currentHealth;
   bool get isInitialized => _initialized;
@@ -2073,6 +2084,7 @@ class TrackingClient implements Tracking {
         lastPointAt: point.capturedAt,
         motionState: capturedMotionState,
         samplingProfile: samplingProfile,
+        motionEvidence: _currentStatus.motionEvidence,
       ),
     );
     if (point.accepted && _batchUploader != null) {
@@ -2201,7 +2213,11 @@ class TrackingClient implements Tracking {
     final recordedAt = _latestActivity.recordedAt;
     if (recordedAt == null) return null;
     final age = capturedAt.difference(recordedAt).abs();
-    return age <= const Duration(minutes: 5) ? _latestActivity : null;
+    final threshold = _motionGate?.config.activityFreshnessThreshold ??
+        const Duration(seconds: 45);
+    return age <= threshold
+        ? _latestActivity.evaluatedAt(capturedAt, threshold)
+        : null;
   }
 
   void _handleNativeStatus(TrackerStatus status) {
@@ -2235,6 +2251,7 @@ class TrackingClient implements Tracking {
         message: status.message,
         motionState: status.motionState,
         samplingProfile: status.samplingProfile,
+        motionEvidence: status.motionEvidence ?? _currentStatus.motionEvidence,
       ),
     );
     final nativeTrackId = status.trackId;
@@ -2276,6 +2293,7 @@ class TrackingClient implements Tracking {
             message: nativeStatus.message,
             motionState: nativeStatus.motionState,
             samplingProfile: nativeStatus.samplingProfile,
+            motionEvidence: nativeStatus.motionEvidence,
           ),
         );
       });
@@ -2301,7 +2319,11 @@ class TrackingClient implements Tracking {
         observedAt: _clock(),
         status: _currentStatus,
         currentTrack: currentTrack,
-        activity: _latestActivity,
+        activity: _latestActivity.evaluatedAt(
+          _clock(),
+          currentTrack?.config.activityFreshnessThreshold ??
+              const Duration(seconds: 45),
+        ),
         lastPoint: _latestPoint,
         fixState: _fixState,
         readiness: readiness,
@@ -2826,7 +2848,8 @@ final class _OwnerBoundTrackingController
         TrackingTripController,
         TrackingDiagnosticsController,
         TrackingConfigurationController,
-        TrackingGeometryController {
+        TrackingGeometryController,
+        TrackingQualityController {
   _OwnerBoundTrackingController(this._client, this._owner) {
     _sessionSubscription = _client.sessionStream.listen(
       (snapshot) {
@@ -3085,6 +3108,25 @@ final class _OwnerBoundTrackingController
     );
   }
 
+  QualityDiagnosticsRepository get _qualityStore {
+    final repository = _client._repository;
+    if (repository is QualityDiagnosticsRepository) {
+      return repository as QualityDiagnosticsRepository;
+    }
+    throw const TrackingStorageException(
+      code: 'capability_unsupported',
+      message: 'This repository does not support quality diagnostics.',
+    );
+  }
+
+  @override
+  Future<TrackingQualitySummary> trackQualitySummary(String trackId) =>
+      _qualityStore.trackQualitySummary(owner: _owner, trackId: trackId);
+
+  @override
+  Future<TrackingQualitySummary> tripQualitySummary(String tripId) =>
+      _qualityStore.tripQualitySummary(owner: _owner, tripId: tripId);
+
   @override
   Future<TripStartResult> startTrip(TripStartRequest request) async {
     final operationId = request.operationId ?? const Uuid().v4();
@@ -3116,6 +3158,9 @@ final class _OwnerBoundTrackingController
       owner: _owner,
       tripId: trackResult.trackId,
       operationId: operationId,
+      routePresentation: request.routePresentation,
+      captureIntent: request.config?.captureIntent ??
+          trackResult.track.config.captureIntent,
       reason: 'trip_started',
     );
     await _tripStore.markTripOperationStage(
@@ -3429,8 +3474,7 @@ final class _OwnerBoundTrackingController
   @override
   Future<RouteGeometryReport> assembleTripRouteGeometry(
     String tripId, {
-    RouteGeometryContinuity continuity =
-        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    RouteGeometryContinuity? continuity,
   }) async {
     final tripBundle = await _tripStore.loadTripBundleForOwner(_owner, tripId);
     final sourceParts = <RouteGeometrySourcePart>[];
@@ -3455,7 +3499,8 @@ final class _OwnerBoundTrackingController
     return const RouteGeometryAssembler().assemble(
       sourceParts: sourceParts,
       gaps: tripBundle.gaps,
-      continuity: continuity,
+      continuity:
+          continuity ?? tripBundle.trip.routePresentation.geometryContinuity,
     );
   }
 
@@ -3465,6 +3510,7 @@ final class _OwnerBoundTrackingController
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
+    MultiDayRoutePresentation? routePresentationOverride,
   }) async {
     await _client.initialize();
     return TripExportService(
@@ -3476,6 +3522,7 @@ final class _OwnerBoundTrackingController
       format: format,
       options: options,
       fileName: fileName,
+      routePresentationOverride: routePresentationOverride,
     );
   }
 
