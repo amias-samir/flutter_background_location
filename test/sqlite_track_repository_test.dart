@@ -89,7 +89,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 13);
+    expect(await inspected.getVersion(), 14);
     final tables = await inspected.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
@@ -99,6 +99,109 @@ void main() {
         'derived_geometry_runs',
         'derived_geometry_points',
       ]),
+    );
+    await inspected.close();
+    await directory.delete(recursive: true);
+  });
+
+  test('schema 14 repairs route distance from accepted segment geometry',
+      () async {
+    sqfliteFfiInit();
+    final directory = await Directory.systemTemp.createTemp('fbl-v13-v14-');
+    final databasePath = '${directory.path}/route.sqlite';
+    final original = SqliteTrackRepository(
+      path: databasePath,
+      databaseFactoryOverride: databaseFactoryFfi,
+      singleInstance: false,
+    );
+    await original.initialize();
+    final trackId = await original.createTrack(
+      userId: 'distance-user',
+      organizationId: 'distance-org',
+      routeId: 'distance-repair',
+      config: const TrackingConfig(),
+      requestedTrackId: 'distance-track',
+    );
+    await original.markTrackActive(trackId);
+    for (final (sequence, longitude) in <(int, double)>[
+      (1, 0),
+      (2, 0.005),
+      (3, 0.01),
+    ]) {
+      final capturedAt = DateTime.utc(2026, 9, 4, 8, 0, sequence);
+      await original.appendPoint(
+        PointWriteRequest(
+          trackId: trackId,
+          sample: LocationSample(
+            latitude: 0,
+            longitude: longitude,
+            horizontalAccuracy: 5,
+            capturedAt: capturedAt,
+            provider: 'migration-test',
+          ),
+          activity: ActivitySnapshot(
+            type: TrackingActivityType.inVehicle,
+            confidence: 90,
+            recordedAt: capturedAt,
+          ),
+          motionState: MotionState.moving,
+          accepted: true,
+          qualityFlags: TrackPointQualityFlag.none,
+        ),
+      );
+    }
+    await original.completeTrack(trackId, reason: 'done');
+    await original.close();
+
+    final version13 = await databaseFactoryFfi.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    await version13.update(
+      'track_segments',
+      <String, Object?>{'distance_m': 7.0},
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+    await version13.update(
+      'tracks',
+      <String, Object?>{'total_distance_m': 7.0},
+      where: 'id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+    await version13.update(
+      'trips',
+      <String, Object?>{'measured_distance_m': 7.0},
+      where: 'id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+    await version13.setVersion(13);
+    await version13.close();
+
+    final migrated = SqliteTrackRepository(
+      path: databasePath,
+      databaseFactoryOverride: databaseFactoryFfi,
+      singleInstance: false,
+    );
+    await migrated.initialize();
+    final repaired = (await migrated.getTrack(trackId))!;
+    expect(repaired.totalDistanceMeters, moreOrLessEquals(1112, epsilon: 2));
+    await migrated.close();
+
+    final inspected = await databaseFactoryFfi.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    expect(await inspected.getVersion(), 14);
+    final tripRows = await inspected.query(
+      'trips',
+      columns: const <String>['measured_distance_m'],
+      where: 'id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+    expect(
+      (tripRows.single['measured_distance_m']! as num).toDouble(),
+      moreOrLessEquals(1112, epsilon: 2),
     );
     await inspected.close();
     await directory.delete(recursive: true);
@@ -832,7 +935,7 @@ void main() {
     expect(epoch.epochNumber, 1);
     expect(epoch.activationSequence, 1);
     expect(epoch.resolvedConfig.toMap(), harness.config.toMap());
-    expect(epoch.presetDefinitionVersion, 3);
+    expect(epoch.presetDefinitionVersion, 4);
     expect(epoch.qualityPolicyVersion, 1);
 
     await expectLater(
@@ -1253,7 +1356,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 13);
+    expect(version, 14);
     expect(
       tables.map((row) => row['name']),
       containsAll(<String>[
@@ -1408,7 +1511,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 13);
+    expect(version, 14);
     final preservedPoint = rows.singleWhere(
       (row) => row['id'] == 'preserved-point',
     );
@@ -1510,7 +1613,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 13);
+    expect(version, 14);
     expect(epoch['track_id'], 'v4-track');
     expect(point['id'], 'v4-point');
     expect(point['configuration_epoch_id'], epoch['id']);

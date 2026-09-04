@@ -990,6 +990,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
 
     if type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold {
+      // Explicit walking/cycling/vehicle intent keeps the dense moving
+      // profile. A pocketed rider may be classified as stationary even while
+      // Core Location shows travel; adaptive intent remains battery-aware.
+      if configuration.captureIntent != "adaptive" {
+        stationaryTransitionWorkItem?.cancel()
+        stationaryTransitionWorkItem = nil
+        resetStationaryCandidate()
+        transition(to: .moving)
+        return
+      }
       movingEvidence = 0
       motionSensorFusion.requestAmbiguityProbe(stationaryCandidate: true)
       scheduleStationaryTransition()
@@ -1045,6 +1055,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   private func finishStationaryTransitionIfQualified() {
     guard lifecycle == .tracking,
+      configuration.captureIntent == "adaptive",
       lastActivityEvent?["type"] as? String == "stationary"
     else {
       return

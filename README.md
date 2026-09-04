@@ -272,11 +272,19 @@ These settings solve different problems:
 | `motionFusionMode` | Which optional motion sensors may corroborate moving/stationary state | Derive latitude/longitude from compass, gyro, or acceleration |
 | `routePresentation` | Whether truthful daily/lifecycle parts are drawn separately or joined | Recover the path travelled while capture was stopped |
 
-`RouteCaptureIntent.walking` resolves unset moving sampling values to a
-5-second interval and 5 m filter. Explicit `movingInterval` and
-`movingDistanceFilterMeters` values still win. Unknown or stale activity fails
-open to the moving profile by default, which avoids leaving a pocketed walking
-device in stationary sampling.
+`RouteCaptureIntent.walking`, `cycling`, and `vehicle` resolve unset moving
+sampling values to a 3-second interval and 3 m filter. These explicit travel
+intents remain in the moving profile even if a pocketed device is temporarily
+classified as stationary. `adaptive` remains the battery-aware intent that may
+enter stationary sampling. Explicit `movingInterval` and
+`movingDistanceFilterMeters` values still win.
+
+Vehicle capture also uses a bounded urban-visibility acceptance envelope:
+`high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
+25 m. The provider still requests navigation-grade fixes. This avoids throwing
+away most tunnel, pocket, or urban-canyon callbacks solely because they exceed
+the walking-oriented 20/15 m limits. Pass an explicit
+`maximumAcceptedAccuracyMeters` to make the envelope stricter or looser.
 
 `MotionFusionMode.platformActivityOnly` is the compatibility default.
 `lowPowerSensorFusion` adds step/pedometer and significant-motion evidence.
@@ -296,6 +304,12 @@ length is excluded from `Trip.measuredDistanceMeters`, because no locations
 were captured along those edges. The stored default is used by the shared map
 assembler and GeoJSON/KML/GPX Trip export; pass an explicit override only for a
 temporary viewer/export choice.
+
+Edges between accepted anchors in the same recorded segment are measured even
+when rejected callbacks occurred between them—the exported line already uses
+those anchors. Database schema 14 repairs older totals that excluded these
+same-segment edges. It does not add inferred Pause, interruption, or overnight
+connector distance.
 
 Activity confidence is the platform's confidence in an activity label. It is
 not GPS accuracy. Use `ActivitySnapshot.evidenceState`/`age` for freshness,
@@ -1243,10 +1257,10 @@ values, while stationary values still come from the low profile.
 
 | Preset | Moving interval | Moving filter | Native request | Stationary interval | Stationary filter | Accepted accuracy |
 |---|---:|---:|---|---:|---:|---:|
-| `low` | 30 seconds | 25 m | Balanced / nearest 10 m | 3 minutes | 100 m | 100 m |
-| `medium` | 15 seconds | 15 m | High / best | 2 minutes | 75 m | 60 m |
-| `high` (default) | 10 seconds | 5 m | High / navigation | 30 seconds | 25 m | 20 m |
-| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 15 m | 15 m |
+| `low` | 20 seconds | 20 m | Balanced / nearest 10 m | 2 minutes | 75 m | 100 m |
+| `medium` | 10 seconds | 10 m | High / best | 1 minute | 50 m | 60 m |
+| `high` (default) | 5 seconds | 5 m | High / navigation | 20 seconds | 20 m | 20 m |
+| `precised` | 3 seconds | 3 m | High / navigation | 15 seconds | 10 m | 15 m |
 
 Android and iOS translate the native request to the closest platform accuracy;
 the table shows Android/iOS terminology. Presets are starting points, not
@@ -1258,18 +1272,21 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 |---|---:|---|
 | `accuracy` | `high` | Supplies all preset sampling and accepted-accuracy values |
 | `locationAccuracy` | `precised` for the default `high` preset | Overrides only Android/iOS native request accuracy |
-| `movingInterval` | 10 seconds | Requested interval while moving |
+| `movingInterval` | 5 seconds | Requested interval while moving |
 | `movingDistanceFilterMeters` | 5 m | Minimum moving displacement |
-| `stationaryInterval` | 30 seconds | Requested interval while stationary |
-| `stationaryDistanceFilterMeters` | 25 m | Minimum stationary displacement |
+| `stationaryInterval` | 20 seconds | Requested interval while stationary |
+| `stationaryDistanceFilterMeters` | 20 m | Minimum stationary displacement |
 | `maximumAcceptedAccuracyMeters` | 20 m | Reject fixes with poorer reported accuracy |
 | `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
 | `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
 | `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |
 | `stationaryConfidenceThreshold` | 75 | Minimum still confidence |
 | `movingConfidenceThreshold` | 60 | Minimum movement confidence |
-| `movingConfirmationCount` | 2 | Movement events required to exit stationary mode |
-| `activityRecognitionInterval` | 10 seconds | Requested native activity update interval |
+| `movingConfirmationCount` | 1 | Movement events required to exit stationary mode |
+| `activityRecognitionInterval` | 5 seconds | Requested native activity update interval |
+| `activityFreshnessThreshold` | 30 seconds | Expire stale activity labels and use the moving fallback |
+| `motionEvidenceFreshness` | 30 seconds | Expire stale fused-motion evidence |
+| `maximumProviderFixAge` | 5 minutes | Reject genuinely stale provider fixes while retaining delayed background batches |
 | `mockLocationPolicy` | `flag` | Allow, flag, or reject detected mock fixes |
 | `largeGapThreshold` | 5 minutes | Flag long gaps between accepted fixes |
 | `batchPointCount` | 25 | Point threshold for an optional uploader |

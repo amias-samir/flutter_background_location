@@ -519,7 +519,10 @@ class LocationTrackingService : Service() {
             // Never satisfy a new high-fidelity request with a cached fix.
             .setMaxUpdateAgeMillis(if (highFidelity) 0L else interval)
             .setMinUpdateDistanceMeters(distance)
-            .setGranularity(Granularity.GRANULARITY_PERMISSION_LEVEL)
+            .setGranularity(
+                if (highFidelity) Granularity.GRANULARITY_FINE
+                else Granularity.GRANULARITY_PERMISSION_LEVEL,
+            )
             .setWaitForAccurateLocation(highFidelity)
             .build()
 
@@ -838,6 +841,16 @@ class LocationTrackingService : Service() {
         }
         when {
             type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold -> {
+                // An explicit travel intent is a fidelity contract. Activity
+                // recognition can report stationary while a pocketed rider is
+                // moving, so only adaptive capture may reduce GPS sampling.
+                if (configuration.captureIntent != "adaptive") {
+                    stillSince = null
+                    stationaryDisplacementWindow.reset()
+                    mainHandler.removeCallbacks(stationaryTransition)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                    return
+                }
                 movingEvidence = 0
                 if (stillSince == null) {
                     val now = System.currentTimeMillis()
@@ -1277,6 +1290,7 @@ class LocationTrackingService : Service() {
     private fun tryEnterStationaryProfile() {
         val beganAt = stillSince ?: return
         if (!captureStarted || currentProfile != TrackingStateStore.PROFILE_MOVING) return
+        if (configuration.captureIntent != "adaptive") return
         if (!hasHighConfidenceStillActivity()) return
         if (configuration.motionFusionMode == "enhancedSensorFusion") {
             val evidence = TrackingEventBus.lastMotionEvidence ?: return

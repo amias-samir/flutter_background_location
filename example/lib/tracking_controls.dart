@@ -328,7 +328,7 @@ class TrackingConfigurationControls extends StatelessWidget {
             decoration: const InputDecoration(
               labelText: 'Capture intent',
               helperText:
-                  'Walking keeps dense fixes when activity evidence is uncertain.',
+                  'Travel intents keep dense 3 s / 3 m moving requests.',
               prefixIcon: Icon(Icons.directions_walk_rounded),
               border: OutlineInputBorder(),
             ),

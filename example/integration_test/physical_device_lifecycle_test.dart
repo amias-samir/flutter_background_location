@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -48,7 +50,7 @@ void main() {
           'this physical-device test: ${readiness.nextAction}',
     );
 
-    await tracking.startNewTrack(
+    final start = await tracking.startNewTrack(
       const TrackStartRequest(
         owner: owner,
         routeId: 'physical lifecycle qualification',
@@ -97,9 +99,56 @@ void main() {
     );
     // ignore: avoid_print
     print('FBL_QUALIFICATION_PHASE=completed');
+    final bundle = await tracking.loadTrackBundle(start.trackId);
+    final geometryDistance = _acceptedGeometryDistance(bundle);
+    expect(
+      bundle.track.totalDistanceMeters,
+      moreOrLessEquals(geometryDistance, epsilon: 0.5),
+      reason: 'Stored distance must equal accepted same-segment geometry.',
+    );
+    // Aggregate-only evidence: never print coordinates or owner/route IDs.
+    // ignore: avoid_print
+    print(
+      'FBL_QUALIFICATION_AGGREGATE='
+      'accepted:${bundle.track.acceptedPointCount},'
+      'rejected:${bundle.track.rejectedPointCount},'
+      'segments:${bundle.track.segmentCount},'
+      'storedDistanceM:${bundle.track.totalDistanceMeters.toStringAsFixed(2)},'
+      'geometryDistanceM:${geometryDistance.toStringAsFixed(2)}',
+    );
     await Future<void>.delayed(const Duration(seconds: 5));
   }, timeout: const Timeout(Duration(minutes: 4)));
 }
+
+double _acceptedGeometryDistance(TrackBundle bundle) {
+  var total = 0.0;
+  for (final segment in bundle.segments) {
+    final points = segment.points.where((point) => point.accepted).toList();
+    for (var index = 1; index < points.length; index += 1) {
+      total += _distanceMeters(points[index - 1], points[index]);
+    }
+  }
+  return total;
+}
+
+double _distanceMeters(TrackPoint from, TrackPoint to) {
+  const radius = 6371000.0;
+  final latitudeDelta = _radians(to.latitude - from.latitude);
+  final longitudeDelta = _radians(to.longitude - from.longitude);
+  final fromLatitude = _radians(from.latitude);
+  final toLatitude = _radians(to.latitude);
+  final haversine =
+      math.sin(latitudeDelta / 2) * math.sin(latitudeDelta / 2) +
+      math.cos(fromLatitude) *
+          math.cos(toLatitude) *
+          math.sin(longitudeDelta / 2) *
+          math.sin(longitudeDelta / 2);
+  return radius *
+      2 *
+      math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine));
+}
+
+double _radians(double degrees) => degrees * math.pi / 180;
 
 Future<TrackingReadiness> _waitForReadiness(
   TrackingController tracking, {

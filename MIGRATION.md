@@ -9,19 +9,33 @@ upgrade can restore existing native state.
 ## Accuracy preset retuning
 
 The four preset names remain source-compatible, but their resolved sampling
-values are intentionally more accuracy-focused. `low` now uses the former
-`medium` profile, `medium` uses the former `high` profile, and default `high`
-uses navigation-grade accuracy with a 10-second moving interval. `precised`
-keeps its 5-second moving interval while tightening its stationary filter to
-15 m. Its accepted accuracy is now 15 m, which reduces avoidable rejected fixes
-under partial sky visibility while remaining stricter than `high` at 20 m.
+values are intentionally more accuracy-focused. Version 4 requests 20/10/5/3
+second moving intervals and 20/10/5/3 m moving filters for
+`low`/`medium`/`high`/`precised`. Stationary sampling is also denser. Explicit
+walking, cycling, and vehicle intent uses a 3-second interval and 3 m filter and
+does not enter stationary sampling from an unreliable pocket activity label.
+
+Vehicle intent widens only the acceptance envelope—not the native request—to
+35 m for `high` and 25 m for `precised`. This retains more navigation-grade
+urban/pocket callbacks while keeping walking-oriented defaults at 20 m and
+15 m respectively.
 
 Applications that depend on the older battery-oriented values should pass
 explicit intervals, distance filters, native `locationAccuracy`, and
 `maximumAcceptedAccuracyMeters`. Explicit values continue to take precedence
-over the preset. New configuration epochs record preset-definition version 3,
-so exported diagnostics can distinguish this profile from the earlier 10 m
-`precised` acceptance threshold.
+over the preset. New configuration epochs record preset-definition version 4.
+
+## Schema 14 measured-distance repair
+
+Schema 14 recomputes each segment from its chronological accepted coordinates,
+then rolls those totals up to Tracks and Trips. Earlier builds drew an edge
+between accepted points in the same retained segment but excluded that edge
+from distance whenever rejected fixes intervened. This could make a visually
+complete route report roughly half its actual geometry length.
+
+The migration is bounded and idempotent. It measures only within canonical
+segments; Pause, interruption, process-restart, and overnight presentation
+connectors remain excluded.
 
 ## Legacy client to owner-bound controller
 

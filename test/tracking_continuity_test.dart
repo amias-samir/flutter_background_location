@@ -373,8 +373,9 @@ void main() {
       );
       expect(
         gaps.last.distanceTreatment,
-        TrackingGapDistanceTreatment.excluded,
+        TrackingGapDistanceTreatment.measured,
       );
+      expect(bundle.track.totalDistanceMeters, greaterThan(10));
     },
   );
 }

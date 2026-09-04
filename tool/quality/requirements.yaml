@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 13
+  route_database_schema: 14
   android_journal_schema: 2
   ios_journal_schema: 1
 change_classifications:

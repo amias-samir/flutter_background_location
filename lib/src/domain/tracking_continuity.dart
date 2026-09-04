@@ -254,7 +254,7 @@ final class TrackingContinuityGap {
 final class TrackingContinuityClassifier {
   const TrackingContinuityClassifier({
     this.policy = TrackingContinuityPolicy.conservative,
-    this.policyVersion = 1,
+    this.policyVersion = 2,
   }) : assert(policyVersion > 0);
 
   /// Fallback policy for incomplete evidence.
@@ -366,7 +366,10 @@ final class TrackingContinuityClassifier {
       TrackingContinuityDecision(
         cause: cause,
         treatment: TrackingGapTreatment.retainCurrentSegment,
-        excludeConnectorFromMeasuredDistance: true,
+        // Retained anchors are canonical points in the same recorded segment.
+        // The map/export line already traverses this edge, so excluding it
+        // under-reports the distance whenever intervening fixes were rejected.
+        excludeConnectorFromMeasuredDistance: false,
         policyVersion: policyVersion,
       );
 

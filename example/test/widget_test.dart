@@ -263,7 +263,7 @@ void main() {
     }
   });
 
-  test('map geometry marks typed same-segment gap evidence', () {
+  test('map geometry marks severe typed same-segment gap evidence', () {
     final track = _completedTrack();
     final source = _segment(track, 1, const <(double, double)>[
       (27.7, 85.3),
@@ -282,7 +282,7 @@ void main() {
       treatment: TrackingGapTreatment.retainCurrentSegment,
       distanceTreatment: TrackingGapDistanceTreatment.excluded,
       continuityPolicyVersion: 1,
-      providerGap: const Duration(seconds: 31),
+      providerGap: const Duration(seconds: 61),
       createdAt: DateTime.utc(2026),
     );
     final report = const RouteGeometryAssembler().assemble(

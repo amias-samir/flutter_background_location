@@ -496,8 +496,11 @@ class RouteGeometry {
         gap.cause == TrackingGapCause.overnightBoundary) {
       return true;
     }
-    return (gap.providerGap ?? Duration.zero) >= const Duration(seconds: 30) ||
-        (gap.straightLineDistanceMeters ?? 0) >= 30;
+    // Same-segment rejected-fix runs are quality diagnostics, not lifecycle
+    // breaks. Show only severe automatic gaps so normal urban uncertainty does
+    // not cover an otherwise continuous route with orange markers.
+    return (gap.providerGap ?? Duration.zero) >= const Duration(seconds: 60) ||
+        (gap.straightLineDistanceMeters ?? 0) >= 150;
   }
 
   static maplibre.LatLngBounds _bounds(List<maplibre.LatLng> points) {

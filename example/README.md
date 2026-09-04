@@ -82,17 +82,24 @@ exemption is optional, is never granted automatically, and can increase battery
 use. Individual `TrackingConfig` fields still override the selected preset.
 
 The example also exposes `RouteCaptureIntent`, `MotionFusionMode`, and
-`MultiDayRoutePresentation` before Start. Select Walking when a known walking
-route should keep dense moving-profile requests despite an `unknown` pocket
-classification. Low-power fusion adds step/pedometer evidence; enhanced fusion
-adds only bounded ambiguity probes. These sensors improve the moving versus
-stationary decision, not GPS coordinates.
+`MultiDayRoutePresentation` before Start. Walking, cycling, and vehicle intent
+use a 3-second/3 m moving request and do not enter stationary sampling from a
+pocket activity label; adaptive intent remains battery-aware. Vehicle `high`
+also accepts bounded urban fixes up to 35 m instead of discarding every fix
+above the walking-oriented 20 m limit. Low-power fusion adds step/pedometer and
+significant-motion evidence; enhanced fusion adds only bounded ambiguity
+probes. These sensors improve the moving versus stationary decision, not GPS
+coordinates.
 
 The selected Trip presentation survives End day, process restart, and Start
 next day. Connect days joins only daily boundaries. Continuous presentation
 also joins lifecycle/outage parts. Every joined edge is disclosed as inferred
 and excluded from measured distance. The map menu can temporarily override
 the stored choice without changing the Trip.
+
+Schema 14 automatically repairs older route totals that excluded drawn edges
+between accepted anchors in the same segment after rejected fixes. Genuine
+Pause, interruption, and overnight inferred connectors remain excluded.
 
 Activity confidence and location uncertainty are intentionally separate in
 the status card. `unknown 40%` means the platform is unsure about the activity;

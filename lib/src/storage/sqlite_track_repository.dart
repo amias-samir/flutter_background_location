@@ -140,7 +140,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 13,
+        version: 14,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -550,6 +550,140 @@ final class SqliteTrackRepository
         }
       }
       await _createSchema13EvidenceTables(database);
+    }
+    if (oldVersion < 14) {
+      await _repairMeasuredDistances(database);
+    }
+  }
+
+  /// Repairs distance totals created by continuity policy version 1.
+  ///
+  /// That policy retained accepted anchors in the same canonical segment but
+  /// excluded the edge between them whenever rejected callbacks intervened.
+  /// Maps and exports still drew the edge, so stored totals could be much
+  /// shorter than their recorded geometry. Schema 14 recomputes every segment
+  /// from accepted points in bounded pages and then rolls the totals up to its
+  /// Track and Trip.
+  static Future<void> _repairMeasuredDistances(Database database) async {
+    final tableRows = await database.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table'",
+    );
+    final tables =
+        tableRows.map((row) => row['name']).whereType<String>().toSet();
+    if (!tables.containsAll(
+      const <String>{'tracks', 'track_segments', 'track_points'},
+    )) {
+      return;
+    }
+    final pointColumns =
+        await database.rawQuery('PRAGMA table_info(track_points)');
+    final pointNames =
+        pointColumns.map((row) => row['name']).whereType<String>().toSet();
+    final segmentColumns =
+        await database.rawQuery('PRAGMA table_info(track_segments)');
+    final segmentNames =
+        segmentColumns.map((row) => row['name']).whereType<String>().toSet();
+    if (!pointNames.containsAll(
+          const <String>{
+            'segment_id',
+            'sequence',
+            'latitude',
+            'longitude',
+            'accepted',
+          },
+        ) ||
+        !segmentNames.containsAll(
+          const <String>{'id', 'track_id', 'segment_number', 'distance_m'},
+        )) {
+      return;
+    }
+    const pageSize = 512;
+    final segments = await database.query(
+      'track_segments',
+      columns: const <String>['id'],
+      orderBy: 'track_id, segment_number',
+    );
+    for (final segment in segments) {
+      final segmentId = segment['id']! as String;
+      var afterSequence = -1;
+      double? previousLatitude;
+      double? previousLongitude;
+      var distance = 0.0;
+      var acceptedCount = 0;
+      while (true) {
+        final points = await database.query(
+          'track_points',
+          columns: const <String>['sequence', 'latitude', 'longitude'],
+          where: 'segment_id = ? AND accepted = 1 AND sequence > ?',
+          whereArgs: <Object?>[segmentId, afterSequence],
+          orderBy: 'sequence',
+          limit: pageSize,
+        );
+        if (points.isEmpty) break;
+        for (final point in points) {
+          final latitude = (point['latitude']! as num).toDouble();
+          final longitude = (point['longitude']! as num).toDouble();
+          if (previousLatitude != null && previousLongitude != null) {
+            distance += _distanceMeters(
+              previousLatitude,
+              previousLongitude,
+              latitude,
+              longitude,
+            );
+          }
+          previousLatitude = latitude;
+          previousLongitude = longitude;
+          afterSequence = (point['sequence']! as num).toInt();
+          acceptedCount += 1;
+        }
+        if (points.length < pageSize) break;
+      }
+      await database.update(
+        'track_segments',
+        <String, Object?>{
+          'distance_m': distance,
+          if (segmentNames.contains('accepted_point_count'))
+            'accepted_point_count': acceptedCount,
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[segmentId],
+      );
+    }
+    await database.rawUpdate('''
+      UPDATE tracks
+      SET total_distance_m = COALESCE((
+        SELECT SUM(segment.distance_m)
+        FROM track_segments AS segment
+        WHERE segment.track_id = tracks.id
+      ), 0)
+    ''');
+    if (tables.containsAll(const <String>{'trips', 'trip_legs'})) {
+      await database.rawUpdate('''
+        UPDATE trips
+        SET measured_distance_m = COALESCE((
+          SELECT SUM(track.total_distance_m)
+          FROM trip_legs AS leg
+          JOIN tracks AS track ON track.id = leg.track_id
+          WHERE leg.trip_id = trips.id
+        ), 0)
+      ''');
+    }
+    if (tables.contains('track_continuity_gaps')) {
+      await database.rawDelete('''
+        DELETE FROM track_continuity_gaps
+        WHERE treatment = ?
+          AND after_point_id IN (
+            SELECT id FROM track_points WHERE accepted = 0
+          )
+      ''', <Object?>[TrackingGapTreatment.retainCurrentSegment.name]);
+      await database.update(
+        'track_continuity_gaps',
+        <String, Object?>{
+          'distance_treatment': TrackingGapDistanceTreatment.measured.name,
+        },
+        where: 'treatment = ?',
+        whereArgs: <Object?>[TrackingGapTreatment.retainCurrentSegment.name],
+      );
     }
   }
 

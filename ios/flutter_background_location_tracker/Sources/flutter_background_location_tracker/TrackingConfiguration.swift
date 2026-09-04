@@ -39,7 +39,7 @@ struct TrackingConfiguration {
   init(dictionary: [String: Any]) {
     movingIntervalMs = Self.number(
       dictionary["movingIntervalMs"],
-      defaultValue: 10_000,
+      defaultValue: 5_000,
       minimum: 1_000
     )
     movingDistanceFilterMeters = Self.number(
@@ -49,12 +49,12 @@ struct TrackingConfiguration {
     )
     stationaryIntervalMs = Self.number(
       dictionary["stationaryIntervalMs"],
-      defaultValue: 30_000,
+      defaultValue: 20_000,
       minimum: 5_000
     )
     stationaryDistanceFilterMeters = Self.number(
       dictionary["stationaryDistanceFilterMeters"],
-      defaultValue: 25,
+      defaultValue: 20,
       minimum: 0
     )
     stationaryTimeoutMs = Self.number(
@@ -111,14 +111,14 @@ struct TrackingConfiguration {
     )
     movingConfirmationCount = Self.integer(
       dictionary["movingConfirmationCount"],
-      defaultValue: 2,
+      defaultValue: 1,
       minimum: 1,
       maximum: 20
     )
     captureIntent = (dictionary["captureIntent"] as? String) ?? "adaptive"
     activityFreshnessThresholdMs = Self.number(
       dictionary["activityFreshnessThresholdMs"],
-      defaultValue: 45_000,
+      defaultValue: 30_000,
       minimum: 1_000
     )
     staleActivityFallback =
@@ -129,7 +129,7 @@ struct TrackingConfiguration {
       (dictionary["unknownMotionFallback"] as? String) ?? "keepMovingProfile"
     motionEvidenceFreshnessMs = Self.number(
       dictionary["motionEvidenceFreshnessMs"],
-      defaultValue: 45_000,
+      defaultValue: 30_000,
       minimum: 1_000
     )
     sensorProbeDurationMs = min(
@@ -138,13 +138,13 @@ struct TrackingConfiguration {
     )
     sensorProbeCooldownMs = Self.number(
       dictionary["sensorProbeCooldownMs"],
-      defaultValue: 30_000,
+      defaultValue: 20_000,
       minimum: 1_000
     )
     sensorProbeMaximumDurationPerHourMs = min(
       Self.number(
         dictionary["sensorProbeMaximumDurationPerHourMs"],
-        defaultValue: 120_000,
+        defaultValue: 180_000,
         minimum: 1_000
       ),
       3_600_000

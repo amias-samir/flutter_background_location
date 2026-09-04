@@ -2105,6 +2105,11 @@ class TrackingClient implements Tracking {
     required String currentSegmentId,
   }) {
     if (previousAccepted == null) return null;
+    // Rejected callbacks are already retained as point-quality evidence. A
+    // continuity gap describes the edge to the next accepted anchor, not each
+    // rejected callback itself; recording both inflated gap counts and map
+    // markers without adding route information.
+    if (!quality.acceptedForGeometry) return null;
 
     final acceptedGap = sample.capturedAt.difference(
       previousAccepted.capturedAt,
