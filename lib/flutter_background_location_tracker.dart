@@ -1,5 +1,29 @@
-/// Public API for background route tracking, lifecycle control, storage,
-/// diagnostics, and export on Android and iOS.
+/// Public API for durable route tracking on Android and iOS.
+///
+/// Import this library from application code:
+///
+/// ```dart
+/// import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
+/// ```
+///
+/// Start with [TrackingClient.open] for normal single-day routes, or
+/// [TrackingClient.openWithTrips] when one user-visible journey can continue
+/// across multiple days. Both entry points return owner-scoped controllers that
+/// expose lifecycle state through [TrackingSessionSnapshot], staged readiness
+/// checks through [TrackingReadiness], and route storage/export helpers.
+///
+/// The main integration flow is:
+///
+/// 1. Configure Android manifest and iOS `Info.plist` permissions.
+/// 2. Open one application-scoped controller for the signed-in [TrackingOwner].
+/// 3. Use `checkReadiness()` and `requestNextPermission()` before Start.
+/// 4. Drive Start, Pause, Resume, End day, and Complete from
+///    `session.allowedActions`.
+/// 5. Export completed Tracks or Trips as GeoJSON, KML, or GPX.
+///
+/// [TrackingConfig] controls accuracy, battery behavior, mock-location policy,
+/// capture intent, and optional sensor-fusion evidence. Individual config
+/// fields override the selected [TrackingAccuracy] preset.
 library;
 
 export 'src/application/tracking_client.dart';

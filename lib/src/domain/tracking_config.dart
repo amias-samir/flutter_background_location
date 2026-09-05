@@ -3,9 +3,26 @@ import 'dart:convert';
 import 'tracking_continuity.dart';
 import 'tracking_error.dart';
 
-enum MockLocationPolicy { allow, flag, reject }
+/// How suspected mock or simulated locations should affect route capture.
+enum MockLocationPolicy {
+  /// Store the fix normally even when mock evidence is present.
+  allow,
 
-enum TrackRecordRetentionPolicy { keepLatestOnly, keepAll }
+  /// Store the fix and keep the mock assessment for later review.
+  flag,
+
+  /// Reject fixes that have mock evidence.
+  reject,
+}
+
+/// Local database retention mode for completed route history.
+enum TrackRecordRetentionPolicy {
+  /// Delete older route history when a new route starts.
+  keepLatestOnly,
+
+  /// Keep all locally recorded routes until the app deletes them.
+  keepAll,
+}
 
 /// User-declared route mode used when motion evidence is unavailable.
 enum RouteCaptureIntent {
@@ -335,26 +352,62 @@ final class TrackingConfig {
   /// [TrackingAccuracy.high] and 25 metres for [TrackingAccuracy.precised] to
   /// retain useful pocket/urban fixes and reduce visible gaps.
   final double maximumAcceptedAccuracyMeters;
+
+  /// Largest plausible route speed before a fix is rejected as an outlier.
   final double maximumPlausibleSpeedMetersPerSecond;
+
+  /// Time a route must look stationary before adaptive mode relaxes sampling.
   final Duration stationaryConfirmationDuration;
+
+  /// Displacement used to probe whether a stationary route has moved again.
   final double stationaryProbeDisplacementMeters;
+
+  /// Minimum platform confidence required to accept stationary evidence.
   final int stationaryConfidenceThreshold;
+
+  /// Minimum platform confidence required to accept moving evidence.
   final int movingConfidenceThreshold;
+
+  /// Number of moving decisions required before returning to moving sampling.
   final int movingConfirmationCount;
+
+  /// Requested interval for platform activity-recognition updates.
   final Duration activityRecognitionInterval;
+
+  /// Expected movement type used when motion evidence is stale or unknown.
   final RouteCaptureIntent captureIntent;
+
+  /// Maximum age of activity evidence before [staleActivityFallback] applies.
   final Duration activityFreshnessThreshold;
+
+  /// Fallback strategy for stale platform activity evidence.
   final StaleActivityFallback staleActivityFallback;
+
+  /// Optional sensor-fusion mode used to supplement activity and GPS evidence.
   final MotionFusionMode motionFusionMode;
+
+  /// Fallback strategy when fused motion evidence remains unknown.
   final UnknownMotionFallback unknownMotionFallback;
+
+  /// Maximum age of sensor-fusion evidence before it is considered stale.
   final Duration motionEvidenceFreshness;
+
+  /// Maximum length of one enhanced accelerometer/gyro ambiguity probe.
   final Duration sensorProbeDuration;
+
+  /// Minimum delay between enhanced sensor probes.
   final Duration sensorProbeCooldown;
 
   /// Maximum cumulative enhanced-sensor probe time in each rolling hour.
   final Duration sensorProbeMaximumDurationPerHour;
+
+  /// Mock-location handling policy for incoming native fixes.
   final MockLocationPolicy mockLocationPolicy;
+
+  /// Number of accepted points kept in memory before batched persistence.
   final int batchPointCount;
+
+  /// Maximum time an accepted point can wait before batched persistence.
   final Duration batchMaxAge;
 
   /// Maximum provider fix age accepted at native receipt.
@@ -376,9 +429,17 @@ final class TrackingConfig {
     'Use maximumProviderFixAge and acceptedGeometryGapThreshold independently.',
   )
   Duration get largeGapThreshold => acceptedGeometryGapThreshold;
+
+  /// Time allowed for the first usable fix before readiness/health degrades.
   final Duration firstFixTimeout;
+
+  /// Android foreground-service notification title.
   final String androidNotificationTitle;
+
+  /// Android foreground-service notification body text.
   final String androidNotificationText;
+
+  /// iOS recovery behavior after operating-system process termination.
   final IosTerminationRecoveryMode iosTerminationRecoveryMode;
 
   ResolvedTrackingAccuracy get resolvedAccuracy => ResolvedTrackingAccuracy(

@@ -44,6 +44,12 @@ import 'motion_gate.dart';
 import 'derived_geometry_service.dart';
 import 'route_geometry_assembler.dart';
 
+/// Low-level route tracking contract implemented by [TrackingClient].
+///
+/// Most host apps should depend on the owner-scoped [TrackingController]
+/// returned by [TrackingClient.open] instead. This interface exists for
+/// compatibility and for integrations that need direct access to the classic
+/// status, activity, point, lifecycle, storage, and export methods.
 abstract interface class Tracking {
   Stream<TrackerStatus> get statusStream;
   Stream<ActivitySnapshot> get activityStream;
@@ -81,29 +87,67 @@ abstract interface class Tracking {
   Future<TrackBundle> loadTrackBundle(String trackId);
 }
 
-enum OwnerSwitchPolicy { rejectIfResumable, pauseAndPreserveCurrent }
+/// Policy used when a controller is rebound to a different [TrackingOwner].
+enum OwnerSwitchPolicy {
+  /// Refuse the switch when the current owner still has resumable local state.
+  rejectIfResumable,
 
+  /// Pause and preserve the current owner's route before switching.
+  pauseAndPreserveCurrent,
+}
+
+/// Result returned after a successful owner switch.
 final class OwnerSwitchResult {
   const OwnerSwitchResult({required this.previous, required this.current});
+
+  /// Owner that controlled the local tracking state before the switch.
   final TrackingOwner previous;
+
+  /// Owner that controls the local tracking state after the switch.
   final TrackingOwner current;
 }
 
+/// Track plus status snapshot returned by pause and complete operations.
 final class TrackLifecycleResult {
   const TrackLifecycleResult({required this.track, required this.status});
+
+  /// Track affected by the lifecycle operation.
   final Track track;
+
+  /// Status after the lifecycle operation completed.
   final TrackerStatus status;
 }
 
-enum TrackHistoryChangeKind { created, updated, deleted }
+/// Type of route-history mutation emitted by [TrackHistoryEvent].
+enum TrackHistoryChangeKind {
+  /// A route was inserted.
+  created,
 
+  /// A route's summary or lifecycle state changed.
+  updated,
+
+  /// A route was deleted.
+  deleted,
+}
+
+/// Lightweight notification that route history should be refreshed.
 final class TrackHistoryEvent {
   const TrackHistoryEvent({required this.kind, this.trackId});
+
+  /// Kind of history mutation.
   final TrackHistoryChangeKind kind;
+
+  /// Affected track ID when the mutation is tied to one route.
   final String? trackId;
 }
 
-/// Owner-bound, awaited facade for normal host integrations.
+/// Owner-bound facade for normal app integrations.
+///
+/// Create one controller for the signed-in owner with [TrackingClient.open],
+/// listen to [sessionStream], and drive all lifecycle controls from
+/// [TrackingSessionSnapshot.allowedActions]. The controller restores durable
+/// local state during initialization, keeps route history scoped to
+/// [currentOwner], and serializes lifecycle commands.
 abstract interface class TrackingController implements Tracking {
   bool get isInitialized;
   TrackingOwner get currentOwner;
@@ -137,9 +181,12 @@ abstract interface class TrackingController implements Tracking {
   Future<void> dispose();
 }
 
-/// Additive multi-day lifecycle API. Existing [TrackingController]
-/// implementations remain source compatible because this is a separate
-/// capability.
+/// Additive multi-day Trip lifecycle API.
+///
+/// Use this through [TrackingTripController], returned by
+/// [TrackingClient.openWithTrips], when one journey may span multiple days.
+/// Each day is stored as an immutable Track leg while the user sees one stable
+/// Trip that can be mapped, exported, continued, completed, or deleted.
 abstract interface class MultiDayTripController {
   Future<TripStartResult> startTrip(TripStartRequest request);
 
@@ -178,16 +225,28 @@ abstract interface class MultiDayTripController {
   Future<void> deleteTrip(String tripId);
 }
 
-/// Combined controller returned by [TrackingClient.openWithTrips].
+/// Combined Track and multi-day Trip controller.
+///
+/// This is the recommended controller for apps that expose End day / Continue
+/// trip flows or need combined Trip export.
 abstract interface class TrackingTripController
     implements TrackingController, MultiDayTripController {}
 
-/// Additive, coordinate-free quality diagnostics for recorded routes.
+/// Coordinate-free quality diagnostics for recorded routes.
+///
+/// Summaries report accepted/rejected counts, visible gaps, lifecycle
+/// boundaries, freshness, and uncertainty percentiles without returning raw
+/// coordinates.
 abstract interface class TrackingQualityController {
   Future<TrackingQualitySummary> trackQualitySummary(String trackId);
   Future<TrackingQualitySummary> tripQualitySummary(String tripId);
 }
 
+/// Default implementation and factory for route tracking controllers.
+///
+/// Prefer [open] or [openWithTrips] in application code. The public
+/// constructor remains available for custom test wiring and advanced
+/// integrations.
 class TrackingClient implements Tracking {
   static Future<TrackingController> open({
     required TrackingOwner owner,

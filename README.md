@@ -1,44 +1,95 @@
 # flutter_background_location_tracker
 
-Durable, battery-aware foreground and background route tracking for Android
-and iOS.
+Durable, battery-aware route tracking for Android and iOS.
 
 The plugin combines native location and activity APIs with ordered SQLite
-storage, pause/resume segments, mock-location evidence, adaptive sampling, and
-offline GeoJSON, KML, and GPX export.
+storage, pause/resume lifecycle controls, mock-location evidence, adaptive
+sampling, multi-day trips, and offline GeoJSON, KML, and GPX export.
 
 > Background location is privacy-sensitive and controlled by the operating
 > system. Callback intervals and process lifetime are never guaranteed. Test
 > your exact configuration on real devices before releasing it.
 
+## Start here
+
+Use this package when your app needs a complete route from **Start** to
+**Complete**, including background capture, route history, export, and
+diagnostics.
+
+| Need | Use |
+|---|---|
+| Single-day route recording | `TrackingClient.open()` |
+| Multi-day journeys with End day / Continue trip | `TrackingClient.openWithTrips()` |
+| Lifecycle UI state | `TrackingSessionSnapshot.allowedActions` |
+| Permission setup | `checkReadiness()` then `requestNextPermission()` |
+| Accuracy and battery behavior | `TrackingConfig(accuracy: ..., captureIntent: ...)` |
+| Route display/export | `loadTrackBundle()`, `assembleTripRouteGeometry()`, `exportTrack()`, `exportTrip()` |
+
+The recommended integration shape is simple:
+
+```dart
+final tracking = await TrackingClient.openWithTrips(
+  owner: const TrackingOwner(
+    userId: 'signed-in-user',
+    organizationId: 'workspace-id',
+  ),
+  configuration: const TrackingConfiguration(
+    recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+    defaultTrackingConfig: TrackingConfig(
+      accuracy: TrackingAccuracy.high,
+      captureIntent: RouteCaptureIntent.vehicle,
+      motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
+    ),
+  ),
+);
+
+final readiness = await tracking.checkReadiness();
+if (readiness.canStart) {
+  await tracking.startTrip(
+    const TripStartRequest(routeId: 'home_to_office'),
+  );
+}
+```
+
+From there, render Start, Pause, Resume, End day, Continue trip, and Complete
+from `tracking.sessionStream`. Do not guess button state from local widget
+variables.
+
 ## Features
+
+### Capture
 
 - Foreground and background route recording on Android and iOS.
 - Android foreground service with a persistent tracking notification.
-- Activity classification: stationary, walking, running, bicycle, vehicle,
-  and unknown.
+- Pause, resume, complete, End day, and Continue trip lifecycle support.
+- Track history retention with `keepLatestOnly` or `keepAll`.
+
+### Accuracy and evidence
+
+- Activity classification for stationary, walking, running, bicycle, vehicle,
+  and unknown states.
 - Optional low-power step/significant-motion fusion and bounded
-  accelerometer/gyroscope ambiguity probes; raw sensor streams never leave
-  native memory and never generate coordinates.
-- Moving and stationary sampling profiles for lower battery use.
-- Per-fix mock/simulation evidence with allow, flag, or reject policies.
-- Pause and resume without adding false distance across the pause gap.
-- Healthy stationary/rejected-fix gaps remain one canonical segment when the
-  native capture generation is continuously active, with typed gap evidence.
-- Additive multi-day `Trip` lifecycle with immutable daily `Track` legs.
-- One combined multi-day Trip map and GeoJSON/KML/GPX export.
-- Persisted multi-day presentation: recorded parts, connected days, or a
+  accelerometer/gyroscope ambiguity probes.
+- Mock/simulation evidence per location fix with allow, flag, or reject policy.
+- Typed gap evidence for rejected fixes, lifecycle boundaries, and background
+  callback interruptions.
+
+### Routes and export
+
+- Single-day `Track` routes and additive multi-day `Trip` journeys.
+- Combined multi-day Trip map and GeoJSON/KML/GPX export.
+- Persisted route presentation modes: recorded parts, connected days, or
   continuous presentation with labeled inferred connectors.
-- Durable, ordered SQLite persistence with crash recovery.
-- Track history with `keepLatestOnly` or `keepAll` retention.
-- Completed route export as GeoJSON, KML, or GPX.
-- User-defined export names and collision-safe file creation.
-- Optional application-supplied uploader with durable retry state.
-- Streams and plain Dart models with no state-management dependency.
 - Optional immutable derived geometry with explicit raw/derived map and export
   selection.
-- Opt-in, versioned adaptive battery policy with shadow mode and host fidelity
-  bounds.
+- User-defined export names and collision-safe file creation.
+
+### Operations
+
+- Durable, ordered SQLite persistence with crash recovery.
+- Streams and plain Dart models with no state-management dependency.
+- Optional application-supplied uploader with durable retry state.
+- Coordinate-free diagnostics for setup, quality, and support reports.
 
 ## Platform support
 
@@ -1575,8 +1626,9 @@ connectors and does not present their length as measured distance.
 
 ## Example application
 
-See [`example/lib/main.dart`](example/lib/main.dart) for a complete Material
-example with:
+See the
+[`example/lib/main.dart`](https://github.com/amias-samir/flutter_background_location/blob/main/example/lib/main.dart)
+sample for a complete Material example with:
 
 - staged permission recovery;
 - Start, Pause, Resume, End day, and Complete Trip button states;
@@ -1626,4 +1678,5 @@ example with:
 
 ## License
 
-See [`LICENSE`](LICENSE).
+See the
+[MIT license](https://github.com/amias-samir/flutter_background_location/blob/main/LICENSE).
