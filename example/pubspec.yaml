@@ -35,6 +35,8 @@ dependencies:
   maplibre_gl: ^0.26.2
 
 dev_dependencies:
+  integration_test:
+    sdk: flutter
   flutter_test:
     sdk: flutter
 

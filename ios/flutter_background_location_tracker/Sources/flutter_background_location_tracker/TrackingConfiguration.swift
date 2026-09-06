@@ -23,6 +23,15 @@ struct TrackingConfiguration {
   let stationaryConfidenceThreshold: Int
   let movingConfidenceThreshold: Int
   let movingConfirmationCount: Int
+  let captureIntent: String
+  let activityFreshnessThresholdMs: Double
+  let staleActivityFallback: String
+  let motionFusionMode: String
+  let unknownMotionFallback: String
+  let motionEvidenceFreshnessMs: Double
+  let sensorProbeDurationMs: Double
+  let sensorProbeCooldownMs: Double
+  let sensorProbeMaximumDurationPerHourMs: Double
   let terminationRecoveryMode: IOSTerminationRecoveryMode
 
   static let defaults = TrackingConfiguration(dictionary: [:])
@@ -30,7 +39,7 @@ struct TrackingConfiguration {
   init(dictionary: [String: Any]) {
     movingIntervalMs = Self.number(
       dictionary["movingIntervalMs"],
-      defaultValue: 10_000,
+      defaultValue: 5_000,
       minimum: 1_000
     )
     movingDistanceFilterMeters = Self.number(
@@ -40,12 +49,12 @@ struct TrackingConfiguration {
     )
     stationaryIntervalMs = Self.number(
       dictionary["stationaryIntervalMs"],
-      defaultValue: 30_000,
+      defaultValue: 20_000,
       minimum: 5_000
     )
     stationaryDistanceFilterMeters = Self.number(
       dictionary["stationaryDistanceFilterMeters"],
-      defaultValue: 25,
+      defaultValue: 20,
       minimum: 0
     )
     stationaryTimeoutMs = Self.number(
@@ -63,13 +72,17 @@ struct TrackingConfiguration {
       defaultValue: 20,
       minimum: 1
     )
-    movingDesiredAccuracy = Self.accuracy(
+    let resolvedMovingDesiredAccuracy = Self.accuracy(
       dictionary["desiredAccuracy"],
       defaultValue: kCLLocationAccuracyBestForNavigation
     )
+    movingDesiredAccuracy = resolvedMovingDesiredAccuracy
     stationaryDesiredAccuracy = Self.accuracy(
       dictionary["stationaryDesiredAccuracy"],
-      defaultValue: kCLLocationAccuracyHundredMeters
+      // A missing stationary override must not ask Core Location for fixes
+      // looser than the active moving/acceptance profile. The interval and
+      // distance filter still provide the stationary battery savings.
+      defaultValue: resolvedMovingDesiredAccuracy
     )
     activityType = Self.activityType(dictionary["activityType"])
     allowBackgroundLocationUpdates = Self.boolean(
@@ -98,9 +111,43 @@ struct TrackingConfiguration {
     )
     movingConfirmationCount = Self.integer(
       dictionary["movingConfirmationCount"],
-      defaultValue: 2,
+      defaultValue: 1,
       minimum: 1,
       maximum: 20
+    )
+    captureIntent = (dictionary["captureIntent"] as? String) ?? "adaptive"
+    activityFreshnessThresholdMs = Self.number(
+      dictionary["activityFreshnessThresholdMs"],
+      defaultValue: 30_000,
+      minimum: 1_000
+    )
+    staleActivityFallback =
+      (dictionary["staleActivityFallback"] as? String) ?? "keepMovingProfile"
+    motionFusionMode =
+      (dictionary["motionFusionMode"] as? String) ?? "platformActivityOnly"
+    unknownMotionFallback =
+      (dictionary["unknownMotionFallback"] as? String) ?? "keepMovingProfile"
+    motionEvidenceFreshnessMs = Self.number(
+      dictionary["motionEvidenceFreshnessMs"],
+      defaultValue: 30_000,
+      minimum: 1_000
+    )
+    sensorProbeDurationMs = min(
+      Self.number(dictionary["sensorProbeDurationMs"], defaultValue: 4_000, minimum: 500),
+      30_000
+    )
+    sensorProbeCooldownMs = Self.number(
+      dictionary["sensorProbeCooldownMs"],
+      defaultValue: 20_000,
+      minimum: 1_000
+    )
+    sensorProbeMaximumDurationPerHourMs = min(
+      Self.number(
+        dictionary["sensorProbeMaximumDurationPerHourMs"],
+        defaultValue: 180_000,
+        minimum: 1_000
+      ),
+      3_600_000
     )
     terminationRecoveryMode = IOSTerminationRecoveryMode(
       rawValue: (dictionary["iosTerminationRecoveryMode"] as? String) ?? ""
@@ -126,6 +173,15 @@ struct TrackingConfiguration {
       "stationaryConfidenceThreshold": stationaryConfidenceThreshold,
       "movingConfidenceThreshold": movingConfidenceThreshold,
       "movingConfirmationCount": movingConfirmationCount,
+      "captureIntent": captureIntent,
+      "activityFreshnessThresholdMs": activityFreshnessThresholdMs,
+      "staleActivityFallback": staleActivityFallback,
+      "motionFusionMode": motionFusionMode,
+      "unknownMotionFallback": unknownMotionFallback,
+      "motionEvidenceFreshnessMs": motionEvidenceFreshnessMs,
+      "sensorProbeDurationMs": sensorProbeDurationMs,
+      "sensorProbeCooldownMs": sensorProbeCooldownMs,
+      "sensorProbeMaximumDurationPerHourMs": sensorProbeMaximumDurationPerHourMs,
       "iosTerminationRecoveryMode": terminationRecoveryMode.rawValue,
     ]
   }

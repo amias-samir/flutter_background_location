@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "fixtureKind": "synthetic_stationary_rejection_gap",
+  "privacy": {
+    "containsRealCoordinates": false,
+    "coordinateStrategy": "generated_near_zero_origin",
+    "sourceFilesCommitted": false
+  },
+  "acceptedPointCount": 266,
+  "rejectedPointCount": 53,
+  "acceptedGapSeconds": 385,
+  "sameNativeCaptureGeneration": true,
+  "nativeLifecycleContinuouslyActive": true,
+  "expectedCanonicalSegmentCount": 1,
+  "legacyPreCorrectionSegmentCount": 2
+}

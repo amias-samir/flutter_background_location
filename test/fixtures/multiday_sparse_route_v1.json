@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "privacy": {
+    "synthetic": true,
+    "containsRealCoordinates": false,
+    "containsOwnerIdentifiers": false
+  },
+  "rawPointCount": 61,
+  "acceptedPointCount": 30,
+  "rejectedPointCount": 31,
+  "durableGapCount": 29,
+  "earlierHistorySnapshotGapCount": 27,
+  "drawablePartCount": 3,
+  "legs": [
+    {"leg": 1, "raw": 12, "accepted": 11, "drawable": true},
+    {"leg": 2, "raw": 8, "accepted": 0, "drawable": false},
+    {"leg": 3, "raw": 13, "accepted": 9, "drawable": true},
+    {"leg": 4, "raw": 7, "accepted": 0, "drawable": false},
+    {"leg": 5, "raw": 10, "accepted": 0, "drawable": false},
+    {"leg": 6, "raw": 11, "accepted": 10, "drawable": true}
+  ],
+  "acceptedActivity": {
+    "walking": 24,
+    "unknown40": 5,
+    "unavailable": 1
+  },
+  "shape": {
+    "containsSparseCornerChord": true,
+    "containsSingleLateralSpike": true,
+    "containsPrivateGeography": false
+  }
+}

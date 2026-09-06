@@ -30,10 +30,13 @@ class TrackingConfigurationTest {
         val configuration = TrackingConfiguration.fromMap(null)
 
         assertEquals("precised", configuration.desiredAccuracy)
-        assertEquals(10_000L, configuration.movingIntervalMs)
+        assertEquals(5_000L, configuration.movingIntervalMs)
         assertEquals(5f, configuration.movingDistanceFilterMeters)
-        assertEquals(30_000L, configuration.stationaryIntervalMs)
-        assertEquals(25f, configuration.stationaryDistanceFilterMeters)
+        assertEquals(20_000L, configuration.stationaryIntervalMs)
+        assertEquals(20f, configuration.stationaryDistanceFilterMeters)
+        assertEquals(5_000L, configuration.activityRecognitionIntervalMs)
+        assertEquals(30_000L, configuration.activityFreshnessThresholdMs)
+        assertEquals(30_000L, configuration.motionEvidenceFreshnessMs)
         assertEquals(20.0, configuration.maximumAcceptedAccuracyMeters, 0.0)
     }
 }

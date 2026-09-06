@@ -13,7 +13,13 @@
         "acceptedPointCount": 4,
         "rejectedPointCount": 1,
         "distanceMeters": 0.0,
-        "geometrySource": "raw"
+        "geometrySource": "raw",
+        "geometryContinuity": "preserveEvidenceSegments",
+        "sourceSegmentCount": 2,
+        "geometryPartCount": 2,
+        "gapCount": 1,
+        "inferredConnectorCount": 0,
+        "hasInferredConnectors": false
       },
       "geometry": {
         "type": "MultiLineString",

@@ -19,7 +19,7 @@ Thank you for improving `flutter_background_location_tracker`.
 ## Required local checks
 
 ```shell
-dart format --output=none --set-exit-if-changed lib test tool example/lib example/test
+dart format --output=none --set-exit-if-changed lib test tool example/lib example/test example/integration_test
 flutter analyze
 flutter test
 dart run tool/quality/validate_requirements.dart
@@ -37,13 +37,36 @@ Release maintainers validate sanitized aggregate physical evidence kept outside
 the public repository with:
 
 ```shell
+dart run tool/quality/generate_physical_qualification_template.dart \
+  /approved/private/aggregate-evidence.json
+
+# Fill the generated template only with reviewed aggregate measurements.
 dart run tool/quality/validate_physical_qualification.dart \
   /approved/private/aggregate-evidence.json
 ```
 
-The validator rejects coordinate/participant keys, missing scenario/preset
-coverage, insufficient repetitions, missing variance metrics, unreviewed
-greater-than-10% battery regressions, and incorrect force-quit recovery claims.
+The generated file is intentionally invalid until its placeholders and review
+flags are completed. The validator rejects coordinate/participant keys,
+missing platform/preset/scenario, fusion-mode, capture-intent, carry-state, or
+power-state coverage, insufficient repetitions, invalid metric ranges, any
+persisted raw sensor event, unreviewed greater-than-10% battery regressions,
+and incorrect force-quit recovery claims.
+
+Use the lifecycle harness on a connected Android or iOS device before route
+qualification:
+
+```shell
+cd example
+flutter test integration_test/physical_device_lifecycle_test.dart -d DEVICE_ID
+```
+
+The harness prints `waiting_for_permissions` after an install resets runtime
+grants. Grant foreground/precise location, background/Always location,
+activity recognition, and notifications within 45 seconds. It then holds
+active, paused, resumed, and completed phases long enough to inspect native
+service and optional-sensor ownership. A passing lifecycle run does not count
+as surveyed route-accuracy or battery evidence; those measurements still use
+the complete protocol and must run unplugged on physical hardware.
 
 ## Pull requests
 

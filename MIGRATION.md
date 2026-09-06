@@ -9,19 +9,33 @@ upgrade can restore existing native state.
 ## Accuracy preset retuning
 
 The four preset names remain source-compatible, but their resolved sampling
-values are intentionally more accuracy-focused. `low` now uses the former
-`medium` profile, `medium` uses the former `high` profile, and default `high`
-uses navigation-grade accuracy with a 10-second moving interval. `precised`
-keeps its 5-second moving interval while tightening its stationary filter to
-15 m. Its accepted accuracy is now 15 m, which reduces avoidable rejected fixes
-under partial sky visibility while remaining stricter than `high` at 20 m.
+values are intentionally more accuracy-focused. Version 4 requests 20/10/5/3
+second moving intervals and 20/10/5/3 m moving filters for
+`low`/`medium`/`high`/`precised`. Stationary sampling is also denser. Explicit
+walking, cycling, and vehicle intent uses a 3-second interval and 3 m filter and
+does not enter stationary sampling from an unreliable pocket activity label.
+
+Vehicle intent widens only the acceptance envelope—not the native request—to
+35 m for `high` and 25 m for `precised`. This retains more navigation-grade
+urban/pocket callbacks while keeping walking-oriented defaults at 20 m and
+15 m respectively.
 
 Applications that depend on the older battery-oriented values should pass
 explicit intervals, distance filters, native `locationAccuracy`, and
 `maximumAcceptedAccuracyMeters`. Explicit values continue to take precedence
-over the preset. New configuration epochs record preset-definition version 3,
-so exported diagnostics can distinguish this profile from the earlier 10 m
-`precised` acceptance threshold.
+over the preset. New configuration epochs record preset-definition version 4.
+
+## Schema 14 measured-distance repair
+
+Schema 14 recomputes each segment from its chronological accepted coordinates,
+then rolls those totals up to Tracks and Trips. Earlier builds drew an edge
+between accepted points in the same retained segment but excluded that edge
+from distance whenever rejected fixes intervened. This could make a visually
+complete route report roughly half its actual geometry length.
+
+The migration is bounded and idempotent. It measures only within canonical
+segments; Pause, interruption, process-restart, and overnight presentation
+connectors remain excluded.
 
 ## Legacy client to owner-bound controller
 
@@ -79,6 +93,72 @@ Use `listTrackPage(TrackQuery(...))` for route lists. Keep
 the bounded V2 export service. Existing `listTracks()` and
 `TrackExportResult.path` stay available during the pre-1.0 compatibility
 window.
+
+## Schema 12 continuity and multi-day Trips
+
+Schema 12 is additive. Existing Tracks, segments, points, configuration epochs,
+outbox records, managed exports, and derived geometry remain unchanged. Each
+existing Track receives one implicit owner-scoped Trip/leg membership row.
+
+Existing `TrackingClient.open()` integrations remain source-compatible. To
+present a journey once while completing each day independently, opt into:
+
+```dart
+final TrackingTripController tracking = await TrackingClient.openWithTrips(
+  owner: TrackingOwner(userId: userId, organizationId: organizationId),
+);
+```
+
+Replace final completion at the end of each day with `endCurrentDay()`, call
+`continueTrip()` the next morning, and call `completeTrip()` only at the final
+destination. Do not reopen completed Track rows; a continuation creates a new
+immutable daily leg. Use `listTripPage()` for normal history and `exportTrip()`
+for one GeoJSON/KML/GPX artifact.
+
+The old `largeGapThreshold` remains decodable, but elapsed accepted-point time
+alone no longer proves a capture interruption. New configuration separates
+provider-fix age, callback-health warning, accepted-geometry gap diagnostics,
+and continuity fallback policy. Map/export clients that want the corrected
+normal presentation should select
+`RouteGeometryContinuity.mergeAutomaticCallbackGaps`; raw evidence remains
+available through `preserveEvidenceSegments`.
+
+## Schema 13 activity, sensor fusion, quality runs, and presentation
+
+Schema 13 is additive and migrates automatically. Existing Trips default to
+`MultiDayRoutePresentation.separateRecordedParts`, existing configurations
+decode with `RouteCaptureIntent.adaptive` and
+`MotionFusionMode.platformActivityOnly`, and raw Track/point coordinates are
+not rewritten.
+
+New point columns preserve activity source, raw type, probable distribution,
+age/freshness, and relevant foreground/power state. Coordinate-free fused
+motion transitions and bounded probe summaries use `track_motion_evidence`;
+the store retains at most 512 summaries per Track and never stores raw sensor
+vectors. Consecutive rejected fixes are grouped in `track_quality_runs` so a
+single minor rejection need not appear as a broken route marker.
+
+For a known walking workflow, opt in explicitly:
+
+```dart
+const TrackingConfig(
+  accuracy: TrackingAccuracy.high,
+  captureIntent: RouteCaptureIntent.walking,
+  motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
+);
+```
+
+To preserve the old topology, omit `routePresentation`. To join only the end
+of one day to the start of the next, pass
+`MultiDayRoutePresentation.connectDailyLegs` in `TripStartRequest`. A connected
+line is presentation-only; it does not add raw points or measured distance.
+
+Built-in derived geometry now also accepts
+`algorithm: 'uncertainty_weighted_smoothing'`. Hosts can implement
+`RouteGeometryProcessor` for opt-in road/footpath alignment. Processor pages
+are bounded and overlapping; invalid, distant, missing, or low-confidence
+matches fall back to raw anchors. Host applications remain responsible for
+network consent, credentials, licensing, cancellation, and privacy policy.
 
 ## Runtime configuration
 

@@ -4,6 +4,13 @@
   "minimumTerminationRecoveryRuns": 30,
   "platforms": ["android", "ios"],
   "presets": ["low", "medium", "high", "precised"],
+  "motionFusionModes": [
+    "platformActivityOnly",
+    "lowPowerSensorFusion",
+    "enhancedSensorFusion"
+  ],
+  "captureIntents": ["adaptive", "walking", "cycling", "vehicle"],
+  "carryStates": ["handheld", "trouser_pocket", "jacket_or_bag"],
   "routeScenarios": [
     "walking",
     "cycling",
@@ -41,7 +48,14 @@
     "batteryMahPerHourStdDev",
     "cpuSecondsPerHourMean",
     "peakRssMbMean",
-    "wakeupsPerHourMean"
+    "wakeupsPerHourMean",
+    "acceptedFixRatio",
+    "motionRecoveryP95Seconds",
+    "falseStationaryMaximumSeconds",
+    "sensorProbeDutyCyclePercent",
+    "rawSensorEventsPersisted",
+    "visibleGapCount",
+    "inferredConnectorCount"
   ],
   "forbiddenKeyFragments": [
     "latitude",

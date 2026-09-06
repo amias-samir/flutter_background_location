@@ -131,6 +131,13 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     static let sessionControlToken = "flutter_background_location.session_control_token"
     static let commandRevision = "flutter_background_location.command_revision"
     static let lastCommandId = "flutter_background_location.last_command_id"
+    static let captureGenerationId = "flutter_background_location.capture_generation_id"
+    static let nativeSessionStartedAt = "flutter_background_location.native_session_started_at"
+    static let lastProviderCallbackAt = "flutter_background_location.last_provider_callback_at"
+    static let lastProfileTransitionAt = "flutter_background_location.last_profile_transition_at"
+    static let lastProbeRequestedAt = "flutter_background_location.last_probe_requested_at"
+    static let lastProbeCompletedAt = "flutter_background_location.last_probe_completed_at"
+    static let lastProbeOutcome = "flutter_background_location.last_probe_outcome"
   }
 
   private let locationManager = CLLocationManager()
@@ -149,6 +156,22 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var configuration = TrackingConfiguration.defaults
   private var lastLocationEvent: [String: Any]?
   private var lastActivityEvent: [String: Any]?
+  private var lastMotionEvidence: [String: Any]?
+  private lazy var motionSensorFusion = MotionSensorFusion { [weak self] evidence in
+    DispatchQueue.main.async {
+      guard let self, self.lifecycle == .tracking || self.lifecycle == .starting else { return }
+      self.lastMotionEvidence = evidence
+      if evidence["state"] as? String == "moving" {
+        self.stationaryTransitionWorkItem?.cancel()
+        self.stationaryTransitionWorkItem = nil
+        self.resetStationaryCandidate()
+        self.transition(to: .moving)
+      } else if evidence["state"] as? String == "stationary" {
+        self.finishStationaryTransitionIfQualified()
+      }
+      self.emitStatus()
+    }
+  }
   private var lastEmittedLocation: CLLocation?
   private var lastReliableLocation: CLLocation?
   private var stationaryReferenceLocation: CLLocation?
@@ -159,6 +182,15 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var journalPendingCount: Int?
   private var journalFailureMessage: String?
   private var sessionGeneration: Int64 = 0
+  private var captureGeneration = IOSCaptureGenerationState()
+  private var lastProviderCallbackAt: Date?
+  private var lastProfileTransitionAt: Date?
+  private var lastProbeRequestedAt: Date?
+  private var lastProbeCompletedAt: Date?
+  private var lastProbeOutcome: String?
+  private var probeTimeoutWorkItem: DispatchWorkItem?
+  private var recentProviderFixKeys: Set<String> = []
+  private var recentProviderFixKeyOrder: [String] = []
   private var pendingTerminationRecovery = false
   private var recoveredFromTermination = false
   private var terminationRecoveryGapStartedAt: Date?
@@ -391,6 +423,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     self.trackId = trackId
     self.configuration = configuration
     sessionGeneration += 1
+    rotateCaptureGeneration()
     lifecycle = .starting
     profile = .moving
     persistState()
@@ -399,7 +432,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     configureLocationManager(for: .moving)
     startBackgroundActivitySessionIfNeeded()
     startMotionUpdatesIfPossible()
+    motionSensorFusion.start(configuration: configuration)
     startConfiguredLocationUpdates()
+    // Start/Continue should actively acquire a fresh fix instead of waiting
+    // for a cached or deferred standard-location callback.
+    requestStationaryExitProbe()
 
     lifecycle = .tracking
     persistState()
@@ -505,6 +542,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         stopBackgroundActivitySession()
       }
       startConfiguredLocationUpdates()
+      motionSensorFusion.start(configuration: configuration)
     }
     persistState()
     emitStatus(message: "configuration_updated")
@@ -544,6 +582,30 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "iosTerminationRecoveryMode": configuration.terminationRecoveryMode.rawValue,
       "recoveredFromTermination": recoveredFromTermination,
     ]
+    if let lastMotionEvidence {
+      state["motionEvidence"] = lastMotionEvidence
+    }
+    if let captureGenerationId = captureGeneration.id {
+      state["captureGenerationId"] = captureGenerationId
+    }
+    if let nativeSessionStartedAt = captureGeneration.startedAt {
+      state["nativeSessionStartedAt"] = epochMilliseconds(nativeSessionStartedAt)
+    }
+    if let lastProviderCallbackAt {
+      state["lastProviderCallbackAt"] = epochMilliseconds(lastProviderCallbackAt)
+    }
+    if let lastProfileTransitionAt {
+      state["lastProfileTransitionAt"] = epochMilliseconds(lastProfileTransitionAt)
+    }
+    if let lastProbeRequestedAt {
+      state["lastProbeRequestedAt"] = epochMilliseconds(lastProbeRequestedAt)
+    }
+    if let lastProbeCompletedAt {
+      state["lastProbeCompletedAt"] = epochMilliseconds(lastProbeCompletedAt)
+    }
+    if let lastProbeOutcome {
+      state["lastProbeOutcome"] = lastProbeOutcome
+    }
     if let journalPendingCount {
       state["pendingLocationCount"] = journalPendingCount
     }
@@ -811,6 +873,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   private func stopNativeUpdates() {
     sessionGeneration += 1
+    probeTimeoutWorkItem?.cancel()
+    probeTimeoutWorkItem = nil
     locationManager.stopUpdatingLocation()
     locationManager.stopMonitoringSignificantLocationChanges()
     locationManager.allowsBackgroundLocationUpdates = false
@@ -820,6 +884,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     stopBackgroundActivitySession()
     motionManager?.stopActivityUpdates()
     motionManager = nil
+    motionSensorFusion.stop()
+    lastMotionEvidence = nil
     stationaryTransitionWorkItem?.cancel()
     stationaryTransitionWorkItem = nil
     movingEvidence = 0
@@ -841,10 +907,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   private func startConfiguredLocationUpdates() {
+    // Standard updates remain the live route provider. Significant-change
+    // monitoring is an additional relaunch safety net, never a replacement
+    // for the configured interval/distance capture while the route is active.
+    locationManager.startUpdatingLocation()
     if configuration.terminationRecoveryMode == .significantChange {
       locationManager.startMonitoringSignificantLocationChanges()
-    } else {
-      locationManager.startUpdatingLocation()
     }
   }
 
@@ -871,11 +939,14 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     do {
       try validateTrackingPreconditions(configuration)
       sessionGeneration += 1
+      rotateCaptureGeneration()
       profile = .moving
       lifecycle = .starting
+      persistState()
       configureLocationManager(for: .moving)
       startBackgroundActivitySessionIfNeeded()
       startMotionUpdatesIfPossible()
+      motionSensorFusion.start(configuration: configuration)
       startConfiguredLocationUpdates()
       lifecycle = .tracking
       recoveredFromTermination = true
@@ -903,9 +974,35 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
     let type = event["type"] as? String ?? "unknown"
     let confidence = event["confidence"] as? Int ?? 0
+    let evidenceState = event["evidenceState"] as? String ?? "unavailable"
+
+    guard evidenceState == "fresh" else {
+      stationaryTransitionWorkItem?.cancel()
+      stationaryTransitionWorkItem = nil
+      resetStationaryCandidate()
+      movingEvidence = 0
+      motionSensorFusion.requestAmbiguityProbe()
+      if configuration.staleActivityFallback == "keepMovingProfile"
+        || configuration.captureIntent != "adaptive"
+      {
+        transition(to: .moving)
+      }
+      return
+    }
 
     if type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold {
+      // Explicit walking/cycling/vehicle intent keeps the dense moving
+      // profile. A pocketed rider may be classified as stationary even while
+      // Core Location shows travel; adaptive intent remains battery-aware.
+      if configuration.captureIntent != "adaptive" {
+        stationaryTransitionWorkItem?.cancel()
+        stationaryTransitionWorkItem = nil
+        resetStationaryCandidate()
+        transition(to: .moving)
+        return
+      }
       movingEvidence = 0
+      motionSensorFusion.requestAmbiguityProbe(stationaryCandidate: true)
       scheduleStationaryTransition()
       return
     }
@@ -917,6 +1014,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       confidence >= configuration.movingConfidenceThreshold
     else {
       movingEvidence = 0
+      motionSensorFusion.requestAmbiguityProbe()
+      if configuration.unknownMotionFallback == "keepMovingProfile"
+        || configuration.captureIntent != "adaptive"
+      {
+        transition(to: .moving)
+      }
       return
     }
 
@@ -942,12 +1045,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         return
       }
       self.stationaryTransitionWorkItem = nil
-      guard self.hasLowStationaryDisplacementEvidence() else {
-        self.resetStationaryCandidate()
-        self.emitStatus(message: "stationary_entry_rejected_gps_evidence")
-        return
-      }
-      self.transition(to: .stationary)
+      self.finishStationaryTransitionIfQualified()
     }
     stationaryTransitionWorkItem = workItem
     DispatchQueue.main.asyncAfter(
@@ -956,15 +1054,129 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     )
   }
 
+  private func finishStationaryTransitionIfQualified() {
+    guard lifecycle == .tracking,
+      configuration.captureIntent == "adaptive",
+      lastActivityEvent?["type"] as? String == "stationary"
+    else {
+      return
+    }
+    if configuration.motionFusionMode == "enhancedSensorFusion" {
+      guard let evidence = lastMotionEvidence,
+        evidence["state"] as? String == "stationary",
+        let observedAt = evidence["observedAt"] as? NSNumber,
+        max(0, Date().timeIntervalSince1970 * 1_000 - observedAt.doubleValue)
+          <= configuration.motionEvidenceFreshnessMs
+      else {
+        return
+      }
+    }
+    guard hasLowStationaryDisplacementEvidence() else {
+      resetStationaryCandidate()
+      emitStatus(message: "stationary_entry_rejected_gps_evidence")
+      return
+    }
+    transition(to: .stationary)
+  }
+
   private func transition(to newProfile: TrackingProfile) {
     guard lifecycle == .tracking, profile != newProfile else { return }
     stationaryReferenceLocation = newProfile == .stationary ? lastEmittedLocation : nil
     resetStationaryCandidate()
     profile = newProfile
     lastEmittedLocation = nil
+    lastProfileTransitionAt = Date()
     configureLocationManager(for: newProfile)
     persistState()
+    if newProfile == .moving {
+      requestStationaryExitProbe()
+    }
     emitStatus(message: "tracking_profile_changed")
+  }
+
+  /// Starts a new native capture generation. Generations rotate only when a
+  /// genuine provider session starts or resumes, not for profile/configuration
+  /// changes inside the same session.
+  private func rotateCaptureGeneration(at date: Date = Date()) {
+    captureGeneration.rotate(at: date)
+    lastProviderCallbackAt = nil
+    lastProfileTransitionAt = date
+    lastProbeRequestedAt = nil
+    lastProbeCompletedAt = nil
+    lastProbeOutcome = nil
+    probeTimeoutWorkItem?.cancel()
+    probeTimeoutWorkItem = nil
+    recentProviderFixKeys.removeAll(keepingCapacity: true)
+    recentProviderFixKeyOrder.removeAll(keepingCapacity: true)
+  }
+
+  /// Requests one immediate fix after leaving the stationary profile. The
+  /// normal provider remains active, and timeout/failure is health evidence,
+  /// never a reason to stop capture.
+  private func requestStationaryExitProbe() {
+    guard lifecycle == .tracking || lifecycle == .starting else { return }
+
+    let requestedAt = Date()
+    lastProbeRequestedAt = requestedAt
+    lastProbeCompletedAt = nil
+    lastProbeOutcome = "pending"
+    persistContinuityHealth()
+
+    probeTimeoutWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self, self.lastProbeOutcome == "pending" else { return }
+      self.lastProbeCompletedAt = Date()
+      self.lastProbeOutcome = "timed_out"
+      self.probeTimeoutWorkItem = nil
+      self.persistContinuityHealth()
+      self.emitStatus(message: "stationary_exit_probe_timed_out")
+    }
+    probeTimeoutWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
+    locationManager.requestLocation()
+    emitStatus(message: "stationary_exit_probe_requested")
+  }
+
+  private func completeStationaryExitProbe(outcome: String) {
+    guard lastProbeOutcome == "pending" else { return }
+    probeTimeoutWorkItem?.cancel()
+    probeTimeoutWorkItem = nil
+    lastProbeCompletedAt = Date()
+    lastProbeOutcome = outcome
+    persistContinuityHealth()
+  }
+
+  private func providerFixKey(_ location: CLLocation) -> String {
+    let generation = captureGeneration.id ?? "missing_generation"
+    return [
+      generation,
+      String(epochMilliseconds(location.timestamp)),
+      String(location.coordinate.latitude.bitPattern, radix: 16),
+      String(location.coordinate.longitude.bitPattern, radix: 16),
+      String(location.altitude.bitPattern, radix: 16),
+      String(location.horizontalAccuracy.bitPattern, radix: 16),
+    ].joined(separator: ":")
+  }
+
+  private func providerFixEventId(_ providerFixKey: String) -> String {
+    // Stable FNV-1a keeps identifiers privacy-safe while making a probe and its
+    // matching stream callback idempotent across the native journal handoff.
+    var hash: UInt64 = 14_695_981_039_346_656_037
+    for byte in providerFixKey.utf8 {
+      hash ^= UInt64(byte)
+      hash = hash &* 1_099_511_628_211
+    }
+    return "ios_\(String(hash, radix: 16))"
+  }
+
+  private func rememberProviderFix(_ key: String) -> Bool {
+    guard recentProviderFixKeys.insert(key).inserted else { return false }
+    recentProviderFixKeyOrder.append(key)
+    if recentProviderFixKeyOrder.count > 512 {
+      let oldest = recentProviderFixKeyOrder.removeFirst()
+      recentProviderFixKeys.remove(oldest)
+    }
+    return true
   }
 
   private func shouldEmit(_ location: CLLocation) -> Bool {
@@ -1039,12 +1251,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     stationaryCandidateHasFollowUpFix = false
   }
 
-  private func locationMap(_ location: CLLocation) -> [String: Any] {
+  private func locationMap(_ location: CLLocation, providerFixKey: String) -> [String: Any] {
     let nativeReceivedAt = Date()
     let nativeReceivedAtMs = epochMilliseconds(nativeReceivedAt)
     let providerTimestampMs = epochMilliseconds(location.timestamp)
     var event: [String: Any] = [
-      "eventId": UUID().uuidString,
+      "eventId": providerFixEventId(providerFixKey),
       "lat": location.coordinate.latitude,
       "lon": location.coordinate.longitude,
       "altitude": location.altitude,
@@ -1062,7 +1274,14 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "batteryMode": profile == .stationary ? "stationary" : "moving",
       "motionState": profile == .stationary ? "stationary" : "moving",
       "provider": "core_location",
+      "nativeLifecycle": lifecycle.rawValue,
     ]
+    if let captureGenerationId = captureGeneration.id {
+      event["captureGenerationId"] = captureGenerationId
+    }
+    if let nativeSessionStartedAt = captureGeneration.startedAt {
+      event["nativeSessionStartedAt"] = epochMilliseconds(nativeSessionStartedAt)
+    }
     if #available(iOS 13.4, *) {
       event["headingAccuracy"] = location.courseAccuracy
       event["speedAccuracy"] = location.speedAccuracy
@@ -1077,9 +1296,17 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       event["activityType"] = activity["type"]
       event["activityConfidence"] = activity["confidence"]
       event["activityTimestamp"] = activity["timestamp"]
+      event["activitySource"] = activity["source"]
+      event["activityRawType"] = activity["rawType"]
+      event["activityEvidenceState"] = activity["evidenceState"]
+      event["activityAgeMs"] = activity["ageMs"]
+      event["activityProbabilities"] = activity["probabilities"]
     } else {
       event["activityType"] = "unknown"
       event["activityConfidence"] = 0
+    }
+    if let lastMotionEvidence {
+      event["motionEvidence"] = lastMotionEvidence
     }
 
     if #available(iOS 15.0, *) {
@@ -1121,11 +1348,28 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       type = "unknown"
     }
 
+    let timestamp = epochMilliseconds(activity.startDate)
+    let ageMs = max(0, epochMilliseconds(Date()) - timestamp)
+    let evidenceState = Double(ageMs) <= configuration.activityFreshnessThresholdMs
+      ? "fresh" : "stale"
+    let normalizedConfidence = motionConfidence(activity.confidence)
+    var probabilities: [String: Int] = [:]
+    if activity.stationary { probabilities["stationary"] = normalizedConfidence }
+    if activity.walking { probabilities["walking"] = normalizedConfidence }
+    if activity.running { probabilities["running"] = normalizedConfidence }
+    if activity.cycling { probabilities["cycling"] = normalizedConfidence }
+    if activity.automotive { probabilities["automotive"] = normalizedConfidence }
+    if activity.unknown { probabilities["unknown"] = normalizedConfidence }
+
     var event: [String: Any] = [
       "type": type,
       "rawType": type,
-      "confidence": motionConfidence(activity.confidence),
-      "timestamp": epochMilliseconds(activity.startDate),
+      "confidence": normalizedConfidence,
+      "timestamp": timestamp,
+      "source": "ios_core_motion_activity",
+      "evidenceState": evidenceState,
+      "ageMs": ageMs,
+      "probabilities": probabilities,
       "stationary": activity.stationary,
       "walking": activity.walking,
       "running": activity.running,
@@ -1257,6 +1501,36 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     userDefaults.set(lifecycle.rawValue, forKey: PersistenceKey.lifecycle)
     userDefaults.set(trackId, forKey: PersistenceKey.trackId)
     userDefaults.set(configuration.dictionary, forKey: PersistenceKey.configuration)
+    userDefaults.set(captureGeneration.id, forKey: PersistenceKey.captureGenerationId)
+    userDefaults.set(
+      captureGeneration.startedAt?.timeIntervalSince1970,
+      forKey: PersistenceKey.nativeSessionStartedAt
+    )
+    persistContinuityHealth()
+    // Native capture may start immediately after this write. Make the
+    // generation/lifecycle evidence durable before asking Core Location for
+    // callbacks so process recovery cannot confuse two provider sessions.
+    userDefaults.synchronize()
+  }
+
+  private func persistContinuityHealth() {
+    userDefaults.set(
+      lastProviderCallbackAt?.timeIntervalSince1970,
+      forKey: PersistenceKey.lastProviderCallbackAt
+    )
+    userDefaults.set(
+      lastProfileTransitionAt?.timeIntervalSince1970,
+      forKey: PersistenceKey.lastProfileTransitionAt
+    )
+    userDefaults.set(
+      lastProbeRequestedAt?.timeIntervalSince1970,
+      forKey: PersistenceKey.lastProbeRequestedAt
+    )
+    userDefaults.set(
+      lastProbeCompletedAt?.timeIntervalSince1970,
+      forKey: PersistenceKey.lastProbeCompletedAt
+    )
+    userDefaults.set(lastProbeOutcome, forKey: PersistenceKey.lastProbeOutcome)
   }
 
   private func restorePersistedState() {
@@ -1264,6 +1538,15 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       configuration = TrackingConfiguration(dictionary: savedConfiguration)
     }
     trackId = userDefaults.string(forKey: PersistenceKey.trackId)
+    captureGeneration.restore(
+      id: userDefaults.string(forKey: PersistenceKey.captureGenerationId),
+      startedAt: persistedDate(forKey: PersistenceKey.nativeSessionStartedAt)
+    )
+    lastProviderCallbackAt = persistedDate(forKey: PersistenceKey.lastProviderCallbackAt)
+    lastProfileTransitionAt = persistedDate(forKey: PersistenceKey.lastProfileTransitionAt)
+    lastProbeRequestedAt = persistedDate(forKey: PersistenceKey.lastProbeRequestedAt)
+    lastProbeCompletedAt = persistedDate(forKey: PersistenceKey.lastProbeCompletedAt)
+    lastProbeOutcome = userDefaults.string(forKey: PersistenceKey.lastProbeOutcome)
 
     guard let savedValue = userDefaults.string(forKey: PersistenceKey.lifecycle),
       let savedLifecycle = TrackingLifecycle(rawValue: savedValue)
@@ -1302,9 +1585,32 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     userDefaults.removeObject(forKey: PersistenceKey.lifecycle)
     userDefaults.removeObject(forKey: PersistenceKey.trackId)
     userDefaults.removeObject(forKey: PersistenceKey.configuration)
+    userDefaults.removeObject(forKey: PersistenceKey.captureGenerationId)
+    userDefaults.removeObject(forKey: PersistenceKey.nativeSessionStartedAt)
+    userDefaults.removeObject(forKey: PersistenceKey.lastProviderCallbackAt)
+    userDefaults.removeObject(forKey: PersistenceKey.lastProfileTransitionAt)
+    userDefaults.removeObject(forKey: PersistenceKey.lastProbeRequestedAt)
+    userDefaults.removeObject(forKey: PersistenceKey.lastProbeCompletedAt)
+    userDefaults.removeObject(forKey: PersistenceKey.lastProbeOutcome)
+    captureGeneration.clear()
+    lastProviderCallbackAt = nil
+    lastProfileTransitionAt = nil
+    lastProbeRequestedAt = nil
+    lastProbeCompletedAt = nil
+    lastProbeOutcome = nil
+    probeTimeoutWorkItem?.cancel()
+    probeTimeoutWorkItem = nil
+    recentProviderFixKeys.removeAll(keepingCapacity: false)
+    recentProviderFixKeyOrder.removeAll(keepingCapacity: false)
     pendingTerminationRecovery = false
     recoveredFromTermination = false
     terminationRecoveryGapStartedAt = nil
+    userDefaults.synchronize()
+  }
+
+  private func persistedDate(forKey key: String) -> Date? {
+    guard userDefaults.object(forKey: key) != nil else { return nil }
+    return Date(timeIntervalSince1970: userDefaults.double(forKey: key))
   }
 
   private func epochMilliseconds(_ date: Date) -> Int64 {
@@ -1315,15 +1621,20 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard lifecycle == .tracking else { return }
+    lastProviderCallbackAt = Date()
+    persistContinuityHealth()
+    completeStationaryExitProbe(outcome: "succeeded")
     for location in locations {
       let generation = sessionGeneration
+      let fixKey = providerFixKey(location)
+      guard rememberProviderFix(fixKey) else { continue }
       recordStationaryCandidateEvidence(location)
       if shouldExitStationary(for: location) {
         transition(to: .moving)
       }
       guard shouldEmit(location) else { continue }
       lastEmittedLocation = location
-      let event = locationMap(location)
+      let event = locationMap(location, providerFixKey: fixKey)
       locationJournalQueue.append(event) { [weak self] result in
         guard let self else { return }
         switch result {
@@ -1350,9 +1661,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
     let coreLocationError = error as? CLError
     if coreLocationError?.code == .locationUnknown {
+      completeStationaryExitProbe(outcome: "temporarily_unavailable")
       emitStatus(message: "location_temporarily_unavailable")
       return
     }
+
+    completeStationaryExitProbe(outcome: "failed")
 
     if coreLocationError?.code == .denied {
       stopNativeUpdates()

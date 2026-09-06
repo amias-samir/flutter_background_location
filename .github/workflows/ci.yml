@@ -68,7 +68,7 @@ jobs:
         working-directory: example
         run: flutter pub get
       - name: Check example formatting
-        run: dart format --output=none --set-exit-if-changed example/lib example/test
+        run: dart format --output=none --set-exit-if-changed example/lib example/test example/integration_test
       - name: Analyze example
         working-directory: example
         run: flutter analyze

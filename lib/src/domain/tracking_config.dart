@@ -1,10 +1,73 @@
 import 'dart:convert';
 
+import 'tracking_continuity.dart';
 import 'tracking_error.dart';
 
-enum MockLocationPolicy { allow, flag, reject }
+/// How suspected mock or simulated locations should affect route capture.
+enum MockLocationPolicy {
+  /// Store the fix normally even when mock evidence is present.
+  allow,
 
-enum TrackRecordRetentionPolicy { keepLatestOnly, keepAll }
+  /// Store the fix and keep the mock assessment for later review.
+  flag,
+
+  /// Reject fixes that have mock evidence.
+  reject,
+}
+
+/// Local database retention mode for completed route history.
+enum TrackRecordRetentionPolicy {
+  /// Delete older route history when a new route starts.
+  keepLatestOnly,
+
+  /// Keep all locally recorded routes until the app deletes them.
+  keepAll,
+}
+
+/// User-declared route mode used when motion evidence is unavailable.
+enum RouteCaptureIntent {
+  /// Select moving/stationary behavior from available motion evidence.
+  adaptive,
+
+  /// Prefer dense walking capture when evidence is stale or ambiguous.
+  walking,
+
+  /// Prefer dense bicycle/two-wheeler capture bounds.
+  cycling,
+
+  /// Prefer vehicle-qualified moving capture bounds.
+  vehicle,
+}
+
+/// Sampling fallback applied to stale platform activity evidence.
+enum StaleActivityFallback {
+  /// Fail open to the moving profile while actively recording.
+  keepMovingProfile,
+
+  /// Retain the current profile until fresh evidence arrives.
+  preserveCurrentProfile,
+}
+
+/// Native sensor sources allowed to supplement activity and GPS evidence.
+enum MotionFusionMode {
+  /// Existing platform activity plus GPS displacement only.
+  platformActivityOnly,
+
+  /// Adds hardware step/pedometer and significant-motion events.
+  lowPowerSensorFusion,
+
+  /// Adds bounded accelerometer/gyro probes during ambiguous windows.
+  enhancedSensorFusion,
+}
+
+/// Sampling fallback applied when the fused decision remains unknown.
+enum UnknownMotionFallback {
+  /// Fail open to the moving profile while actively recording.
+  keepMovingProfile,
+
+  /// Retain the current profile while evidence remains inconclusive.
+  preserveCurrentProfile,
+}
 
 /// iOS behavior after operating-system process termination.
 ///
@@ -22,6 +85,12 @@ enum IosTerminationRecoveryMode { interrupted, significantChange }
 /// selected profile. [TrackingConfig.locationAccuracy] can independently
 /// override the native provider accuracy without changing the intervals or
 /// distance filters.
+///
+/// A non-adaptive [TrackingConfig.captureIntent] requests a denser 3-second,
+/// 3-metre moving profile. Vehicle capture also uses a wider acceptance
+/// envelope (35 metres for [high], 25 metres for [precised]) so usable urban
+/// fixes are not discarded while the native provider still requests
+/// navigation-grade accuracy.
 enum TrackingAccuracy {
   /// Uses balanced native accuracy and accepts fixes accurate to 100 metres.
   low,
@@ -120,6 +189,7 @@ final class TrackingConfig {
   const TrackingConfig({
     this.accuracy = TrackingAccuracy.high,
     TrackingAccuracy? locationAccuracy,
+    TrackingAccuracy? stationaryLocationAccuracy,
     int? movingDistanceFilterMeters,
     Duration? movingInterval,
     int? stationaryDistanceFilterMeters,
@@ -130,70 +200,112 @@ final class TrackingConfig {
     this.stationaryProbeDisplacementMeters = 30,
     this.stationaryConfidenceThreshold = 75,
     this.movingConfidenceThreshold = 60,
-    this.movingConfirmationCount = 2,
-    this.activityRecognitionInterval = const Duration(seconds: 10),
+    this.movingConfirmationCount = 1,
+    this.activityRecognitionInterval = const Duration(seconds: 5),
+    this.captureIntent = RouteCaptureIntent.adaptive,
+    this.activityFreshnessThreshold = const Duration(seconds: 30),
+    this.staleActivityFallback = StaleActivityFallback.keepMovingProfile,
+    this.motionFusionMode = MotionFusionMode.platformActivityOnly,
+    this.unknownMotionFallback = UnknownMotionFallback.keepMovingProfile,
+    this.motionEvidenceFreshness = const Duration(seconds: 30),
+    this.sensorProbeDuration = const Duration(seconds: 4),
+    this.sensorProbeCooldown = const Duration(seconds: 20),
+    this.sensorProbeMaximumDurationPerHour = const Duration(minutes: 3),
     this.mockLocationPolicy = MockLocationPolicy.flag,
     this.batchPointCount = 25,
     this.batchMaxAge = const Duration(minutes: 2),
-    this.largeGapThreshold = const Duration(minutes: 5),
+    Duration? largeGapThreshold,
+    Duration? maximumProviderFixAge,
+    this.callbackHealthWarningThreshold = const Duration(minutes: 2),
+    Duration? acceptedGeometryGapThreshold,
+    this.continuityPolicy = TrackingContinuityPolicy.conservative,
     Duration? firstFixTimeout,
     this.androidNotificationTitle = 'Location tracking active',
     this.androidNotificationText = 'Recording your route',
     this.iosTerminationRecoveryMode = IosTerminationRecoveryMode.interrupted,
   })  : firstFixTimeout = firstFixTimeout ??
             (accuracy == TrackingAccuracy.low
-                ? const Duration(minutes: 3)
+                ? const Duration(minutes: 2)
                 : accuracy == TrackingAccuracy.medium
-                    ? const Duration(minutes: 2)
+                    ? const Duration(seconds: 90)
                     : accuracy == TrackingAccuracy.precised
-                        ? const Duration(seconds: 45)
-                        : const Duration(minutes: 1)),
+                        ? const Duration(seconds: 30)
+                        : const Duration(seconds: 45)),
         locationAccuracy = locationAccuracy ??
             (accuracy == TrackingAccuracy.low
                 ? TrackingAccuracy.medium
                 : accuracy == TrackingAccuracy.medium
                     ? TrackingAccuracy.high
                     : TrackingAccuracy.precised),
+        stationaryLocationAccuracy = stationaryLocationAccuracy ??
+            locationAccuracy ??
+            (accuracy == TrackingAccuracy.low
+                ? TrackingAccuracy.medium
+                : accuracy == TrackingAccuracy.medium
+                    ? TrackingAccuracy.high
+                    : TrackingAccuracy.precised),
         movingDistanceFilterMeters = movingDistanceFilterMeters ??
-            (accuracy == TrackingAccuracy.low
-                ? 25
-                : accuracy == TrackingAccuracy.medium
-                    ? 15
-                    : accuracy == TrackingAccuracy.precised
-                        ? 5
-                        : 5),
+            (captureIntent == RouteCaptureIntent.walking ||
+                    captureIntent == RouteCaptureIntent.cycling ||
+                    captureIntent == RouteCaptureIntent.vehicle
+                ? 3
+                : accuracy == TrackingAccuracy.low
+                    ? 20
+                    : accuracy == TrackingAccuracy.medium
+                        ? 10
+                        : accuracy == TrackingAccuracy.precised
+                            ? 3
+                            : 5),
         movingInterval = movingInterval ??
-            (accuracy == TrackingAccuracy.low
-                ? const Duration(seconds: 30)
-                : accuracy == TrackingAccuracy.medium
-                    ? const Duration(seconds: 15)
-                    : accuracy == TrackingAccuracy.precised
-                        ? const Duration(seconds: 5)
-                        : const Duration(seconds: 10)),
+            (captureIntent == RouteCaptureIntent.walking ||
+                    captureIntent == RouteCaptureIntent.cycling ||
+                    captureIntent == RouteCaptureIntent.vehicle
+                ? const Duration(seconds: 3)
+                : accuracy == TrackingAccuracy.low
+                    ? const Duration(seconds: 20)
+                    : accuracy == TrackingAccuracy.medium
+                        ? const Duration(seconds: 10)
+                        : accuracy == TrackingAccuracy.precised
+                            ? const Duration(seconds: 3)
+                            : const Duration(seconds: 5)),
         stationaryDistanceFilterMeters = stationaryDistanceFilterMeters ??
             (accuracy == TrackingAccuracy.low
-                ? 100
+                ? 75
                 : accuracy == TrackingAccuracy.medium
-                    ? 75
+                    ? 50
                     : accuracy == TrackingAccuracy.precised
-                        ? 15
-                        : 25),
+                        ? 10
+                        : 20),
         stationaryInterval = stationaryInterval ??
             (accuracy == TrackingAccuracy.low
-                ? const Duration(minutes: 3)
+                ? const Duration(minutes: 2)
                 : accuracy == TrackingAccuracy.medium
-                    ? const Duration(minutes: 2)
+                    ? const Duration(minutes: 1)
                     : accuracy == TrackingAccuracy.precised
-                        ? const Duration(seconds: 30)
-                        : const Duration(seconds: 30)),
+                        ? const Duration(seconds: 15)
+                        : const Duration(seconds: 20)),
         maximumAcceptedAccuracyMeters = maximumAcceptedAccuracyMeters ??
-            (accuracy == TrackingAccuracy.low
-                ? 100
-                : accuracy == TrackingAccuracy.medium
-                    ? 60
-                    : accuracy == TrackingAccuracy.precised
-                        ? 15
-                        : 20),
+            (captureIntent == RouteCaptureIntent.vehicle
+                ? (accuracy == TrackingAccuracy.low
+                    ? 100
+                    : accuracy == TrackingAccuracy.medium
+                        ? 75
+                        : accuracy == TrackingAccuracy.precised
+                            ? 25
+                            : 35)
+                : accuracy == TrackingAccuracy.low
+                    ? 100
+                    : accuracy == TrackingAccuracy.medium
+                        ? 60
+                        : accuracy == TrackingAccuracy.precised
+                            ? 15
+                            : 20),
+        maximumProviderFixAge = maximumProviderFixAge ??
+            largeGapThreshold ??
+            const Duration(minutes: 5),
+        acceptedGeometryGapThreshold = acceptedGeometryGapThreshold ??
+            largeGapThreshold ??
+            const Duration(minutes: 5),
         assert(movingDistanceFilterMeters == null ||
             movingDistanceFilterMeters >= 0),
         assert(stationaryDistanceFilterMeters == null ||
@@ -215,25 +327,119 @@ final class TrackingConfig {
   /// The native provider accuracy, independently overridable from [accuracy].
   final TrackingAccuracy locationAccuracy;
 
+  /// Core Location accuracy used after the stationary transition.
+  ///
+  /// By default this matches [locationAccuracy], so a high/precised session
+  /// does not silently request fixes looser than its acceptance policy.
+  final TrackingAccuracy stationaryLocationAccuracy;
+
+  /// Minimum displacement requested while the route is moving.
   final int movingDistanceFilterMeters;
+
+  /// Requested provider interval while the route is moving.
   final Duration movingInterval;
+
+  /// Minimum displacement requested in the adaptive stationary profile.
   final int stationaryDistanceFilterMeters;
+
+  /// Requested provider interval in the adaptive stationary profile.
   final Duration stationaryInterval;
+
+  /// Largest reported horizontal uncertainty accepted into route geometry.
+  ///
+  /// This filters fixes; it does not force the operating system to produce a
+  /// fix this accurate. Vehicle intent deliberately defaults to 35 metres for
+  /// [TrackingAccuracy.high] and 25 metres for [TrackingAccuracy.precised] to
+  /// retain useful pocket/urban fixes and reduce visible gaps.
   final double maximumAcceptedAccuracyMeters;
+
+  /// Largest plausible route speed before a fix is rejected as an outlier.
   final double maximumPlausibleSpeedMetersPerSecond;
+
+  /// Time a route must look stationary before adaptive mode relaxes sampling.
   final Duration stationaryConfirmationDuration;
+
+  /// Displacement used to probe whether a stationary route has moved again.
   final double stationaryProbeDisplacementMeters;
+
+  /// Minimum platform confidence required to accept stationary evidence.
   final int stationaryConfidenceThreshold;
+
+  /// Minimum platform confidence required to accept moving evidence.
   final int movingConfidenceThreshold;
+
+  /// Number of moving decisions required before returning to moving sampling.
   final int movingConfirmationCount;
+
+  /// Requested interval for platform activity-recognition updates.
   final Duration activityRecognitionInterval;
+
+  /// Expected movement type used when motion evidence is stale or unknown.
+  final RouteCaptureIntent captureIntent;
+
+  /// Maximum age of activity evidence before [staleActivityFallback] applies.
+  final Duration activityFreshnessThreshold;
+
+  /// Fallback strategy for stale platform activity evidence.
+  final StaleActivityFallback staleActivityFallback;
+
+  /// Optional sensor-fusion mode used to supplement activity and GPS evidence.
+  final MotionFusionMode motionFusionMode;
+
+  /// Fallback strategy when fused motion evidence remains unknown.
+  final UnknownMotionFallback unknownMotionFallback;
+
+  /// Maximum age of sensor-fusion evidence before it is considered stale.
+  final Duration motionEvidenceFreshness;
+
+  /// Maximum length of one enhanced accelerometer/gyro ambiguity probe.
+  final Duration sensorProbeDuration;
+
+  /// Minimum delay between enhanced sensor probes.
+  final Duration sensorProbeCooldown;
+
+  /// Maximum cumulative enhanced-sensor probe time in each rolling hour.
+  final Duration sensorProbeMaximumDurationPerHour;
+
+  /// Mock-location handling policy for incoming native fixes.
   final MockLocationPolicy mockLocationPolicy;
+
+  /// Number of accepted points kept in memory before batched persistence.
   final int batchPointCount;
+
+  /// Maximum time an accepted point can wait before batched persistence.
   final Duration batchMaxAge;
-  final Duration largeGapThreshold;
+
+  /// Maximum provider fix age accepted at native receipt.
+  final Duration maximumProviderFixAge;
+
+  /// Callback silence after which health may be reported as degraded.
+  final Duration callbackHealthWarningThreshold;
+
+  /// Accepted-anchor gap that should create durable diagnostic evidence.
+  ///
+  /// Exceeding this value is not by itself proof of an interruption.
+  final Duration acceptedGeometryGapThreshold;
+
+  /// Fallback used when capture continuity evidence is incomplete.
+  final TrackingContinuityPolicy continuityPolicy;
+
+  /// Legacy alias for [acceptedGeometryGapThreshold].
+  @Deprecated(
+    'Use maximumProviderFixAge and acceptedGeometryGapThreshold independently.',
+  )
+  Duration get largeGapThreshold => acceptedGeometryGapThreshold;
+
+  /// Time allowed for the first usable fix before readiness/health degrades.
   final Duration firstFixTimeout;
+
+  /// Android foreground-service notification title.
   final String androidNotificationTitle;
+
+  /// Android foreground-service notification body text.
   final String androidNotificationText;
+
+  /// iOS recovery behavior after operating-system process termination.
   final IosTerminationRecoveryMode iosTerminationRecoveryMode;
 
   ResolvedTrackingAccuracy get resolvedAccuracy => ResolvedTrackingAccuracy(
@@ -248,6 +454,7 @@ final class TrackingConfig {
   TrackingConfig copyWith({
     TrackingAccuracy? accuracy,
     TrackingAccuracy? locationAccuracy,
+    TrackingAccuracy? stationaryLocationAccuracy,
     int? movingDistanceFilterMeters,
     Duration? movingInterval,
     int? stationaryDistanceFilterMeters,
@@ -260,10 +467,23 @@ final class TrackingConfig {
     int? movingConfidenceThreshold,
     int? movingConfirmationCount,
     Duration? activityRecognitionInterval,
+    RouteCaptureIntent? captureIntent,
+    Duration? activityFreshnessThreshold,
+    StaleActivityFallback? staleActivityFallback,
+    MotionFusionMode? motionFusionMode,
+    UnknownMotionFallback? unknownMotionFallback,
+    Duration? motionEvidenceFreshness,
+    Duration? sensorProbeDuration,
+    Duration? sensorProbeCooldown,
+    Duration? sensorProbeMaximumDurationPerHour,
     MockLocationPolicy? mockLocationPolicy,
     int? batchPointCount,
     Duration? batchMaxAge,
     Duration? largeGapThreshold,
+    Duration? maximumProviderFixAge,
+    Duration? callbackHealthWarningThreshold,
+    Duration? acceptedGeometryGapThreshold,
+    TrackingContinuityPolicy? continuityPolicy,
     Duration? firstFixTimeout,
     String? androidNotificationTitle,
     String? androidNotificationText,
@@ -272,6 +492,8 @@ final class TrackingConfig {
       TrackingConfig(
         accuracy: accuracy ?? this.accuracy,
         locationAccuracy: locationAccuracy ?? this.locationAccuracy,
+        stationaryLocationAccuracy:
+            stationaryLocationAccuracy ?? this.stationaryLocationAccuracy,
         movingDistanceFilterMeters:
             movingDistanceFilterMeters ?? this.movingDistanceFilterMeters,
         movingInterval: movingInterval ?? this.movingInterval,
@@ -295,10 +517,31 @@ final class TrackingConfig {
             movingConfirmationCount ?? this.movingConfirmationCount,
         activityRecognitionInterval:
             activityRecognitionInterval ?? this.activityRecognitionInterval,
+        captureIntent: captureIntent ?? this.captureIntent,
+        activityFreshnessThreshold:
+            activityFreshnessThreshold ?? this.activityFreshnessThreshold,
+        staleActivityFallback:
+            staleActivityFallback ?? this.staleActivityFallback,
+        motionFusionMode: motionFusionMode ?? this.motionFusionMode,
+        unknownMotionFallback:
+            unknownMotionFallback ?? this.unknownMotionFallback,
+        motionEvidenceFreshness:
+            motionEvidenceFreshness ?? this.motionEvidenceFreshness,
+        sensorProbeDuration: sensorProbeDuration ?? this.sensorProbeDuration,
+        sensorProbeCooldown: sensorProbeCooldown ?? this.sensorProbeCooldown,
+        sensorProbeMaximumDurationPerHour: sensorProbeMaximumDurationPerHour ??
+            this.sensorProbeMaximumDurationPerHour,
         mockLocationPolicy: mockLocationPolicy ?? this.mockLocationPolicy,
         batchPointCount: batchPointCount ?? this.batchPointCount,
         batchMaxAge: batchMaxAge ?? this.batchMaxAge,
-        largeGapThreshold: largeGapThreshold ?? this.largeGapThreshold,
+        maximumProviderFixAge:
+            maximumProviderFixAge ?? this.maximumProviderFixAge,
+        callbackHealthWarningThreshold: callbackHealthWarningThreshold ??
+            this.callbackHealthWarningThreshold,
+        acceptedGeometryGapThreshold: acceptedGeometryGapThreshold ??
+            largeGapThreshold ??
+            this.acceptedGeometryGapThreshold,
+        continuityPolicy: continuityPolicy ?? this.continuityPolicy,
         firstFixTimeout: firstFixTimeout ?? this.firstFixTimeout,
         androidNotificationTitle:
             androidNotificationTitle ?? this.androidNotificationTitle,
@@ -328,8 +571,38 @@ final class TrackingConfig {
       'activityRecognitionInterval',
       activityRecognitionInterval,
     );
+    _positiveDuration(
+      errors,
+      'activityFreshnessThreshold',
+      activityFreshnessThreshold,
+    );
+    _positiveDuration(
+      errors,
+      'motionEvidenceFreshness',
+      motionEvidenceFreshness,
+    );
+    _positiveDuration(errors, 'sensorProbeDuration', sensorProbeDuration);
+    _positiveDuration(errors, 'sensorProbeCooldown', sensorProbeCooldown);
+    _positiveDuration(
+      errors,
+      'sensorProbeMaximumDurationPerHour',
+      sensorProbeMaximumDurationPerHour,
+    );
+    if (sensorProbeMaximumDurationPerHour > const Duration(hours: 1)) {
+      errors.add('sensorProbeMaximumDurationPerHour must not exceed one hour');
+    }
     _positiveDuration(errors, 'batchMaxAge', batchMaxAge);
-    _positiveDuration(errors, 'largeGapThreshold', largeGapThreshold);
+    _positiveDuration(errors, 'maximumProviderFixAge', maximumProviderFixAge);
+    _positiveDuration(
+      errors,
+      'callbackHealthWarningThreshold',
+      callbackHealthWarningThreshold,
+    );
+    _positiveDuration(
+      errors,
+      'acceptedGeometryGapThreshold',
+      acceptedGeometryGapThreshold,
+    );
     _positiveDuration(errors, 'firstFixTimeout', firstFixTimeout);
     _positiveFiniteDouble(
       errors,
@@ -370,6 +643,7 @@ final class TrackingConfig {
   Map<String, Object?> toMap() => <String, Object?>{
         'accuracy': accuracy.name,
         'desiredAccuracy': locationAccuracy.name,
+        'stationaryDesiredAccuracy': stationaryLocationAccuracy.name,
         'movingDistanceFilterMeters': movingDistanceFilterMeters,
         'movingIntervalMs': movingInterval.inMilliseconds,
         'stationaryDistanceFilterMeters': stationaryDistanceFilterMeters,
@@ -385,10 +659,29 @@ final class TrackingConfig {
         'movingConfirmationCount': movingConfirmationCount,
         'activityRecognitionIntervalMs':
             activityRecognitionInterval.inMilliseconds,
+        'captureIntent': captureIntent.name,
+        'activityFreshnessThresholdMs':
+            activityFreshnessThreshold.inMilliseconds,
+        'staleActivityFallback': staleActivityFallback.name,
+        'motionFusionMode': motionFusionMode.name,
+        'unknownMotionFallback': unknownMotionFallback.name,
+        'motionEvidenceFreshnessMs': motionEvidenceFreshness.inMilliseconds,
+        'sensorProbeDurationMs': sensorProbeDuration.inMilliseconds,
+        'sensorProbeCooldownMs': sensorProbeCooldown.inMilliseconds,
+        'sensorProbeMaximumDurationPerHourMs':
+            sensorProbeMaximumDurationPerHour.inMilliseconds,
         'mockLocationPolicy': mockLocationPolicy.name,
         'batchPointCount': batchPointCount,
         'batchMaxAgeMs': batchMaxAge.inMilliseconds,
-        'largeGapThresholdMs': largeGapThreshold.inMilliseconds,
+        // Keep the legacy key in resolved epoch JSON for older native/custom
+        // consumers while persisting the independent policy values as well.
+        'largeGapThresholdMs': acceptedGeometryGapThreshold.inMilliseconds,
+        'maximumProviderFixAgeMs': maximumProviderFixAge.inMilliseconds,
+        'callbackHealthWarningThresholdMs':
+            callbackHealthWarningThreshold.inMilliseconds,
+        'acceptedGeometryGapThresholdMs':
+            acceptedGeometryGapThreshold.inMilliseconds,
+        'continuityPolicy': continuityPolicy.name,
         'firstFixTimeoutMs': firstFixTimeout.inMilliseconds,
         'notificationTitle': androidNotificationTitle,
         'notificationText': androidNotificationText,
@@ -419,6 +712,17 @@ final class TrackingConfig {
               fallback: accuracy,
             )
           : null,
+      stationaryLocationAccuracy: map.containsKey('stationaryDesiredAccuracy')
+          ? TrackingAccuracy.parse(
+              map['stationaryDesiredAccuracy'],
+              fallback: map.containsKey('desiredAccuracy')
+                  ? TrackingAccuracy.parse(
+                      map['desiredAccuracy'],
+                      fallback: accuracy,
+                    )
+                  : accuracy,
+            )
+          : null,
       movingDistanceFilterMeters: integer('movingDistanceFilterMeters'),
       movingInterval: duration('movingIntervalMs'),
       stationaryDistanceFilterMeters: integer('stationaryDistanceFilterMeters'),
@@ -434,9 +738,40 @@ final class TrackingConfig {
       stationaryConfidenceThreshold:
           integer('stationaryConfidenceThreshold') ?? 75,
       movingConfidenceThreshold: integer('movingConfidenceThreshold') ?? 60,
-      movingConfirmationCount: integer('movingConfirmationCount') ?? 2,
+      movingConfirmationCount: integer('movingConfirmationCount') ?? 1,
       activityRecognitionInterval: Duration(
-        milliseconds: integer('activityRecognitionIntervalMs') ?? 10000,
+        milliseconds: integer('activityRecognitionIntervalMs') ?? 5000,
+      ),
+      captureIntent: RouteCaptureIntent.values.firstWhere(
+        (value) => value.name == map['captureIntent'],
+        orElse: () => RouteCaptureIntent.adaptive,
+      ),
+      activityFreshnessThreshold: Duration(
+        milliseconds: integer('activityFreshnessThresholdMs') ?? 30000,
+      ),
+      staleActivityFallback: StaleActivityFallback.values.firstWhere(
+        (value) => value.name == map['staleActivityFallback'],
+        orElse: () => StaleActivityFallback.keepMovingProfile,
+      ),
+      motionFusionMode: MotionFusionMode.values.firstWhere(
+        (value) => value.name == map['motionFusionMode'],
+        orElse: () => MotionFusionMode.platformActivityOnly,
+      ),
+      unknownMotionFallback: UnknownMotionFallback.values.firstWhere(
+        (value) => value.name == map['unknownMotionFallback'],
+        orElse: () => UnknownMotionFallback.keepMovingProfile,
+      ),
+      motionEvidenceFreshness: Duration(
+        milliseconds: integer('motionEvidenceFreshnessMs') ?? 30000,
+      ),
+      sensorProbeDuration: Duration(
+        milliseconds: integer('sensorProbeDurationMs') ?? 4000,
+      ),
+      sensorProbeCooldown: Duration(
+        milliseconds: integer('sensorProbeCooldownMs') ?? 20000,
+      ),
+      sensorProbeMaximumDurationPerHour: Duration(
+        milliseconds: integer('sensorProbeMaximumDurationPerHourMs') ?? 180000,
       ),
       mockLocationPolicy: MockLocationPolicy.values.firstWhere(
         (value) => value.name == map['mockLocationPolicy'],
@@ -446,8 +781,16 @@ final class TrackingConfig {
       ),
       batchPointCount: integer('batchPointCount') ?? 25,
       batchMaxAge: Duration(milliseconds: integer('batchMaxAgeMs') ?? 120000),
-      largeGapThreshold: Duration(
-        milliseconds: integer('largeGapThresholdMs') ?? 300000,
+      largeGapThreshold: map.containsKey('largeGapThresholdMs')
+          ? Duration(milliseconds: integer('largeGapThresholdMs')!)
+          : null,
+      maximumProviderFixAge: duration('maximumProviderFixAgeMs'),
+      callbackHealthWarningThreshold:
+          duration('callbackHealthWarningThresholdMs') ??
+              const Duration(minutes: 2),
+      acceptedGeometryGapThreshold: duration('acceptedGeometryGapThresholdMs'),
+      continuityPolicy: TrackingContinuityPolicy.parse(
+        map['continuityPolicy'],
       ),
       firstFixTimeout: Duration(
         milliseconds: integer('firstFixTimeoutMs') ??

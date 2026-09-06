@@ -1,16 +1,65 @@
 ## Unreleased
 
+- Added schema 14 distance repair so same-segment accepted geometry is counted
+  even when rejected callbacks occurred between anchors; inferred lifecycle
+  and multi-day connectors remain excluded.
+- Increased preset-definition version 4 sampling density across all accuracy
+  modes, made explicit walking/cycling/vehicle capture stay in the moving
+  profile, and reduced activity/motion recovery latency.
+- Increased vehicle capture to a 3-second/3 m request and added bounded 35 m
+  (`high`) and 25 m (`precised`) urban acceptance envelopes while preserving
+  explicit per-field overrides.
+- Reduced duplicate gap evidence for rejected callbacks and limited map gap
+  markers to severe automatic gaps or genuine lifecycle boundaries.
+
+- Added schema 13 activity provenance/freshness, bounded coordinate-free
+  motion-evidence persistence, severity-rated rejected-fix quality runs, and
+  privacy-safe quality summaries.
+- Added opt-in low-power and enhanced sensor fusion on Android/iOS using
+  steps/pedometer, significant motion, and bounded ambiguity probes; compass
+  and gyro never generate coordinates, and all listeners stop with capture.
+- Added Android Activity Transition input, probable-activity distributions,
+  fresh high-fidelity requests, and stale/unknown moving-profile fallback;
+  added equivalent iOS freshness, pedometer, and immediate-fix behavior.
+- Added `RouteCaptureIntent` and walking/cycling/vehicle sampling defaults while
+  preserving individual configuration overrides.
+- Added persisted `MultiDayRoutePresentation` modes and shared
+  `connectDailyLegs` topology across maps and GeoJSON/KML/GPX Trip exports.
+- Added deterministic uncertainty-aware spike smoothing plus a bounded,
+  vendor-neutral `RouteGeometryProcessor` adapter with raw fallback and
+  immutable processor provenance.
+- Updated the example with start-time capture/fusion/presentation controls,
+  distinct activity confidence and GPS uncertainty, fused-motion sources,
+  quality/visible-gap counts, filtered markers, and stored Trip map defaults.
+- Added a coordinate-free physical-qualification template generator and
+  strengthened its validator to enforce fusion, capture-intent, carry-state,
+  power-state, metric-range, and zero-raw-sensor-persistence coverage.
+- Added a physical-device lifecycle harness with a bounded post-install
+  permission window for checking active/pause/resume/complete service and
+  optional-sensor teardown, plus privacy-safe accepted/rejected/segment and
+  stored-versus-geometry distance aggregates, without treating stationary or
+  simulator runs as route-accuracy or battery evidence.
+
+- Added schema 12 continuity evidence and atomic point/topology persistence so
+  a healthy stationary or rejected-fix run no longer creates an artificial
+  route break solely because the accepted-point gap exceeded five minutes.
+- Added stable Android/iOS capture generations, coordinate-free continuity
+  health, and journal-deduplicated stationary-exit location probes.
+- Added owner-scoped multi-day `Trip` models, migration-backed implicit Trips,
+  crash-recoverable/idempotent Start/End day/Continue/Complete operations,
+  revisioned optional completion upload, Trip-level retention, and cascading
+  terminal deletion.
+- Added shared three-mode route geometry used by maps plus legacy/streaming
+  exports, typed inferred connectors excluded from measured distance, and
+  combined chronological GeoJSON/KML/GPX Trip export.
+- Updated the example to show one Trip with daily leg/segment/gap counts,
+  End day and confirmed completion/continuation controls, whole-Trip MapLibre
+  rendering, gap indicators, connect-all disclosure, export, and deletion.
 - Added red Start and green Destination indicators to the example route map.
 - Refreshed the example with clearer session, lifecycle, configuration, and
   recorded-route cards, plus a confirmed owner-conflict recovery prompt.
 - Expanded integration-focused Dartdoc coverage and simplified the README's
   setup flow and core API reference.
-- Retuned all accuracy presets toward higher fidelity: `low` now matches the
-  former medium profile, `medium` matches the former high profile, default
-  `high` uses navigation accuracy with a 10-second moving interval, and
-  `precised` accepts 15 m accuracy with a 15 m stationary filter. The example
-  now explains the battery cost and can open Android battery settings from an
-  explicit user action. New epochs record preset-definition version 3.
 - Added the awaited owner-bound `TrackingClient.open`/`TrackingController`
   facade, owner-scoped history/upload behavior, opaque foreign-capture recovery,
   and durable native command leases on Android and iOS.

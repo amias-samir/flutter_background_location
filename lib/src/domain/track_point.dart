@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'activity_snapshot.dart';
 import 'location_sample.dart';
 import 'track_segment.dart';
@@ -48,7 +50,20 @@ final class TrackPoint {
     this.monotonicFixNanos,
     this.monotonicReceivedNanos,
     this.monotonicDomainId,
+    this.captureGenerationId,
+    this.nativeSessionStartedAt,
+    this.nativeLifecycle,
+    this.samplingProfile,
     this.qualityPolicyVersion,
+    this.activitySource,
+    this.activityRawType,
+    this.activityEvidenceState = ActivityEvidenceState.unavailable,
+    this.activityAge,
+    this.activityProbabilities = const <TrackingActivityType, int>{},
+    this.nativeForegroundState,
+    this.screenInteractive,
+    this.batterySaverActive,
+    this.motionEvidenceId,
   });
 
   final String id;
@@ -68,6 +83,15 @@ final class TrackPoint {
   final DateTime persistedAt;
   final TrackingActivityType activityType;
   final int activityConfidence;
+  final String? activitySource;
+  final String? activityRawType;
+  final ActivityEvidenceState activityEvidenceState;
+  final Duration? activityAge;
+  final Map<TrackingActivityType, int> activityProbabilities;
+  final String? nativeForegroundState;
+  final bool? screenInteractive;
+  final bool? batterySaverActive;
+  final String? motionEvidenceId;
   final MotionState motionState;
   final String? provider;
   final bool isMocked;
@@ -85,6 +109,10 @@ final class TrackPoint {
   final int? monotonicFixNanos;
   final int? monotonicReceivedNanos;
   final String? monotonicDomainId;
+  final String? captureGenerationId;
+  final DateTime? nativeSessionStartedAt;
+  final TrackerLifecycle? nativeLifecycle;
+  final SamplingProfile? samplingProfile;
   final int? qualityPolicyVersion;
   final bool accepted;
   final int qualityFlags;
@@ -122,6 +150,15 @@ final class TrackPoint {
         persistedAt: persistedAt,
         activityType: activityType,
         activityConfidence: activityConfidence,
+        activitySource: activitySource,
+        activityRawType: activityRawType,
+        activityEvidenceState: activityEvidenceState,
+        activityAge: activityAge,
+        activityProbabilities: activityProbabilities,
+        nativeForegroundState: nativeForegroundState,
+        screenInteractive: screenInteractive,
+        batterySaverActive: batterySaverActive,
+        motionEvidenceId: motionEvidenceId,
         motionState: motionState,
         provider: provider,
         isMocked: isMocked,
@@ -134,6 +171,10 @@ final class TrackPoint {
         monotonicFixNanos: monotonicFixNanos,
         monotonicReceivedNanos: monotonicReceivedNanos,
         monotonicDomainId: monotonicDomainId,
+        captureGenerationId: captureGenerationId,
+        nativeSessionStartedAt: nativeSessionStartedAt,
+        nativeLifecycle: nativeLifecycle,
+        samplingProfile: samplingProfile,
         qualityPolicyVersion: qualityPolicyVersion,
         accepted: accepted,
         qualityFlags: qualityFlags,
@@ -158,6 +199,23 @@ final class TrackPoint {
         persistedAt: DateTime.parse(row['persisted_at']! as String).toUtc(),
         activityType: trackingActivityTypeFromValue(row['activity_type']),
         activityConfidence: (row['activity_confidence'] as num?)?.toInt() ?? 0,
+        activitySource: row['activity_source'] as String?,
+        activityRawType: row['activity_raw_type'] as String?,
+        activityEvidenceState: ActivityEvidenceState.values.firstWhere(
+          (value) => value.name == row['activity_evidence_state'],
+          orElse: () => ActivityEvidenceState.unavailable,
+        ),
+        activityAge: row['activity_age_ms'] == null
+            ? null
+            : Duration(
+                milliseconds: (row['activity_age_ms']! as num).toInt(),
+              ),
+        activityProbabilities:
+            _decodeActivityProbabilities(row['activity_probabilities_json']),
+        nativeForegroundState: row['native_foreground_state'] as String?,
+        screenInteractive: _nullableBool(row['screen_interactive']),
+        batterySaverActive: _nullableBool(row['battery_saver_active']),
+        motionEvidenceId: row['motion_evidence_id'] as String?,
         motionState: MotionState.values.firstWhere(
           (state) => state.name == row['motion_state'],
           orElse: () => MotionState.unknown,
@@ -177,12 +235,46 @@ final class TrackPoint {
         monotonicReceivedNanos:
             (row['monotonic_received_nanos'] as num?)?.toInt(),
         monotonicDomainId: row['monotonic_domain_id'] as String?,
+        captureGenerationId: row['capture_generation_id'] as String?,
+        nativeSessionStartedAt: row['native_session_started_at'] == null
+            ? null
+            : DateTime.parse(row['native_session_started_at']! as String)
+                .toUtc(),
+        nativeLifecycle:
+            TrackerLifecycle.values.cast<TrackerLifecycle?>().firstWhere(
+                  (candidate) => candidate?.name == row['native_lifecycle'],
+                  orElse: () => null,
+                ),
+        samplingProfile:
+            SamplingProfile.values.cast<SamplingProfile?>().firstWhere(
+                  (candidate) => candidate?.name == row['sampling_profile'],
+                  orElse: () => null,
+                ),
         qualityPolicyVersion: (row['quality_policy_version'] as num?)?.toInt(),
         accepted: row['accepted'] == 1,
         qualityFlags: (row['quality_flags'] as num?)?.toInt() ?? 0,
         rejectionReason: row['rejection_reason'] as String?,
       );
 }
+
+Map<TrackingActivityType, int> _decodeActivityProbabilities(Object? value) {
+  if (value is! String || value.isEmpty) {
+    return const <TrackingActivityType, int>{};
+  }
+  final decoded = jsonDecode(value);
+  if (decoded is! Map) return const <TrackingActivityType, int>{};
+  return <TrackingActivityType, int>{
+    for (final entry in decoded.entries)
+      trackingActivityTypeFromValue(entry.key):
+          ((entry.value as num?)?.toInt() ?? 0).clamp(0, 100),
+  };
+}
+
+bool? _nullableBool(Object? value) => switch (value) {
+      1 => true,
+      0 => false,
+      _ => null,
+    };
 
 final class TrackSegmentWithPoints {
   const TrackSegmentWithPoints({required this.segment, required this.points});
