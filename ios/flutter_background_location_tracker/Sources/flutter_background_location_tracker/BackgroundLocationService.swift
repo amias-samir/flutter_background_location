@@ -946,6 +946,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       configureLocationManager(for: .moving)
       startBackgroundActivitySessionIfNeeded()
       startMotionUpdatesIfPossible()
+      motionSensorFusion.start(configuration: configuration)
       startConfiguredLocationUpdates()
       lifecycle = .tracking
       recoveredFromTermination = true

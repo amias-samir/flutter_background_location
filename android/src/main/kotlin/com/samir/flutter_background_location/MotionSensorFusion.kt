@@ -68,8 +68,10 @@ internal class MotionSensorFusion(
             emitUnavailable("sensor_fusion_disabled")
             return
         }
-        stepSensor = sensors.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
-        significantMotionSensor = sensors.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION)
+        // Prefer wake-up variants so movement evidence can wake the foreground
+        // capture service after the display and application UI go idle.
+        stepSensor = preferredSensor(Sensor.TYPE_STEP_DETECTOR)
+        significantMotionSensor = preferredSensor(Sensor.TYPE_SIGNIFICANT_MOTION)
         stepSensor?.let {
             sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, workerHandler)
         }
@@ -129,10 +131,10 @@ internal class MotionSensorFusion(
             return false
         }
 
-        accelerationSensor = sensors.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
-            ?: sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        gyroscopeSensor = sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        rotationVectorSensor = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        accelerationSensor = preferredSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+            ?: preferredSensor(Sensor.TYPE_ACCELEROMETER)
+        gyroscopeSensor = preferredSensor(Sensor.TYPE_GYROSCOPE)
+        rotationVectorSensor = preferredSensor(Sensor.TYPE_ROTATION_VECTOR)
         if (accelerationSensor == null && gyroscopeSensor == null) {
             emitUnavailable("continuous_motion_sensors_unavailable")
             return false
@@ -236,6 +238,10 @@ internal class MotionSensorFusion(
         val sensor = significantMotionSensor ?: return
         if (active) sensors.requestTriggerSensor(significantMotionListener, sensor)
     }
+
+    private fun preferredSensor(type: Int): Sensor? =
+        sensors.getSensorList(type).firstOrNull { it.isWakeUpSensor }
+            ?: sensors.getDefaultSensor(type)
 
     private fun emitUnavailable(reason: String) {
         emit(

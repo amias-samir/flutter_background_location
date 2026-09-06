@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -40,6 +41,7 @@ class LocationTrackingService : Service() {
     private lateinit var stateStore: TrackingStateStore
     private lateinit var workerThread: HandlerThread
     private lateinit var motionSensorFusion: MotionSensorFusion
+    private var captureWakeLock: PowerManager.WakeLock? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var workerHandler: Handler
@@ -193,6 +195,7 @@ class LocationTrackingService : Service() {
         runCatching { fusedLocationClient.removeLocationUpdates(locationCallback) }
         removeCurrentActivityUpdates(clearGeneration = false)
         motionSensorFusion.stop()
+        releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
         if (::stateStore.isInitialized) {
             stateStore.markServiceStopped()
@@ -419,6 +422,7 @@ class LocationTrackingService : Service() {
 
         captureStarted = true
         isCaptureAliveNow = true
+        acquireCaptureWakeLock()
         currentProfile = TrackingStateStore.PROFILE_MOVING
         stillSince = null
         movingEvidence = 0
@@ -463,6 +467,7 @@ class LocationTrackingService : Service() {
         }
         removeCurrentActivityUpdates(clearGeneration = true)
         motionSensorFusion.stop()
+        releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
         currentProfile = TrackingStateStore.PROFILE_IDLE
         stillSince = null
@@ -487,6 +492,30 @@ class LocationTrackingService : Service() {
         diagnostic["errorMessage"] as? String
             ?: diagnostic["integrityCheck"] as? String
             ?: "journal diagnostic failed"
+
+    /**
+     * Keeps the service worker and sensor callbacks runnable while the screen
+     * is locked. This lock exists only for an active capture session; all
+     * paused, completed, failed, and destroyed paths release it.
+     */
+    private fun acquireCaptureWakeLock() {
+        val existing = captureWakeLock
+        if (existing?.isHeld == true) return
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        captureWakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:flutter_background_location:active_capture",
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseCaptureWakeLock() {
+        val wakeLock = captureWakeLock ?: return
+        if (wakeLock.isHeld) runCatching { wakeLock.release() }
+        captureWakeLock = null
+    }
 
     private fun requestLocationUpdates(profile: String) {
         if (!captureStarted) return
