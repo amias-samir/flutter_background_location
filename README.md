@@ -734,6 +734,15 @@ active iOS manager continues collecting and journals fixes even if Flutter is
 temporarily suspended. The native manager is process-scoped, so rebuilding a
 Flutter engine or scene does not label the route interrupted.
 
+On Android, active tracking holds a short-scoped partial wake lock for the
+duration of native capture and releases it on Pause, End day, Complete, service
+failure, interruption, or service destruction. Motion fusion prefers wake-up
+step, significant-motion, accelerometer, gyro, and rotation-vector sensors when
+the device provides them, which helps screen-off and pocketed routes keep fresh
+motion evidence. The wake lock does not improve satellite visibility; users may
+still need to disable aggressive OEM battery restrictions for long precise
+routes.
+
 User force-quit is different from minimizing. iOS stops standard continuous
 location updates when the user swipes the app away, and an application cannot
 override that decision. After a later launch, the plugin reports the route as
@@ -760,8 +769,10 @@ and requires manual Resume after termination. User force-quit remains
 non-recoverable in both modes until the user opens the app. A host that creates
 its Flutter engine lazily can call
 `FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` from its iOS
-Core Location launch path before attaching UI. Physical qualification is still
-required for every supported device/OS bucket before making a recovery claim.
+Core Location launch path before attaching UI; recovered capture also restarts
+motion fusion so activity evidence does not remain stale after relaunch.
+Physical qualification is still required for every supported device/OS bucket
+before making a recovery claim.
 
 ## Detailed integration guide
 
@@ -1539,7 +1550,7 @@ disposed, but dispose the application controller only after Pause or Complete.
 
 | Scenario | Android | iOS |
 |---|---|---|
-| Normal background or screen lock while active | Continues in the foreground service | Continues with Core Location background mode; iOS 17+ background-activity session is held |
+| Normal background or screen lock while active | Continues in the foreground service with an active-capture partial wake lock; motion fusion prefers wake-up sensors when available | Continues with Core Location background mode; iOS 17+ background-activity session is held |
 | Route paused | Service and native requests are stopped | Location, motion, and background-activity sessions are stopped |
 | Route resumed | Service and requests are recreated | Location, motion, and background-activity sessions are recreated |
 | Route completed | Service, notification, and native requests are stopped | All native updates and sessions are invalidated |

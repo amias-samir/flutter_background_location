@@ -285,6 +285,14 @@ route continues through normal backgrounding. Pausing stops native location and
 motion capture; Resume creates those sessions again; Complete stops and clears
 them.
 
+On Android, the plugin now keeps an active-capture partial wake lock only while
+the route is actually tracking and releases it on Pause, End day, Complete,
+failure, interruption, or service shutdown. Sensor fusion also prefers wake-up
+motion sensors when the device exposes them, so pocketed and screen-locked
+routes keep fresher motion evidence. This improves service reliability, but it
+does not make GPS more accurate when the device has poor sky visibility or an
+OEM battery mode throttles background work.
+
 Do not treat swiping the app away as a background/minimize test. That gesture is
 a user force-quit: iOS stops standard continuous updates and does not let an app
 restart them behind the user's decision. On the next launch, the route is shown
@@ -299,7 +307,9 @@ accepts reduced, OS-controlled sampling in exchange for best-effort relaunch
 after some operating-system terminations. That mode records a possible gap and
 never synthesizes missing points. User force-quit remains non-recoverable until
 the app is opened. A lazily created Flutter engine must call the public iOS
-`FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` launch hook.
+`FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` launch hook; the
+recovery path restarts motion fusion with location capture so activity evidence
+is not left stale after relaunch.
 Run the package's private-evidence validator before publishing any recovery
 claim; simulator success is not evidence.
 
