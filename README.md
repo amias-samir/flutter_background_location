@@ -1220,6 +1220,36 @@ const options = TrackExportOptions(
 - Rejected points can be included as diagnostics but never enter route
   geometry when their coordinates are invalid or non-finite.
 
+### Converting route file formats
+
+`RouteFormatConverter` converts existing route content directly between
+GeoJSON, GPX, and KML. It works in memory, so the host application remains in
+control of file selection and storage.
+
+```dart
+const converter = RouteFormatConverter();
+
+final gpx = converter.geoJsonToGpx(geoJsonContents);
+final kml = converter.gpxToKml(gpxContents);
+final geoJson = converter.kmlToGeoJson(kmlContents);
+```
+
+For a format chosen at runtime, use `convert`:
+
+```dart
+final converted = converter.convert(
+  contents: sourceContents,
+  sourceFormat: TrackExportFormat.gpx,
+  targetFormat: TrackExportFormat.geoJson,
+);
+```
+
+All six directions are supported. The converter preserves route parts,
+elevation, route names, and coordinate timestamps when those values are
+available. Format-specific metadata that has no equivalent in the destination
+may not be retained. Invalid input or input without usable coordinates throws a
+`FormatException`.
+
 ### Abort, delete, and erase are different operations
 
 `Complete` retains a successful route. The additive `TrackingPrivacyService`

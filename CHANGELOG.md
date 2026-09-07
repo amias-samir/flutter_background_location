@@ -1,5 +1,9 @@
-## Unreleased
+## 0.1.3
 
+- Added `RouteFormatConverter` for in-memory GeoJSON, GPX, and KML route
+  conversion in every supported direction, with multi-segment geometry,
+  elevation, timestamp, and route-name preservation where the source format
+  provides them.
 - Added schema 14 distance repair so same-segment accepted geometry is counted
   even when rejected callbacks occurred between anchors; inferred lifecycle
   and multi-day connectors remain excluded.
