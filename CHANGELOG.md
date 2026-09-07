@@ -1,4 +1,4 @@
-## 0.1.3
+## 1.0.0
 
 - Added `RouteFormatConverter` for in-memory GeoJSON, GPX, and KML route
   conversion in every supported direction, with multi-segment geometry,
