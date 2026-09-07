@@ -1,35 +1,95 @@
 # flutter_background_location_tracker
 
-Durable, battery-aware foreground and background route tracking for Android
-and iOS.
+Durable, battery-aware route tracking for Android and iOS.
 
 The plugin combines native location and activity APIs with ordered SQLite
-storage, pause/resume segments, mock-location evidence, adaptive sampling, and
-offline GeoJSON, KML, and GPX export.
+storage, pause/resume lifecycle controls, mock-location evidence, adaptive
+sampling, multi-day trips, and offline GeoJSON, KML, and GPX export.
 
 > Background location is privacy-sensitive and controlled by the operating
 > system. Callback intervals and process lifetime are never guaranteed. Test
 > your exact configuration on real devices before releasing it.
 
+## Start here
+
+Use this package when your app needs a complete route from **Start** to
+**Complete**, including background capture, route history, export, and
+diagnostics.
+
+| Need | Use |
+|---|---|
+| Single-day route recording | `TrackingClient.open()` |
+| Multi-day journeys with End day / Continue trip | `TrackingClient.openWithTrips()` |
+| Lifecycle UI state | `TrackingSessionSnapshot.allowedActions` |
+| Permission setup | `checkReadiness()` then `requestNextPermission()` |
+| Accuracy and battery behavior | `TrackingConfig(accuracy: ..., captureIntent: ...)` |
+| Route display/export | `loadTrackBundle()`, `assembleTripRouteGeometry()`, `exportTrack()`, `exportTrip()` |
+
+The recommended integration shape is simple:
+
+```dart
+final tracking = await TrackingClient.openWithTrips(
+  owner: const TrackingOwner(
+    userId: 'signed-in-user',
+    organizationId: 'workspace-id',
+  ),
+  configuration: const TrackingConfiguration(
+    recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+    defaultTrackingConfig: TrackingConfig(
+      accuracy: TrackingAccuracy.high,
+      captureIntent: RouteCaptureIntent.vehicle,
+      motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
+    ),
+  ),
+);
+
+final readiness = await tracking.checkReadiness();
+if (readiness.canStart) {
+  await tracking.startTrip(
+    const TripStartRequest(routeId: 'home_to_office'),
+  );
+}
+```
+
+From there, render Start, Pause, Resume, End day, Continue trip, and Complete
+from `tracking.sessionStream`. Do not guess button state from local widget
+variables.
+
 ## Features
+
+### Capture
 
 - Foreground and background route recording on Android and iOS.
 - Android foreground service with a persistent tracking notification.
-- Activity classification: stationary, walking, running, bicycle, vehicle,
-  and unknown.
-- Moving and stationary sampling profiles for lower battery use.
-- Per-fix mock/simulation evidence with allow, flag, or reject policies.
-- Pause and resume without adding false distance across the pause gap.
-- Durable, ordered SQLite persistence with crash recovery.
-- Track history with `keepLatestOnly` or `keepAll` retention.
-- Completed route export as GeoJSON, KML, or GPX.
-- User-defined export names and collision-safe file creation.
-- Optional application-supplied uploader with durable retry state.
-- Streams and plain Dart models with no state-management dependency.
+- Pause, resume, complete, End day, and Continue trip lifecycle support.
+- Track history retention with `keepLatestOnly` or `keepAll`.
+
+### Accuracy and evidence
+
+- Activity classification for stationary, walking, running, bicycle, vehicle,
+  and unknown states.
+- Optional low-power step/significant-motion fusion and bounded
+  accelerometer/gyroscope ambiguity probes.
+- Mock/simulation evidence per location fix with allow, flag, or reject policy.
+- Typed gap evidence for rejected fixes, lifecycle boundaries, and background
+  callback interruptions.
+
+### Routes and export
+
+- Single-day `Track` routes and additive multi-day `Trip` journeys.
+- Combined multi-day Trip map and GeoJSON/KML/GPX export.
+- Persisted route presentation modes: recorded parts, connected days, or
+  continuous presentation with labeled inferred connectors.
 - Optional immutable derived geometry with explicit raw/derived map and export
   selection.
-- Opt-in, versioned adaptive battery policy with shadow mode and host fidelity
-  bounds.
+- User-defined export names and collision-safe file creation.
+
+### Operations
+
+- Durable, ordered SQLite persistence with crash recovery.
+- Streams and plain Dart models with no state-management dependency.
+- Optional application-supplied uploader with durable retry state.
+- Coordinate-free diagnostics for setup, quality, and support reports.
 
 ## Platform support
 
@@ -125,11 +185,343 @@ The complete staged permission flow and platform declarations follow below.
 | Core API | Use |
 |---|---|
 | `TrackingClient.open()` | Initialize and restore one owner-scoped controller |
+| `TrackingClient.openWithTrips()` | Initialize Track controls plus multi-day Trip support |
 | `TrackingController` | Control lifecycle, history, export, and deletion |
+| `TrackingTripController` | Start, continue, complete, query, map, export, and delete Trips |
 | `TrackingSessionSnapshot` | Render status and enabled actions |
 | `TrackingReadiness` | Present the next permission or Settings step |
 | `TrackingConfig` | Configure accuracy, sampling, and mock policy |
 | `TrackQuery` / `TrackPage` | Load bounded route-history pages |
+| `TripQuery` / `TripPage` | Load bounded user-visible multi-day journey pages |
+
+## Multi-day Trip tracking
+
+Use `TrackingClient.openWithTrips()` when one user-visible journey can span
+several days. The returned `TrackingTripController` includes all normal Track
+controls plus the additive Trip lifecycle, history, geometry, export, and
+deletion APIs.
+
+### Data model
+
+| Model | Meaning |
+|---|---|
+| `Trip` | The single journey shown to the user across every day |
+| `TripLeg` | One independently completed daily `Track` inside the Trip |
+| `TrackSegment` | One uninterrupted capture interval inside a leg |
+| `TrackingContinuityGap` | Auditable evidence of missing or rejected geometry |
+
+The `Trip.id` and readable `routeId` stay stable. Each **End day** operation
+stops native capture and makes that day's Track immutable. **Continue trip**
+creates exactly one ordered next leg rather than reopening the completed Track.
+This preserves export and upload idempotency while the application displays one
+Trip instead of several unrelated routes.
+
+Use ordinary `pauseCurrentTrack()` and `resumeCurrentTrack()` for a temporary
+break during the same day. Use `endCurrentDay()` only when the current daily leg
+should be completed.
+
+### Open one owner-scoped Trip controller
+
+Keep one controller for the signed-in owner and dispose it during sign-out. Do
+not create a controller per screen or per day.
+
+```dart
+const trackingOwner = TrackingOwner(
+  userId: 'signed-in-user',
+  organizationId: 'workspace-id',
+);
+
+late final TrackingTripController tracking;
+
+Future<void> initializeTripTracking() async {
+  tracking = await TrackingClient.openWithTrips(
+    owner: trackingOwner,
+    configuration: const TrackingConfiguration(
+      defaultTrackingConfig: TrackingConfig(
+        accuracy: TrackingAccuracy.high,
+      ),
+      recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
+    ),
+  );
+
+  tracking.sessionStream.listen((session) {
+    // Drive Pause/Resume and native capture state from allowedActions.
+    print(session.status.lifecycle);
+  });
+}
+```
+
+`keepAll` is recommended for multi-day history. Trip-aware retention preserves
+every leg belonging to the retained Trip; it does not delete yesterday's leg
+while that Trip is still current.
+
+### Start, end a day, continue, and complete
+
+Call lifecycle methods only after the same readiness flow used for normal Track
+recording. Supply a stable `operationId` when your application may retry a
+command after a timeout or process restart.
+
+```dart
+Future<Trip> startJourney() async {
+  final readiness = await tracking.checkReadiness();
+  if (!readiness.canStart) {
+    throw StateError('Present readiness.nextAction before starting.');
+  }
+
+  final result = await tracking.startTrip(
+    const TripStartRequest(
+      routeId: 'Kathmandu field visit',
+      operationId: 'server-command-start-42',
+      dayLabel: 'Day 1',
+      routePresentation: MultiDayRoutePresentation.connectDailyLegs,
+      config: TrackingConfig(
+        accuracy: TrackingAccuracy.high,
+        captureIntent: RouteCaptureIntent.walking,
+        motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
+      ),
+    ),
+  );
+  return result.trip;
+}
+
+Future<void> finishToday() async {
+  await tracking.endCurrentDay(
+    reason: 'overnight',
+    operationId: 'server-command-end-day-42-1',
+  );
+  // Native capture is now stopped and the Trip is suspended.
+}
+
+Future<void> startNextDay(String tripId) async {
+  final readiness = await tracking.checkReadiness();
+  if (!readiness.canStart) return;
+
+  final result = await tracking.continueTrip(
+    tripId,
+    operationId: 'server-command-continue-42-2',
+  );
+  print('Recording leg ${result.leg.legNumber}');
+}
+
+Future<void> finishWholeJourney(String tripId) async {
+  await tracking.completeTrip(
+    tripId,
+    reason: 'destination_reached',
+    operationId: 'server-command-complete-42',
+  );
+}
+```
+
+### Capture intent, motion evidence, and connected days
+
+These settings solve different problems:
+
+| Setting | Controls | Does not do |
+|---|---|---|
+| `accuracy` and individual sampling fields | Native request frequency, distance filter, and accepted uncertainty | Guarantee an OS callback interval |
+| `captureIntent` | Moving-profile fallback when activity evidence is unknown or stale | Force a platform activity label |
+| `motionFusionMode` | Which optional motion sensors may corroborate moving/stationary state | Derive latitude/longitude from compass, gyro, or acceleration |
+| `routePresentation` | Whether truthful daily/lifecycle parts are drawn separately or joined | Recover the path travelled while capture was stopped |
+
+`RouteCaptureIntent.walking`, `cycling`, and `vehicle` resolve unset moving
+sampling values to a 3-second interval and 3 m filter. These explicit travel
+intents remain in the moving profile even if a pocketed device is temporarily
+classified as stationary. `adaptive` remains the battery-aware intent that may
+enter stationary sampling. Explicit `movingInterval` and
+`movingDistanceFilterMeters` values still win.
+
+Vehicle capture also uses a bounded urban-visibility acceptance envelope:
+`high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
+25 m. The provider still requests navigation-grade fixes. This avoids throwing
+away most tunnel, pocket, or urban-canyon callbacks solely because they exceed
+the walking-oriented 20/15 m limits. Pass an explicit
+`maximumAcceptedAccuracyMeters` to make the envelope stricter or looser.
+
+`MotionFusionMode.platformActivityOnly` is the compatibility default.
+`lowPowerSensorFusion` adds step/pedometer and significant-motion evidence.
+`enhancedSensorFusion` additionally permits short accelerometer/gyroscope
+windows when evidence conflicts. Probes obey duration, cooldown, and hourly
+duty-cycle limits. Compass and gyro are orientation/rotation evidence only;
+the package never performs inertial dead reckoning.
+
+Route presentation is persisted with the Trip:
+
+- `separateRecordedParts` preserves every daily and lifecycle boundary;
+- `connectDailyLegs` joins only boundaries between consecutive days;
+- `continuousPresentation` joins all chronological accepted parts.
+
+Connected modes add straight, typed `InferredRouteConnector` edges. Their
+length is excluded from `Trip.measuredDistanceMeters`, because no locations
+were captured along those edges. The stored default is used by the shared map
+assembler and GeoJSON/KML/GPX Trip export; pass an explicit override only for a
+temporary viewer/export choice.
+
+Edges between accepted anchors in the same recorded segment are measured even
+when rejected callbacks occurred between them—the exported line already uses
+those anchors. Database schema 14 repairs older totals that excluded these
+same-segment edges. It does not add inferred Pause, interruption, or overnight
+connector distance.
+
+Activity confidence is the platform's confidence in an activity label. It is
+not GPS accuracy. Use `ActivitySnapshot.evidenceState`/`age` for freshness,
+`TrackPoint.horizontalAccuracy` for location uncertainty in metres, and
+`MotionEvidenceSnapshot` for the sources supporting the current motion state.
+
+Feature-detect `TrackingQualityController` for coordinate-free accepted,
+rejected, quality-run, visible-gap, lifecycle-boundary, activity-freshness,
+and uncertainty-percentile diagnostics.
+
+The route identifier is created only when the Trip starts. Whitespace is
+normalized to underscores and a timestamp suffix prevents duplicates. Every
+later leg inherits the same Trip route identifier.
+
+Lifecycle summary:
+
+| Current state | Application action | Result |
+|---|---|---|
+| Active Trip | `pauseCurrentTrack()` | Pauses the current leg; resumable in place |
+| Paused leg | `resumeCurrentTrack()` | Resumes the same Track leg |
+| Active Trip | `endCurrentDay()` | Completes the leg, stops capture, suspends Trip |
+| Suspended Trip | `continueTrip(tripId)` | Starts the next daily leg |
+| Active Trip | `completeTrip(tripId)` | Completes the leg and terminal Trip |
+| Completed Trip | confirmed `continueTrip(...)` | Adds a new leg without changing old legs |
+
+### Restore Trip UI after an application restart
+
+`openWithTrips()` reconciles durable database and native state before it
+returns. Rebuild Trip history from owner-scoped pages instead of keeping the
+Trip only in widget memory or shared preferences.
+
+```dart
+Future<List<Trip>> loadRecentTrips() async {
+  final page = await tracking.listTripPage(
+    const TripQuery(owner: trackingOwner, limit: 20),
+  );
+  return page.items;
+}
+
+Future<Trip?> loadTripToContinue() async {
+  final page = await tracking.listTripPage(
+    const TripQuery(
+      owner: trackingOwner,
+      limit: 1,
+      statuses: <TripStatus>{TripStatus.suspended},
+    ),
+  );
+  return page.items.isEmpty ? null : page.items.first;
+}
+```
+
+Use `nextCursor` to page older Trips. `loadTripBundle(tripId)` returns ordered
+legs and typed gap evidence for a detail screen.
+
+### Deliberately continue a completed Trip
+
+Completed daily Tracks are never reopened. If a journey was completed at the
+end of day one by mistake, explicitly confirm continuation so the package can
+append a new leg:
+
+```dart
+await tracking.continueTrip(
+  completedTripId,
+  confirmCompletedTripContinuation: true,
+  operationId: 'server-command-reopen-42',
+);
+```
+
+Ask the user for confirmation before passing this flag. If final Trip upload
+has already been acknowledged under a non-reopenable remote contract, the
+operation throws `TrackingTripException` with code `trip_already_finalized`
+rather than silently changing uploaded history.
+
+Handle Trip failures by their stable code instead of parsing messages:
+
+```dart
+try {
+  await tracking.continueTrip(tripId);
+} on TrackingTripException catch (error) {
+  switch (error.code) {
+    case 'completed_trip_confirmation_required':
+      // Ask the user, then retry once with explicit confirmation.
+      break;
+    case 'active_trip_conflict':
+      // Another Trip currently owns native capture.
+      break;
+    default:
+      rethrow;
+  }
+}
+```
+
+### Display or export the complete journey
+
+The same assembler drives the example MapLibre route and GeoJSON, KML, and GPX
+exports, preventing map/export topology differences.
+
+```dart
+final geometry = await tracking.assembleTripRouteGeometry(
+  tripId,
+  continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+);
+
+final exported = await tracking.exportTrip(
+  tripId: tripId,
+  format: TrackExportFormat.gpx,
+  fileName: 'complete_field_visit',
+  options: const TrackExportOptions(
+    geometryContinuity:
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+  ),
+);
+
+print('${geometry.parts.length} drawable parts');
+print(exported.path);
+```
+
+Trips must be completed before export by default. For an explicitly labeled
+work-in-progress snapshot, pass
+`TrackExportOptions(allowIncompleteTrackSnapshot: true)`. Combined Trip export
+has a 100,000-point safety ceiling; applications handling larger journeys
+should archive/page daily legs or provide a streaming backend export.
+
+Geometry modes:
+
+- `preserveEvidenceSegments` preserves every real lifecycle boundary;
+- `mergeAutomaticCallbackGaps` merges only typed automatic gaps whose durable
+  treatment retained the same canonical segment. This is the recommended map
+  and normal export mode;
+- `connectAllChronologicalPoints` creates one continuous presentation and
+  reports every straight connector as inferred.
+
+Inferred connectors are never inserted into raw `track_points` and their
+length is excluded from measured distance. No location package can reconstruct
+the road taken when the operating system supplied no usable fixes.
+
+### Delete a Trip
+
+Only terminal `completed` or `failed` Trips can be deleted. Deletion removes
+all owned legs, database artifacts, upload-outbox rows, package-managed export
+snapshots, and matching native journal entries.
+
+```dart
+await tracking.deleteTrip(completedTripId);
+```
+
+Require an application-level confirmation before this irreversible action.
+Active and suspended Trips must first be completed or otherwise resolved.
+
+### Integration rules
+
+- Use the same `TrackingOwner` for controller creation and every `TripQuery`.
+- Keep one application-scoped controller and serialize lifecycle button taps.
+- Drive capture controls from `session.allowedActions`; drive Trip history from
+  `listTripPage()`.
+- Reuse a stable `operationId` when retrying the same logical command. A new ID
+  represents a new command.
+- Do not reopen or modify completed daily Track rows directly.
+- Confirm completed-Trip continuation and terminal deletion in host UI.
+- Test overnight, locked-screen, battery-saver, permission-loss, and provider-
+  outage behavior on physical devices before release.
 
 ## Platform configuration
 
@@ -342,6 +734,15 @@ active iOS manager continues collecting and journals fixes even if Flutter is
 temporarily suspended. The native manager is process-scoped, so rebuilding a
 Flutter engine or scene does not label the route interrupted.
 
+On Android, active tracking holds a short-scoped partial wake lock for the
+duration of native capture and releases it on Pause, End day, Complete, service
+failure, interruption, or service destruction. Motion fusion prefers wake-up
+step, significant-motion, accelerometer, gyro, and rotation-vector sensors when
+the device provides them, which helps screen-off and pocketed routes keep fresh
+motion evidence. The wake lock does not improve satellite visibility; users may
+still need to disable aggressive OEM battery restrictions for long precise
+routes.
+
 User force-quit is different from minimizing. iOS stops standard continuous
 location updates when the user swipes the app away, and an application cannot
 override that decision. After a later launch, the plugin reports the route as
@@ -368,8 +769,10 @@ and requires manual Resume after termination. User force-quit remains
 non-recoverable in both modes until the user opens the app. A host that creates
 its Flutter engine lazily can call
 `FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` from its iOS
-Core Location launch path before attaching UI. Physical qualification is still
-required for every supported device/OS bucket before making a recovery claim.
+Core Location launch path before attaching UI; recovered capture also restarts
+motion fusion so activity evidence does not remain stale after relaunch.
+Physical qualification is still required for every supported device/OS bucket
+before making a recovery claim.
 
 ## Detailed integration guide
 
@@ -806,8 +1209,10 @@ const options = TrackExportOptions(
 
 ### Export geometry
 
-- GeoJSON uses a `LineString` for one drawable segment and a
-  `MultiLineString` for multiple segments.
+- `TrackExportOptions.geometryContinuity` selects raw evidence, proven
+  automatic-gap merging, or explicit connect-all presentation.
+- GeoJSON uses a `LineString` for one presentation part and a
+  `MultiLineString` for multiple parts.
 - GeoJSON segments with fewer than two accepted coordinates are omitted from
   line geometry. Optional point features can preserve them for diagnostics.
 - KML writes a line per multi-point segment and a point for a one-fix segment.
@@ -914,10 +1319,10 @@ values, while stationary values still come from the low profile.
 
 | Preset | Moving interval | Moving filter | Native request | Stationary interval | Stationary filter | Accepted accuracy |
 |---|---:|---:|---|---:|---:|---:|
-| `low` | 30 seconds | 25 m | Balanced / nearest 10 m | 3 minutes | 100 m | 100 m |
-| `medium` | 15 seconds | 15 m | High / best | 2 minutes | 75 m | 60 m |
-| `high` (default) | 10 seconds | 5 m | High / navigation | 30 seconds | 25 m | 20 m |
-| `precised` | 5 seconds | 5 m | High / navigation | 30 seconds | 15 m | 15 m |
+| `low` | 20 seconds | 20 m | Balanced / nearest 10 m | 2 minutes | 75 m | 100 m |
+| `medium` | 10 seconds | 10 m | High / best | 1 minute | 50 m | 60 m |
+| `high` (default) | 5 seconds | 5 m | High / navigation | 20 seconds | 20 m | 20 m |
+| `precised` | 3 seconds | 3 m | High / navigation | 15 seconds | 10 m | 15 m |
 
 Android and iOS translate the native request to the closest platform accuracy;
 the table shows Android/iOS terminology. Presets are starting points, not
@@ -929,18 +1334,21 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 |---|---:|---|
 | `accuracy` | `high` | Supplies all preset sampling and accepted-accuracy values |
 | `locationAccuracy` | `precised` for the default `high` preset | Overrides only Android/iOS native request accuracy |
-| `movingInterval` | 10 seconds | Requested interval while moving |
+| `movingInterval` | 5 seconds | Requested interval while moving |
 | `movingDistanceFilterMeters` | 5 m | Minimum moving displacement |
-| `stationaryInterval` | 30 seconds | Requested interval while stationary |
-| `stationaryDistanceFilterMeters` | 25 m | Minimum stationary displacement |
+| `stationaryInterval` | 20 seconds | Requested interval while stationary |
+| `stationaryDistanceFilterMeters` | 20 m | Minimum stationary displacement |
 | `maximumAcceptedAccuracyMeters` | 20 m | Reject fixes with poorer reported accuracy |
 | `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
 | `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
 | `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |
 | `stationaryConfidenceThreshold` | 75 | Minimum still confidence |
 | `movingConfidenceThreshold` | 60 | Minimum movement confidence |
-| `movingConfirmationCount` | 2 | Movement events required to exit stationary mode |
-| `activityRecognitionInterval` | 10 seconds | Requested native activity update interval |
+| `movingConfirmationCount` | 1 | Movement events required to exit stationary mode |
+| `activityRecognitionInterval` | 5 seconds | Requested native activity update interval |
+| `activityFreshnessThreshold` | 30 seconds | Expire stale activity labels and use the moving fallback |
+| `motionEvidenceFreshness` | 30 seconds | Expire stale fused-motion evidence |
+| `maximumProviderFixAge` | 5 minutes | Reject genuinely stale provider fixes while retaining delayed background batches |
 | `mockLocationPolicy` | `flag` | Allow, flag, or reject detected mock fixes |
 | `largeGapThreshold` | 5 minutes | Flag long gaps between accepted fixes |
 | `batchPointCount` | 25 | Point threshold for an optional uploader |
@@ -1142,7 +1550,7 @@ disposed, but dispose the application controller only after Pause or Complete.
 
 | Scenario | Android | iOS |
 |---|---|---|
-| Normal background or screen lock while active | Continues in the foreground service | Continues with Core Location background mode; iOS 17+ background-activity session is held |
+| Normal background or screen lock while active | Continues in the foreground service with an active-capture partial wake lock; motion fusion prefers wake-up sensors when available | Continues with Core Location background mode; iOS 17+ background-activity session is held |
 | Route paused | Service and native requests are stopped | Location, motion, and background-activity sessions are stopped |
 | Route resumed | Service and requests are recreated | Location, motion, and background-activity sessions are recreated |
 | Route completed | Service, notification, and native requests are stopped | All native updates and sessions are invalidated |
@@ -1221,21 +1629,26 @@ is unavailable.
 
 ### Export is missing a pause-to-resume connection
 
-This is expected. Every resume creates a new segment so exports and map views
-do not draw a false straight line across the pause gap.
+This is expected in `preserveEvidenceSegments` and
+`mergeAutomaticCallbackGaps`: a user pause, interruption, permission loss, or
+overnight boundary is real evidence, not an automatic callback gap. Select
+`connectAllChronologicalPoints` only when the UI clearly labels inferred
+connectors and does not present their length as measured distance.
 
 ## Example application
 
-See [`example/lib/main.dart`](example/lib/main.dart) for a complete Material
-example with:
+See the
+[`example/lib/main.dart`](https://github.com/amias-samir/flutter_background_location/blob/main/example/lib/main.dart)
+sample for a complete Material example with:
 
 - staged permission recovery;
-- Start, Pause, Resume, and Complete button states;
+- Start, Pause, Resume, End day, and Complete Trip button states;
 - configurable retention policy;
 - live status, activity, and point data;
-- recorded-track history;
+- one recorded-Trip history item with daily leg/segment/gap summaries;
 - GeoJSON, KML, and GPX naming/export;
-- MapLibre route display with a street-map style.
+- MapLibre whole-Trip display with a street-map style, gap markers, and an
+  explicit connect-all toggle.
 
 ## Production checklist
 
@@ -1276,4 +1689,5 @@ example with:
 
 ## License
 
-See [`LICENSE`](LICENSE).
+See the
+[MIT license](https://github.com/amias-samir/flutter_background_location/blob/main/LICENSE).

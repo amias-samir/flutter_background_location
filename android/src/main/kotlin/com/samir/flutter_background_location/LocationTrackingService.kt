@@ -15,11 +15,15 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.ActivityRecognitionClient
+import com.google.android.gms.location.ActivityTransition
+import com.google.android.gms.location.ActivityTransitionRequest
+import com.google.android.gms.location.DetectedActivity
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.Granularity
 import com.google.android.gms.location.LocationCallback
@@ -27,6 +31,8 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
+import org.json.JSONObject
 import java.util.UUID
 
 class LocationTrackingService : Service() {
@@ -34,6 +40,8 @@ class LocationTrackingService : Service() {
     private lateinit var activityRecognitionClient: ActivityRecognitionClient
     private lateinit var stateStore: TrackingStateStore
     private lateinit var workerThread: HandlerThread
+    private lateinit var motionSensorFusion: MotionSensorFusion
+    private var captureWakeLock: PowerManager.WakeLock? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var workerHandler: Handler
@@ -43,8 +51,10 @@ class LocationTrackingService : Service() {
     private var currentProfile = TrackingStateStore.PROFILE_IDLE
     private var requestGeneration = 0
     private var currentActivityPendingIntent: PendingIntent? = null
+    private var currentActivityTransitionPendingIntent: PendingIntent? = null
     private val monotonicDomainId = "android_process_${UUID.randomUUID()}"
     private var latestActivity: Map<String, Any?>? = null
+    private var latestActivityTimestamp = 0L
     private var lastLocation: Location? = null
     private var lastLocationObservedAt: Long? = null
     private var stationaryReferenceLocation: Location? = null
@@ -54,6 +64,11 @@ class LocationTrackingService : Service() {
     private var lastNotificationUpdateAt = 0L
     private var journalPrepareInProgress = false
     private var journalPrepareGeneration = 0
+    private var nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
+    private val recentFixDeduplicator = RecentFixDeduplicator()
+    private val stationaryExitProbeCoordinator = StationaryExitProbeCoordinator()
+    private var stationaryExitProbeCancellation: CancellationTokenSource? = null
+    private var stationaryExitProbeTimeout: Runnable? = null
 
     private val stationaryTransition = Runnable {
         tryEnterStationaryProfile()
@@ -87,6 +102,21 @@ class LocationTrackingService : Service() {
         super.onCreate()
         workerThread = HandlerThread("fbl-location-service").apply { start() }
         workerHandler = Handler(workerThread.looper)
+        motionSensorFusion = MotionSensorFusion(this, workerHandler) { evidence ->
+            mainHandler.post {
+                if (!captureStarted) return@post
+                TrackingEventBus.emitMotionEvidence(evidence)
+                if (evidence["state"] == "moving") {
+                    stillSince = null
+                    stationaryDisplacementWindow.reset()
+                    mainHandler.removeCallbacks(stationaryTransition)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                } else if (evidence["state"] == "stationary") {
+                    tryEnterStationaryProfile()
+                }
+                stateStore.emitCurrentStatus()
+            }
+        }
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         activityRecognitionClient = ActivityRecognition.getClient(this)
         isServiceAliveNow = true
@@ -164,6 +194,9 @@ class LocationTrackingService : Service() {
         stationaryDisplacementWindow.reset()
         runCatching { fusedLocationClient.removeLocationUpdates(locationCallback) }
         removeCurrentActivityUpdates(clearGeneration = false)
+        motionSensorFusion.stop()
+        releaseCaptureWakeLock()
+        TrackingEventBus.clearMotionEvidence()
         if (::stateStore.isInitialized) {
             stateStore.markServiceStopped()
         }
@@ -204,6 +237,7 @@ class LocationTrackingService : Service() {
 
         stopCapture()
         stateStore.begin(trackId, configuration)
+        nextCaptureStartReason = CAPTURE_REASON_NEW_TRACK
         stateStore.emitCurrentStatus()
         startCapture()
     }
@@ -229,8 +263,10 @@ class LocationTrackingService : Service() {
         stopCapture()
         if (persistedTrackId == null) {
             stateStore.begin(trackId, configuration)
+            nextCaptureStartReason = CAPTURE_REASON_NEW_TRACK
         } else {
             stateStore.resume()
+            nextCaptureStartReason = CAPTURE_REASON_RESUME
         }
         stateStore.emitCurrentStatus()
         startCapture()
@@ -252,6 +288,7 @@ class LocationTrackingService : Service() {
             TrackingStateStore.PROFILE_MOVING,
             "Tracking service restored by Android.",
         )
+        nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
         stateStore.emitCurrentStatus()
         startCapture()
     }
@@ -302,7 +339,14 @@ class LocationTrackingService : Service() {
         val activityType = intent.getIntExtra(EXTRA_ACTIVITY_TYPE, -1)
         val confidence = intent.getIntExtra(EXTRA_ACTIVITY_CONFIDENCE, 0)
         val timestamp = intent.getLongExtra(EXTRA_ACTIVITY_TIMESTAMP, System.currentTimeMillis())
-        handleActivity(activityType, confidence, timestamp)
+        handleActivity(
+            activityType,
+            confidence,
+            timestamp,
+            intent.getStringExtra(EXTRA_ACTIVITY_PROBABILITIES),
+            intent.getStringExtra(EXTRA_ACTIVITY_SOURCE)
+                ?: "android_activity_recognition",
+        )
     }
 
     private fun updateConfiguration(intent: Intent) {
@@ -315,7 +359,12 @@ class LocationTrackingService : Service() {
         configuration = TrackingConfiguration.fromJson(intent.getStringExtra(EXTRA_CONFIGURATION))
         stateStore.updateConfiguration(configuration)
         ensureForeground()
-        if (!captureStarted) startCapture() else requestLocationUpdates(currentProfile)
+        if (!captureStarted) {
+            startCapture()
+        } else {
+            motionSensorFusion.start(configuration)
+            requestLocationUpdates(currentProfile)
+        }
         stateStore.emitCurrentStatus()
         updateNotification(force = true)
     }
@@ -373,6 +422,7 @@ class LocationTrackingService : Service() {
 
         captureStarted = true
         isCaptureAliveNow = true
+        acquireCaptureWakeLock()
         currentProfile = TrackingStateStore.PROFILE_MOVING
         stillSince = null
         movingEvidence = 0
@@ -382,8 +432,16 @@ class LocationTrackingService : Service() {
         stationaryReferenceLocation = null
         stationaryDisplacementWindow.reset()
 
+        // This commit precedes every provider subscription. Request/profile
+        // replacements below deliberately keep the same durable generation.
+        stateStore.beginCaptureGeneration(nextCaptureStartReason)
+        nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
+        recentFixDeduplicator.clear()
+
         requestActivityUpdates()
+        motionSensorFusion.start(configuration)
         requestLocationUpdates(currentProfile)
+        requestStationaryExitProbe()
         stateStore.markServiceHeartbeat(captureActive = true)
         mainHandler.removeCallbacks(heartbeat)
         mainHandler.postDelayed(heartbeat, SERVICE_HEARTBEAT_INTERVAL_MS)
@@ -408,14 +466,24 @@ class LocationTrackingService : Service() {
             runCatching { fusedLocationClient.removeLocationUpdates(locationCallback) }
         }
         removeCurrentActivityUpdates(clearGeneration = true)
+        motionSensorFusion.stop()
+        releaseCaptureWakeLock()
+        TrackingEventBus.clearMotionEvidence()
         currentProfile = TrackingStateStore.PROFILE_IDLE
         stillSince = null
         movingEvidence = 0
         latestActivity = null
+        latestActivityTimestamp = 0L
         lastLocation = null
         lastLocationObservedAt = null
         stationaryReferenceLocation = null
         stationaryDisplacementWindow.reset()
+        stationaryExitProbeCoordinator.cancel()
+        stationaryExitProbeCancellation?.cancel()
+        stationaryExitProbeCancellation = null
+        stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
+        stationaryExitProbeTimeout = null
+        recentFixDeduplicator.clear()
         stateStore.markServiceHeartbeat(captureActive = false)
         PendingLocationCoordinator.closeAsync(this)
     }
@@ -424,6 +492,30 @@ class LocationTrackingService : Service() {
         diagnostic["errorMessage"] as? String
             ?: diagnostic["integrityCheck"] as? String
             ?: "journal diagnostic failed"
+
+    /**
+     * Keeps the service worker and sensor callbacks runnable while the screen
+     * is locked. This lock exists only for an active capture session; all
+     * paused, completed, failed, and destroyed paths release it.
+     */
+    private fun acquireCaptureWakeLock() {
+        val existing = captureWakeLock
+        if (existing?.isHeld == true) return
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        captureWakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:flutter_background_location:active_capture",
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseCaptureWakeLock() {
+        val wakeLock = captureWakeLock ?: return
+        if (wakeLock.isHeld) runCatching { wakeLock.release() }
+        captureWakeLock = null
+    }
 
     private fun requestLocationUpdates(profile: String) {
         if (!captureStarted) return
@@ -446,12 +538,21 @@ class LocationTrackingService : Service() {
             else -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
         }
 
+        val highFidelity = profile != TrackingStateStore.PROFILE_STATIONARY &&
+            (priority == Priority.PRIORITY_HIGH_ACCURACY ||
+                configuration.captureIntent != "adaptive")
         val request = LocationRequest.Builder(priority, interval)
             .setMinUpdateIntervalMillis((interval / 2L).coerceAtLeast(1_000L))
-            .setMaxUpdateDelayMillis((interval * 2L).coerceAtLeast(interval))
+            // Live walking capture must not be hidden in a long provider batch.
+            .setMaxUpdateDelayMillis(if (highFidelity) interval else (interval * 2L))
+            // Never satisfy a new high-fidelity request with a cached fix.
+            .setMaxUpdateAgeMillis(if (highFidelity) 0L else interval)
             .setMinUpdateDistanceMeters(distance)
-            .setGranularity(Granularity.GRANULARITY_PERMISSION_LEVEL)
-            .setWaitForAccurateLocation(false)
+            .setGranularity(
+                if (highFidelity) Granularity.GRANULARITY_FINE
+                else Granularity.GRANULARITY_PERMISSION_LEVEL,
+            )
+            .setWaitForAccurateLocation(highFidelity)
             .build()
 
         fusedLocationClient.removeLocationUpdates(locationCallback).addOnCompleteListener {
@@ -481,6 +582,8 @@ class LocationTrackingService : Service() {
                 "confidence" to 0,
                 "timestamp" to System.currentTimeMillis(),
                 "available" to false,
+                "source" to "android_activity_recognition",
+                "evidenceState" to "unavailable",
                 "isStationary" to false,
                 "isWalking" to false,
                 "isRunning" to false,
@@ -500,6 +603,9 @@ class LocationTrackingService : Service() {
                 activityRecognitionClient.removeActivityUpdates(
                     activityPendingIntent(trackId, previousGeneration),
                 )
+                activityRecognitionClient.removeActivityTransitionUpdates(
+                    activityTransitionPendingIntent(trackId, previousGeneration),
+                )
             }
             val generation = stateStore.nextActivityRecognitionGeneration()
             val registeredPendingIntent = activityPendingIntent(trackId, generation)
@@ -517,6 +623,8 @@ class LocationTrackingService : Service() {
                     "confidence" to 0,
                     "timestamp" to System.currentTimeMillis(),
                     "available" to false,
+                    "source" to "android_activity_recognition",
+                    "evidenceState" to "unavailable",
                 )
                 latestActivity = event
                 TrackingEventBus.emitActivity(event)
@@ -525,6 +633,7 @@ class LocationTrackingService : Service() {
                     runCatching { stateStore.clearActivityRecognitionGeneration() }
                 }
             }
+            requestActivityTransitionUpdates(trackId, generation)
         } catch (_: SecurityException) {
             // Permission may be revoked between the check and API call. Tracking
             // remains active with the moving location profile.
@@ -536,11 +645,16 @@ class LocationTrackingService : Service() {
         }
     }
 
-    private fun handleLocation(location: Location) {
+    private fun handleLocation(location: Location, onDurablyHandled: (() -> Unit)? = null) {
         if (!captureStarted) return
         if (!checkActivePrerequisites()) return
         val trackId = stateStore.activeTrackId ?: return
+        val captureGenerationId = stateStore.captureGenerationId ?: run {
+            failCapture("Native capture generation is unavailable.")
+            return
+        }
         val nativeReceivedAt = System.currentTimeMillis()
+        stateStore.markProviderCallback(nativeReceivedAt)
         val monotonicReceivedNanos = SystemClock.elapsedRealtimeNanos()
         val timestamp = location.time.takeIf { it > 0L } ?: nativeReceivedAt
         val mocked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -550,8 +664,21 @@ class LocationTrackingService : Service() {
             location.isFromMockProvider
         }
 
+        val eventId = NativeLocationFixIdentity.eventId(
+            captureGenerationId = captureGenerationId,
+            provider = location.provider,
+            providerTimestampMs = timestamp,
+            elapsedRealtimeNanos = location.elapsedRealtimeNanos,
+            latitude = location.latitude,
+            longitude = location.longitude,
+        )
+        if (!recentFixDeduplicator.accept(eventId)) {
+            onDurablyHandled?.invoke()
+            return
+        }
+
         val event = linkedMapOf<String, Any?>(
-            "eventId" to UUID.randomUUID().toString(),
+            "eventId" to eventId,
             "trackId" to trackId,
             "lat" to location.latitude,
             "lon" to location.longitude,
@@ -586,6 +713,9 @@ class LocationTrackingService : Service() {
             "monotonicFixNanos" to location.elapsedRealtimeNanos,
             "monotonicReceivedNanos" to monotonicReceivedNanos,
             "monotonicDomainId" to monotonicDomainId,
+            "captureGenerationId" to captureGenerationId,
+            "nativeSessionStartedAt" to stateStore.nativeSessionStartedAt,
+            "nativeLifecycle" to TrackingStateStore.STATE_TRACKING,
             "isMocked" to mocked,
             "mockDetectionAvailable" to TrackingStateStore.MOCK_DETECTION_AVAILABLE,
             "mockEvidence" to if (mocked) {
@@ -596,6 +726,12 @@ class LocationTrackingService : Service() {
             "activityType" to latestActivity?.get("type"),
             "activityConfidence" to latestActivity?.get("confidence"),
             "activityTimestamp" to latestActivity?.get("timestamp"),
+            "activitySource" to latestActivity?.get("source"),
+            "activityRawType" to latestActivity?.get("rawType"),
+            "activityEvidenceState" to latestActivity?.get("evidenceState"),
+            "activityAgeMs" to latestActivity?.get("ageMs"),
+            "activityProbabilities" to latestActivity?.get("probabilities"),
+            "motionEvidence" to TrackingEventBus.lastMotionEvidence,
             "motionState" to if (currentProfile == TrackingStateStore.PROFILE_STATIONARY) {
                 "stationary"
             } else {
@@ -611,6 +747,7 @@ class LocationTrackingService : Service() {
         val accepted = PendingLocationCoordinator.execute(
             applicationContext,
             onFailure = { error ->
+                recentFixDeduplicator.forget(eventId)
                 mainHandler.post {
                     if (captureStarted && stateStore.activeTrackId == trackId) {
                         failCapture(
@@ -620,12 +757,16 @@ class LocationTrackingService : Service() {
                 }
             },
         ) { store ->
-            store.enqueue(event)
+            val inserted = store.enqueue(event)
             mainHandler.post {
-                handleJournaledLocation(trackId, locationCopy, timestamp, event)
+                if (inserted) {
+                    handleJournaledLocation(trackId, locationCopy, timestamp, event)
+                }
+                onDurablyHandled?.invoke()
             }
         }
         if (!accepted) {
+            recentFixDeduplicator.forget(eventId)
             failCapture("The native pending-location worker is overloaded.")
         }
     }
@@ -691,16 +832,54 @@ class LocationTrackingService : Service() {
         }
     }
 
-    private fun handleActivity(activityType: Int, confidence: Int, timestamp: Long) {
+    private fun handleActivity(
+        activityType: Int,
+        confidence: Int,
+        timestamp: Long,
+        probabilitiesJson: String? = null,
+        source: String = "android_activity_recognition",
+    ) {
+        if (timestamp < latestActivityTimestamp) return
+        latestActivityTimestamp = timestamp
+        val now = System.currentTimeMillis()
+        val age = (now - timestamp).coerceAtLeast(0L)
+        val fresh = age <= configuration.activityFreshnessThresholdMs
         val event = LinkedHashMap(ActivityMapper.event(activityType, confidence, timestamp)).apply {
             put("available", true)
+            put("source", source)
+            put("evidenceState", if (fresh) "fresh" else "stale")
+            put("ageMs", age)
+            put("probabilities", parseActivityProbabilities(probabilitiesJson))
         }
         latestActivity = event
         TrackingEventBus.emitActivity(event)
 
         val type = event["type"] as String
+        if (!fresh) {
+            stillSince = null
+            stationaryDisplacementWindow.reset()
+            movingEvidence = 0
+            mainHandler.removeCallbacks(stationaryTransition)
+            motionSensorFusion.requestAmbiguityProbe()
+            if (configuration.staleActivityFallback == "keepMovingProfile" ||
+                configuration.captureIntent != "adaptive"
+            ) {
+                switchProfile(TrackingStateStore.PROFILE_MOVING)
+            }
+            return
+        }
         when {
             type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold -> {
+                // An explicit travel intent is a fidelity contract. Activity
+                // recognition can report stationary while a pocketed rider is
+                // moving, so only adaptive capture may reduce GPS sampling.
+                if (configuration.captureIntent != "adaptive") {
+                    stillSince = null
+                    stationaryDisplacementWindow.reset()
+                    mainHandler.removeCallbacks(stationaryTransition)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                    return
+                }
                 movingEvidence = 0
                 if (stillSince == null) {
                     val now = System.currentTimeMillis()
@@ -713,6 +892,7 @@ class LocationTrackingService : Service() {
                         configuration.stationaryTimeoutMs,
                     )
                 }
+                motionSensorFusion.requestAmbiguityProbe(stationaryCandidate = true)
                 tryEnterStationaryProfile()
             }
 
@@ -732,13 +912,34 @@ class LocationTrackingService : Service() {
                 stationaryDisplacementWindow.reset()
                 movingEvidence = 0
                 mainHandler.removeCallbacks(stationaryTransition)
+                motionSensorFusion.requestAmbiguityProbe()
+                if (configuration.unknownMotionFallback == "keepMovingProfile" ||
+                    configuration.captureIntent != "adaptive"
+                ) {
+                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                }
             }
         }
     }
 
+    private fun parseActivityProbabilities(value: String?): Map<String, Int> {
+        if (value.isNullOrBlank()) return emptyMap()
+        return runCatching {
+            val json = JSONObject(value)
+            buildMap {
+                json.keys().forEach { key ->
+                    put(key, json.optInt(key, 0).coerceIn(0, 100))
+                }
+            }
+        }.getOrDefault(emptyMap())
+    }
+
     private fun switchProfile(profile: String) {
         if (!captureStarted || profile == currentProfile) return
+        val previousProfile = currentProfile
         currentProfile = profile
+        val exitedStationary = previousProfile == TrackingStateStore.PROFILE_STATIONARY &&
+            profile == TrackingStateStore.PROFILE_MOVING
         if (profile == TrackingStateStore.PROFILE_STATIONARY) {
             stationaryReferenceLocation = lastLocation?.let(::Location)
             stationaryDisplacementWindow.reset()
@@ -752,7 +953,79 @@ class LocationTrackingService : Service() {
         }
         stateStore.emitCurrentStatus()
         requestLocationUpdates(profile)
+        if (exitedStationary) requestStationaryExitProbe()
         updateNotification(force = true)
+    }
+
+    private fun requestStationaryExitProbe() {
+        if (!captureStarted || !hasLocationPermission()) return
+        val token = stationaryExitProbeCoordinator.begin()
+        stateStore.markStationaryExitProbeRequested()
+        stateStore.emitCurrentStatus()
+
+        fusedLocationClient.flushLocations()
+            .addOnSuccessListener {
+                if (captureStarted) stateStore.markStationaryExitFlushOutcome("succeeded")
+            }
+            .addOnFailureListener { error ->
+                if (captureStarted) {
+                    stateStore.markStationaryExitFlushOutcome("failed")
+                    stateStore.markLocationRequestFailure(
+                        "Stationary-exit flush failed: ${error.message.orEmpty()}",
+                    )
+                }
+            }
+
+        if (!stationaryExitProbeCoordinator.beginCurrentFixRequest(token)) return
+        stationaryExitProbeCancellation?.cancel()
+        val cancellation = CancellationTokenSource()
+        stationaryExitProbeCancellation = cancellation
+
+        val timeout = Runnable {
+            if (!stationaryExitProbeCoordinator.complete(token)) return@Runnable
+            cancellation.cancel()
+            stationaryExitProbeCancellation = null
+            stationaryExitProbeTimeout = null
+            stateStore.markStationaryExitProbeCompleted("timed_out")
+            stateStore.emitCurrentStatus()
+        }
+        stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
+        stationaryExitProbeTimeout = timeout
+        mainHandler.postDelayed(timeout, STATIONARY_EXIT_PROBE_TIMEOUT_MS)
+
+        try {
+            fusedLocationClient.getCurrentLocation(
+                Priority.PRIORITY_HIGH_ACCURACY,
+                cancellation.token,
+            ).addOnSuccessListener { location ->
+                if (location == null) {
+                    completeStationaryExitProbe(token, "no_fix")
+                } else {
+                    handleLocation(location) {
+                        completeStationaryExitProbe(token, "succeeded")
+                    }
+                }
+            }.addOnFailureListener { error ->
+                stateStore.markLocationRequestFailure(
+                    "Stationary-exit probe failed: ${error.message.orEmpty()}",
+                )
+                completeStationaryExitProbe(token, "failed")
+            }
+        } catch (error: SecurityException) {
+            stateStore.markLocationRequestFailure(
+                "Stationary-exit probe permission failure: ${error.message.orEmpty()}",
+            )
+            completeStationaryExitProbe(token, "permission_unavailable")
+        }
+    }
+
+    private fun completeStationaryExitProbe(token: Long, outcome: String) {
+        if (!stationaryExitProbeCoordinator.complete(token)) return
+        stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
+        stationaryExitProbeTimeout = null
+        stationaryExitProbeCancellation = null
+        stateStore.markStationaryExitProbeCompleted(outcome)
+        stateStore.emitCurrentStatus()
     }
 
     private fun failCapture(message: String) {
@@ -905,10 +1178,58 @@ class LocationTrackingService : Service() {
                         activityPendingIntent(trackId, generation),
                     )
                 }
+                runCatching {
+                    activityRecognitionClient.removeActivityTransitionUpdates(
+                        activityTransitionPendingIntent(trackId, generation),
+                    )
+                }
             }
+        }
+        val transitionPendingIntent = currentActivityTransitionPendingIntent
+        if (transitionPendingIntent != null) {
+            runCatching {
+                activityRecognitionClient.removeActivityTransitionUpdates(
+                    transitionPendingIntent,
+                )
+            }
+            transitionPendingIntent.cancel()
+            currentActivityTransitionPendingIntent = null
         }
         if (clearGeneration && ::stateStore.isInitialized) {
             runCatching { stateStore.clearActivityRecognitionGeneration() }
+        }
+    }
+
+    private fun requestActivityTransitionUpdates(trackId: String, generation: Long) {
+        val activities = intArrayOf(
+            DetectedActivity.STILL,
+            DetectedActivity.WALKING,
+            DetectedActivity.RUNNING,
+            DetectedActivity.ON_BICYCLE,
+            DetectedActivity.IN_VEHICLE,
+        )
+        val transitions = activities.flatMap { activityType ->
+            listOf(
+                ActivityTransition.Builder()
+                    .setActivityType(activityType)
+                    .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_ENTER)
+                    .build(),
+                ActivityTransition.Builder()
+                    .setActivityType(activityType)
+                    .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_EXIT)
+                    .build(),
+            )
+        }
+        val pendingIntent = activityTransitionPendingIntent(trackId, generation)
+        currentActivityTransitionPendingIntent = pendingIntent
+        activityRecognitionClient.requestActivityTransitionUpdates(
+            ActivityTransitionRequest(transitions),
+            pendingIntent,
+        ).addOnFailureListener {
+            if (currentActivityTransitionPendingIntent == pendingIntent) {
+                currentActivityTransitionPendingIntent = null
+                pendingIntent.cancel()
+            }
         }
     }
 
@@ -928,6 +1249,32 @@ class LocationTrackingService : Service() {
             Intent(this, ActivityRecognitionReceiver::class.java).apply {
                 action = ActivityRecognitionReceiver.ACTION_ACTIVITY_RECOGNITION
                 data = Uri.parse("flutter-background-location://activity/$generation")
+                putExtra(EXTRA_TRACK_ID, trackId)
+                putExtra(EXTRA_ACTIVITY_GENERATION, generation)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or mutableFlag,
+        )
+    }
+
+    private fun activityTransitionPendingIntent(
+        trackId: String,
+        generation: Long,
+    ): PendingIntent {
+        val mutableFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_MUTABLE
+        } else {
+            0
+        }
+        val requestCode = (
+            REQUEST_ACTIVITY_TRANSITION +
+                (generation % ACTIVITY_RECOGNITION_REQUEST_CODE_SPAN)
+            ).toInt()
+        return PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            Intent(this, ActivityRecognitionReceiver::class.java).apply {
+                action = ActivityRecognitionReceiver.ACTION_ACTIVITY_TRANSITION
+                data = Uri.parse("flutter-background-location://activity-transition/$generation")
                 putExtra(EXTRA_TRACK_ID, trackId)
                 putExtra(EXTRA_ACTIVITY_GENERATION, generation)
             },
@@ -972,7 +1319,18 @@ class LocationTrackingService : Service() {
     private fun tryEnterStationaryProfile() {
         val beganAt = stillSince ?: return
         if (!captureStarted || currentProfile != TrackingStateStore.PROFILE_MOVING) return
+        if (configuration.captureIntent != "adaptive") return
         if (!hasHighConfidenceStillActivity()) return
+        if (configuration.motionFusionMode == "enhancedSensorFusion") {
+            val evidence = TrackingEventBus.lastMotionEvidence ?: return
+            val observedAt = (evidence["observedAt"] as? Number)?.toLong() ?: return
+            val age = (System.currentTimeMillis() - observedAt).coerceAtLeast(0L)
+            if (evidence["state"] != "stationary" ||
+                age > configuration.motionEvidenceFreshnessMs
+            ) {
+                return
+            }
+        }
         if (System.currentTimeMillis() - beganAt < configuration.stationaryTimeoutMs) return
         if (!stationaryDisplacementWindow.hasLowDisplacement(
                 configuration.stationaryTimeoutMs,
@@ -1020,17 +1378,24 @@ class LocationTrackingService : Service() {
         internal const val EXTRA_ACTIVITY_CONFIDENCE = "activity_confidence"
         internal const val EXTRA_ACTIVITY_TIMESTAMP = "activity_timestamp"
         internal const val EXTRA_ACTIVITY_GENERATION = "activity_generation"
+        internal const val EXTRA_ACTIVITY_PROBABILITIES = "activity_probabilities"
+        internal const val EXTRA_ACTIVITY_SOURCE = "activity_source"
 
         private const val NOTIFICATION_ID = 45_001
         private const val REQUEST_OPEN_APP = 45_001
         private const val REQUEST_PAUSE = 45_002
         private const val REQUEST_STOP = 45_003
         private const val REQUEST_ACTIVITY_RECOGNITION = 45_004
+        private const val REQUEST_ACTIVITY_TRANSITION = 55_004
         private const val ACTIVITY_RECOGNITION_REQUEST_CODE_SPAN = 10_000L
         private const val NOTIFICATION_UPDATE_INTERVAL_MS = 60_000L
         private const val SERVICE_HEARTBEAT_INTERVAL_MS = 60_000L
         private const val PREREQUISITE_MONITOR_INTERVAL_MS = 60_000L
         private const val MINIMUM_BASELINE_FRESHNESS_MS = 30_000L
+        private const val STATIONARY_EXIT_PROBE_TIMEOUT_MS = 15_000L
+        private const val CAPTURE_REASON_NEW_TRACK = "new_track"
+        private const val CAPTURE_REASON_RESUME = "resume"
+        private const val CAPTURE_REASON_PROCESS_RECOVERY = "process_recovery"
         private const val COMMAND_SOURCE_NOTIFICATION = "notification"
         private const val MOVING_EVIDENCE_REQUIRED = 2
         private val MOVING_ACTIVITY_TYPES = setOf("walking", "running", "cycling", "automotive")

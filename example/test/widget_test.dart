@@ -3,6 +3,7 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker_testing.dart';
 import 'package:flutter_background_location_tracker_example/main.dart';
 import 'package:flutter_background_location_tracker_example/recorded_tracks_section.dart';
+import 'package:flutter_background_location_tracker_example/recorded_trips_section.dart';
 import 'package:flutter_background_location_tracker_example/route_map_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -40,6 +41,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await _scrollHome(tester, 500);
+
     final accuracySelector = find.byType(
       DropdownButtonFormField<TrackingAccuracy>,
     );
@@ -63,6 +66,7 @@ void main() {
       ),
       isTrue,
     );
+    await _scrollHome(tester, 700);
     final batterySettings = find.widgetWithText(
       OutlinedButton,
       'Battery settings',
@@ -75,6 +79,8 @@ void main() {
   testWidgets('start asks for a non-empty route identifier', (tester) async {
     await tester.pumpWidget(testApp());
     await tester.pumpAndSettle();
+
+    await _scrollHome(tester, 1000);
 
     final start = find.widgetWithText(FilledButton, 'Start').first;
     await tester.ensureVisible(start);
@@ -107,6 +113,8 @@ void main() {
       TrackingExampleApp(controllerFactory: (_, _) async => controller),
     );
     await tester.pumpAndSettle();
+
+    await _scrollHome(tester, 1000);
 
     expect(
       tester
@@ -198,6 +206,108 @@ void main() {
     expect(geometry.start.longitude, geometry.destination.longitude);
     expect(geometry.hasDistinctEndpoints, isFalse);
   });
+
+  testWidgets('completed Trip menu exposes export, map, continue, and delete', (
+    tester,
+  ) async {
+    final calls = <String>[];
+    final trip = Trip(
+      id: 'trip-1',
+      organizationId: 'example-organization',
+      userId: 'example-user',
+      routeId: 'multi_day_route',
+      status: TripStatus.completed,
+      startedAt: DateTime.utc(2026),
+      endedAt: DateTime.utc(2026, 1, 3),
+      legCount: 3,
+      acceptedPointCount: 20,
+      rejectedPointCount: 2,
+      measuredDistanceMeters: 1234,
+      lifecycleRevision: 6,
+      createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026, 1, 3),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTripsSection(
+            trips: <RecordedTripSummary>[
+              RecordedTripSummary(trip: trip, segmentCount: 4, gapCount: 3),
+            ],
+            hasMore: false,
+            onRefresh: () async {},
+            onLoadMore: () async {},
+            onViewMap: (_) async => calls.add('map'),
+            onContinue: (_) async => calls.add('continue'),
+            onExport: (_, format) async => calls.add(format.name),
+            onDelete: (_) async => calls.add('delete'),
+          ),
+        ),
+      ),
+    );
+
+    final expectations = <String, String>{
+      'Export GeoJSON': 'geoJson',
+      'Export KML': 'kml',
+      'Export GPX': 'gpx',
+      'View all days on map': 'map',
+      'Continue completed Trip': 'continue',
+      'Delete Trip': 'delete',
+    };
+    for (final entry in expectations.entries) {
+      await tester.tap(find.byTooltip('Trip actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(entry.key));
+      await tester.pumpAndSettle();
+      expect(calls.last, entry.value, reason: entry.key);
+    }
+  });
+
+  test('map geometry marks severe typed same-segment gap evidence', () {
+    final track = _completedTrack();
+    final source = _segment(track, 1, const <(double, double)>[
+      (27.7, 85.3),
+      (27.71, 85.31),
+    ]);
+    final before = source.points.first;
+    final after = source.points.last;
+    final gap = TrackingContinuityGap(
+      id: 'gap-1',
+      trackId: track.id,
+      beforePointId: before.id,
+      afterPointId: after.id,
+      beforeSegmentId: source.segment.id,
+      afterSegmentId: source.segment.id,
+      cause: TrackingGapCause.expectedStationarySuppression,
+      treatment: TrackingGapTreatment.retainCurrentSegment,
+      distanceTreatment: TrackingGapDistanceTreatment.excluded,
+      continuityPolicyVersion: 1,
+      providerGap: const Duration(seconds: 61),
+      createdAt: DateTime.utc(2026),
+    );
+    final report = const RouteGeometryAssembler().assemble(
+      sourceParts: <RouteGeometrySourcePart>[
+        RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: source.segment,
+          points: source.points,
+        ),
+      ],
+      gaps: <TrackingContinuityGap>[gap],
+      continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    );
+
+    final geometry = RouteGeometry.fromReport(report);
+
+    expect(geometry.segments, hasLength(1));
+    expect(geometry.gapMarkers, hasLength(1));
+    expect(geometry.gapCount, 1);
+  });
+}
+
+Future<void> _scrollHome(WidgetTester tester, double distance) async {
+  await tester.drag(find.byType(ListView), Offset(0, -distance));
+  await tester.pumpAndSettle();
 }
 
 Track _completedTrack({int segmentCount = 1}) => Track(

@@ -70,6 +70,8 @@ final class DerivedGeometryPoint {
     required this.sequence,
     required this.latitude,
     required this.longitude,
+    this.confidence,
+    this.matched = true,
   });
 
   final String runId;
@@ -78,6 +80,12 @@ final class DerivedGeometryPoint {
   final int sequence;
   final double latitude;
   final double longitude;
+
+  /// Optional processor confidence normalized to 0–1.
+  final double? confidence;
+
+  /// Whether a host processor matched this anchor instead of using raw fallback.
+  final bool matched;
 }
 
 /// Input to an offline derivation. The package ships an EMA implementation;
@@ -91,6 +99,7 @@ final class DerivedGeometryRequest {
     this.smoothingFactor = 0.35,
     this.mapDataSource,
     this.mapDataVersion,
+    this.processorConfiguration = const <String, Object?>{},
   }) : assert(smoothingFactor > 0 && smoothingFactor <= 1);
 
   final String name;
@@ -99,9 +108,11 @@ final class DerivedGeometryRequest {
   final double smoothingFactor;
   final String? mapDataSource;
   final String? mapDataVersion;
+  final Map<String, Object?> processorConfiguration;
 
   Map<String, Object?> get configuration => <String, Object?>{
         'smoothingFactor': smoothingFactor,
+        ...processorConfiguration,
       };
 }
 

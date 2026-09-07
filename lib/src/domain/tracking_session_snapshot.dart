@@ -1,4 +1,5 @@
 import 'activity_snapshot.dart';
+import 'motion_evidence.dart';
 import 'track.dart';
 import 'track_point.dart';
 import 'tracker_status.dart';
@@ -77,6 +78,9 @@ final class TrackingSessionSnapshot {
   final TrackingLifecycleActions allowedActions;
   final TrackingHealthSnapshot? health;
   final TrackingFixState fixState;
+
+  /// Latest fused motion evidence reported by native capture.
+  MotionEvidenceSnapshot? get motionEvidence => status.motionEvidence;
 
   /// Redacted reason that current-session actions are unavailable.
   final String? blockerCode;

@@ -98,7 +98,7 @@ final class FixQualityPolicy {
 
     final receiptDelta = sample.providerTimeDeltaMsAtReceipt;
     if (receiptDelta != null &&
-        receiptDelta > config.largeGapThreshold.inMilliseconds) {
+        receiptDelta > config.maximumProviderFixAge.inMilliseconds) {
       issues.add(FixQualityIssue.staleTimestamp);
       flags |= TrackPointQualityFlag.staleTimestamp;
       rejection ??= 'stale_timestamp';
@@ -140,7 +140,7 @@ final class FixQualityPolicy {
         rejection ??= 'stale_timestamp';
         motionEligible = false;
       } else {
-        if (elapsed > config.largeGapThreshold) {
+        if (elapsed > config.acceptedGeometryGapThreshold) {
           issues.add(FixQualityIssue.largeGap);
           flags |= TrackPointQualityFlag.largeGap;
           motionEligible = false;

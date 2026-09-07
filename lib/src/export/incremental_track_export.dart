@@ -5,13 +5,16 @@ import 'dart:io';
 import 'package:path/path.dart' as path_util;
 import 'package:uuid/uuid.dart';
 
+import '../application/route_geometry_assembler.dart';
 import '../domain/export_models.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/activity_snapshot.dart';
+import '../domain/route_geometry.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_segment.dart';
+import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
@@ -201,6 +204,14 @@ final class IncrementalTrackExportService {
         pointPageSize: pointPageSize,
         operation: operation,
         isOwnerScopeCurrent: isOwnerScopeCurrent,
+        gaps: repository is ContinuityTrackRepository
+            ? await (repository as ContinuityTrackRepository)
+                .listContinuityGaps(track.id)
+            : const <TrackingContinuityGap>[],
+        safeLegacyAfterSegmentIds: repository is LegacyGapEvidenceRepository
+            ? await (repository as LegacyGapEvidenceRepository)
+                .safeLegacyAutomaticAfterSegmentIds(track.id)
+            : const <String>{},
       );
       final counts = switch (format) {
         TrackExportFormat.geoJson => await encoder.writeGeoJson(),
@@ -225,6 +236,11 @@ final class IncrementalTrackExportService {
           pointCount: counts.points,
           segmentCount: counts.segments,
           byteLength: operation.bytesWritten,
+          sourceSegmentCount: counts.sourceSegmentCount,
+          geometryPartCount: counts.geometryPartCount,
+          gapCount: counts.gapCount,
+          inferredConnectorCount: counts.inferredConnectorCount,
+          geometryContinuity: options.geometryContinuity,
         ),
       );
     } on Object catch (error, stackTrace) {
@@ -454,7 +470,9 @@ final class _PagedTrackEncoder {
     required this.pointPageSize,
     required this.operation,
     required this.isOwnerScopeCurrent,
-  });
+    required Iterable<TrackingContinuityGap> gaps,
+    required this.safeLegacyAfterSegmentIds,
+  }) : gaps = List<TrackingContinuityGap>.unmodifiable(gaps);
 
   final StreamingTrackRepository repository;
   final TrackingOwner owner;
@@ -465,23 +483,32 @@ final class _PagedTrackEncoder {
   final int pointPageSize;
   final _IncrementalTrackExportOperation operation;
   final bool Function() isOwnerScopeCurrent;
+  final List<TrackingContinuityGap> gaps;
+  final Set<String> safeLegacyAfterSegmentIds;
+  static const RouteGeometryAssembler _geometryAssembler =
+      RouteGeometryAssembler();
+
+  late final Map<String, TrackingContinuityGap> _gapsByBoundary =
+      <String, TrackingContinuityGap>{
+    for (final gap in gaps)
+      _boundaryKey(gap.beforeSegmentId, gap.afterSegmentId): gap,
+  };
 
   IncrementalExportSink get sink => operation._sinkForEncoding;
 
   Future<_ExportCounts> writeGeoJson() async {
-    final scan = await _scanRoute();
+    final plan = await _buildGeometryPlan();
     operation.checkpoint(isOwnerScopeCurrent);
     await operation.addChunk(
       sink,
       '{"type":"FeatureCollection","features":['
-      '{"type":"Feature","properties":${jsonEncode(_trackProperties(track, options))},'
+      '{"type":"Feature","properties":${jsonEncode(_trackProperties(track, options, plan))},'
       '"geometry":',
     );
-    if (scan.lineSegments == 0) {
+    if (plan.linePartCount == 0) {
       await operation.addChunk(sink, 'null}');
-      await _markAllSelectedPointsProcessed();
     } else {
-      final multi = scan.lineSegments > 1;
+      final multi = plan.linePartCount > 1;
       await operation.addChunk(
         sink,
         multi
@@ -489,41 +516,50 @@ final class _PagedTrackEncoder {
             : '{"type":"LineString","coordinates":',
       );
       var wroteLine = false;
-      await _walkSegments((segment) async {
-        final segmentScan = await _scanSegment(segment.id);
-        final includeLine = segmentScan.validCoordinates >= 2;
-        if (includeLine) {
-          if (multi && wroteLine) await operation.addChunk(sink, ',');
-          await operation.addChunk(sink, '[');
-        }
+      for (final part in plan.parts) {
+        if (part.validGeometryCoordinates < 2) continue;
+        if (multi && wroteLine) await operation.addChunk(sink, ',');
+        await operation.addChunk(sink, '[');
         var wroteCoordinate = false;
-        await _walkPointPages(segment.id, (points) async {
-          final selected = points.where(_isSelected).toList(growable: false);
-          final buffer = StringBuffer();
-          for (final point in selected) {
-            operation.checkpoint(isOwnerScopeCurrent);
-            if (includeLine && _hasValidCoordinate(point)) {
+        for (final source in part.sources) {
+          await _walkGeometrySourcePages(source, (geometryPoints) async {
+            final buffer = StringBuffer();
+            for (final point in geometryPoints) {
               if (wroteCoordinate) buffer.write(',');
               buffer.write(jsonEncode(_geoJsonCoordinate(point)));
               wroteCoordinate = true;
             }
-          }
-          if (buffer.isNotEmpty) {
-            await operation.addChunk(sink, buffer.toString());
-          }
-          operation.addProcessedPoints(selected.length);
-        });
-        if (includeLine) {
-          await operation.addChunk(sink, ']');
-          wroteLine = true;
+            if (buffer.isNotEmpty) {
+              await operation.addChunk(sink, buffer.toString());
+            }
+          });
         }
-      });
+        await operation.addChunk(sink, ']');
+        wroteLine = true;
+      }
       await operation.addChunk(sink, multi ? ']}}' : '}}');
     }
 
+    for (final part in plan.parts) {
+      if (plan.linePartCount != 0 && part.validGeometryCoordinates >= 2) {
+        continue;
+      }
+      for (final source in part.sources) {
+        await _walkGeometrySourcePages(source, (_) async {});
+      }
+    }
+    await _markSourcesWithoutGeometryProcessed(plan);
+
+    for (final connector in plan.connectors) {
+      await operation.addChunk(
+        sink,
+        ',${jsonEncode(_geoJsonConnectorFeature(connector))}',
+      );
+    }
+
     if (options.includeGeoJsonPointFeatures) {
-      await _walkSegments((segment) async {
-        await _walkPointPages(segment.id, (points) async {
+      for (final source in plan.sources) {
+        await _walkPointPages(source.segment.id, (points) async {
           final buffer = StringBuffer();
           for (final point in points.where(_isSelected)) {
             operation.checkpoint(isOwnerScopeCurrent);
@@ -535,15 +571,14 @@ final class _PagedTrackEncoder {
             await operation.addChunk(sink, buffer.toString());
           }
         });
-      });
+      }
     }
     await operation.addChunk(sink, ']}');
-    return _ExportCounts(points: scan.selectedPoints, segments: scan.segments);
+    return _counts(plan);
   }
 
   Future<_ExportCounts> writeKml() async {
-    var pointCount = 0;
-    var segmentCount = 0;
+    final plan = await _buildGeometryPlan();
     await operation.addChunk(
       sink,
       '<?xml version="1.0" encoding="UTF-8"?>'
@@ -551,57 +586,62 @@ final class _PagedTrackEncoder {
       '<name>${_xmlText(_trackName(track))}</name>'
       '<ExtendedData><Data name="geometrySource"><value>'
       '${_xmlText(_geometryLabel(options.geometry))}'
+      '</value></Data><Data name="geometryContinuity"><value>'
+      '${options.geometryContinuity.name}'
       '</value></Data></ExtendedData>',
     );
-    await _walkSegments((segment) async {
-      segmentCount += 1;
-      final scan = await _scanSegment(segment.id);
-      pointCount += scan.selectedPoints;
-      if (scan.validCoordinates == 0) {
-        operation.addProcessedPoints(scan.selectedPoints);
-        return;
-      }
-      final line = scan.validCoordinates >= 2;
+    for (final part in plan.parts) {
+      final line = part.validGeometryCoordinates >= 2;
       final title = line
-          ? 'Segment ${segment.segmentNumber}'
-          : 'Segment ${segment.segmentNumber} point';
+          ? 'Segment ${part.partNumber}'
+          : 'Segment ${part.partNumber} point';
       await operation.addChunk(
         sink,
         '<Placemark><name>${_xmlText(title)}</name>'
         '<ExtendedData><Data name="segmentNumber"><value>'
-        '${segment.segmentNumber}</value></Data><Data name="pointCount"><value>'
-        '${scan.validCoordinates}</value></Data></ExtendedData>'
+        '${part.partNumber}</value></Data><Data name="pointCount"><value>'
+        '${part.validGeometryCoordinates}</value></Data></ExtendedData>'
         '${line ? '<LineString><tessellate>1</tessellate><coordinates>' : '<Point><coordinates>'}',
       );
       final bufferState = _CommaState(separator: '\n');
-      await _walkPointPages(segment.id, (points) async {
-        final selected = points.where(_isSelected).toList(growable: false);
-        final buffer = StringBuffer();
-        for (final point in selected) {
-          operation.checkpoint(isOwnerScopeCurrent);
-          if (_hasValidCoordinate(point)) {
+      for (final source in part.sources) {
+        await _walkGeometrySourcePages(source, (geometryPoints) async {
+          final buffer = StringBuffer();
+          for (final point in geometryPoints) {
             bufferState.write(buffer, _kmlCoordinate(point));
           }
-        }
-        if (buffer.isNotEmpty) {
-          await operation.addChunk(sink, buffer.toString());
-        }
-        operation.addProcessedPoints(selected.length);
-      });
+          if (buffer.isNotEmpty) {
+            await operation.addChunk(sink, buffer.toString());
+          }
+        });
+      }
       await operation.addChunk(
         sink,
         line
             ? '</coordinates></LineString></Placemark>'
             : '</coordinates></Point></Placemark>',
       );
-    });
+    }
+    await _markSourcesWithoutGeometryProcessed(plan);
+    for (final connector in plan.connectors) {
+      await operation.addChunk(
+        sink,
+        '<Placemark><name>Inferred route connector</name><ExtendedData>'
+        '<Data name="cause"><value>${connector.cause.name}</value></Data>'
+        '<Data name="beforePointId"><value>${_xmlText(connector.beforePointId)}</value></Data>'
+        '<Data name="afterPointId"><value>${_xmlText(connector.afterPointId)}</value></Data>'
+        '<Data name="durationMs"><value>${connector.duration.inMilliseconds}</value></Data>'
+        '<Data name="straightLineDistanceMeters"><value>${connector.straightLineDistanceMeters}</value></Data>'
+        '<Data name="excludedFromMeasuredDistance"><value>true</value></Data>'
+        '</ExtendedData></Placemark>',
+      );
+    }
     await operation.addChunk(sink, '</Document></kml>');
-    return _ExportCounts(points: pointCount, segments: segmentCount);
+    return _counts(plan);
   }
 
   Future<_ExportCounts> writeGpx() async {
-    var pointCount = 0;
-    var segmentCount = 0;
+    final plan = await _buildGeometryPlan();
     final name = _xmlText(_trackName(track));
     await operation.addChunk(
       sink,
@@ -613,72 +653,177 @@ final class _PagedTrackEncoder {
       'xsi:schemaLocation="http://www.topografix.com/GPX/1/1 '
       'http://www.topografix.com/GPX/1/1/gpx.xsd">'
       '<metadata><name>$name</name><time>${_formatTime(track.startedAt, options)}</time>'
-      '<desc>${_xmlText(_geometryLabel(options.geometry))}</desc>'
+      '<desc>${options.geometryContinuity.name}</desc>'
       '</metadata><trk><name>$name</name>',
     );
-    await _walkSegments((segment) async {
-      segmentCount += 1;
+    if (plan.connectors.isNotEmpty) {
+      await operation.addChunk(
+        sink,
+        '<extensions><fbl:geometryContinuity>'
+        '${options.geometryContinuity.name}'
+        '</fbl:geometryContinuity>',
+      );
+      for (final connector in plan.connectors) {
+        await operation.addChunk(
+          sink,
+          '<fbl:gap cause="${connector.cause.name}" '
+          'beforePointId="${_xmlText(connector.beforePointId)}" '
+          'afterPointId="${_xmlText(connector.afterPointId)}" '
+          'durationMs="${connector.duration.inMilliseconds}" '
+          'straightLineDistanceMeters="${connector.straightLineDistanceMeters}" '
+          'excludedFromMeasuredDistance="true"/>',
+        );
+      }
+      await operation.addChunk(sink, '</extensions>');
+    }
+    for (final part in plan.parts) {
       await operation.addChunk(sink, '<trkseg>');
-      await _walkPointPages(segment.id, (points) async {
-        final selected = points.where(_isSelected).toList(growable: false);
-        pointCount += selected.length;
-        final buffer = StringBuffer();
-        for (final point in selected) {
-          operation.checkpoint(isOwnerScopeCurrent);
-          if (_hasValidCoordinate(point)) {
+      for (final source in part.sources) {
+        await _walkGeometrySourcePages(source, (geometryPoints) async {
+          final buffer = StringBuffer();
+          for (final point in geometryPoints) {
             buffer.write(_gpxPoint(point));
           }
-        }
-        if (buffer.isNotEmpty) {
-          await operation.addChunk(sink, buffer.toString());
-        }
-        operation.addProcessedPoints(selected.length);
-      });
+          if (buffer.isNotEmpty) {
+            await operation.addChunk(sink, buffer.toString());
+          }
+        });
+      }
       await operation.addChunk(sink, '</trkseg>');
-    });
+    }
+    await _markSourcesWithoutGeometryProcessed(plan);
     await operation.addChunk(sink, '</trk></gpx>');
-    return _ExportCounts(points: pointCount, segments: segmentCount);
+    return _counts(plan);
   }
 
-  Future<_RouteScan> _scanRoute() async {
-    var segments = 0;
+  Future<_GeometryPlan> _buildGeometryPlan() async {
+    final sources = <_GeometrySourceScan>[];
+    final parts = <_GeometryPartScan>[];
+    final connectors = <InferredRouteConnector>[];
+    _GeometrySourceScan? previousGeometrySource;
+    var representedGapBoundaries = 0;
+    var geometrySourceCount = 0;
     var selectedPoints = 0;
-    var lineSegments = 0;
     await _walkSegments((segment) async {
-      segments += 1;
       final scan = await _scanSegment(segment.id);
       selectedPoints += scan.selectedPoints;
-      if (scan.validCoordinates >= 2) lineSegments += 1;
+      if (scan.geometryPoints == 0) {
+        sources.add(
+          _GeometrySourceScan(segment: segment, scan: scan, partIndex: null),
+        );
+        return;
+      }
+
+      geometrySourceCount += 1;
+      final previous = previousGeometrySource;
+      var partIndex = parts.length;
+      if (previous != null) {
+        final gap =
+            _gapsByBoundary[_boundaryKey(previous.segment.id, segment.id)];
+        if (gap != null) representedGapBoundaries += 1;
+        final decision = _geometryAssembler.decideBoundary(
+          continuity: options.geometryContinuity,
+          gap: gap,
+          legacyAutomaticGapEligible:
+              safeLegacyAfterSegmentIds.contains(segment.id),
+        );
+        if (decision.connect) {
+          partIndex = previous.partIndex!;
+          connectors.add(
+            _geometryAssembler.inferConnector(
+              before: previous.scan.lastGeometryPoint!,
+              after: scan.firstGeometryPoint!,
+              beforeLegNumber: 1,
+              afterLegNumber: 1,
+              gap: gap,
+            ),
+          );
+        }
+      }
+      if (partIndex == parts.length) {
+        parts.add(_GeometryPartScan(partNumber: parts.length + 1));
+      }
+      final source = _GeometrySourceScan(
+        segment: segment,
+        scan: scan,
+        partIndex: partIndex,
+      );
+      parts[partIndex]
+        ..sources.add(source)
+        ..validGeometryCoordinates += scan.validGeometryCoordinates;
+      sources.add(source);
+      previousGeometrySource = source;
     });
-    return _RouteScan(
-      segments: segments,
+
+    final unrecordedBoundaries = geometrySourceCount <= 1
+        ? 0
+        : (geometrySourceCount - 1 - representedGapBoundaries)
+            .clamp(0, 1 << 31);
+    return _GeometryPlan(
+      sources: sources,
+      parts: parts,
+      connectors: connectors,
       selectedPoints: selectedPoints,
-      lineSegments: lineSegments,
+      gapCount: gaps.length + unrecordedBoundaries,
     );
   }
 
   Future<_SegmentScan> _scanSegment(String segmentId) async {
     var selectedPoints = 0;
-    var validCoordinates = 0;
+    var geometryPoints = 0;
+    var validGeometryCoordinates = 0;
+    TrackPoint? firstGeometryPoint;
+    TrackPoint? lastGeometryPoint;
     await _walkPointPages(segmentId, (points) async {
       for (final point in points) {
-        if (!_isSelected(point)) continue;
-        selectedPoints += 1;
-        if (_hasValidCoordinate(point)) validCoordinates += 1;
+        if (_isSelected(point)) selectedPoints += 1;
+        if (!point.accepted) continue;
+        geometryPoints += 1;
+        firstGeometryPoint ??= point;
+        lastGeometryPoint = point;
+        if (_hasValidCoordinate(point)) validGeometryCoordinates += 1;
       }
     });
     return _SegmentScan(
       selectedPoints: selectedPoints,
-      validCoordinates: validCoordinates,
+      geometryPoints: geometryPoints,
+      validGeometryCoordinates: validGeometryCoordinates,
+      firstGeometryPoint: firstGeometryPoint,
+      lastGeometryPoint: lastGeometryPoint,
     );
   }
 
-  Future<void> _markAllSelectedPointsProcessed() =>
-      _walkSegments((segment) async {
-        await _walkPointPages(segment.id, (points) async {
-          operation.addProcessedPoints(points.where(_isSelected).length);
-        });
+  Future<void> _walkGeometrySourcePages(
+    _GeometrySourceScan source,
+    Future<void> Function(List<TrackPoint> geometryPoints) visit,
+  ) =>
+      _walkPointPages(source.segment.id, (points) async {
+        operation.checkpoint(isOwnerScopeCurrent);
+        final selectedCount = points.where(_isSelected).length;
+        final geometryPoints = points
+            .where((point) => point.accepted && _hasValidCoordinate(point))
+            .toList(growable: false);
+        await visit(geometryPoints);
+        operation.addProcessedPoints(selectedCount);
       });
+
+  Future<void> _markSourcesWithoutGeometryProcessed(
+    _GeometryPlan plan,
+  ) async {
+    for (final source in plan.sources) {
+      if (source.partIndex != null) continue;
+      await _walkGeometrySourcePages(source, (_) async {});
+    }
+  }
+
+  _ExportCounts _counts(_GeometryPlan plan) => _ExportCounts(
+        points: plan.selectedPoints,
+        segments: plan.sourceSegmentCount,
+        sourceSegmentCount: plan.sourceSegmentCount,
+        geometryPartCount: plan.parts.length,
+        gapCount: plan.gapCount,
+        inferredConnectorCount: plan.connectors.length,
+      );
 
   Future<void> _walkSegments(
     Future<void> Function(TrackSegment segment) visit,
@@ -796,29 +941,78 @@ extension on _IncrementalTrackExportOperation {
 }
 
 final class _ExportCounts {
-  const _ExportCounts({required this.points, required this.segments});
+  const _ExportCounts({
+    required this.points,
+    required this.segments,
+    int? sourceSegmentCount,
+    int? geometryPartCount,
+    this.gapCount = 0,
+    this.inferredConnectorCount = 0,
+  })  : sourceSegmentCount = sourceSegmentCount ?? segments,
+        geometryPartCount = geometryPartCount ?? segments;
   final int points;
   final int segments;
-}
-
-final class _RouteScan {
-  const _RouteScan({
-    required this.segments,
-    required this.selectedPoints,
-    required this.lineSegments,
-  });
-  final int segments;
-  final int selectedPoints;
-  final int lineSegments;
+  final int sourceSegmentCount;
+  final int geometryPartCount;
+  final int gapCount;
+  final int inferredConnectorCount;
 }
 
 final class _SegmentScan {
   const _SegmentScan({
     required this.selectedPoints,
-    required this.validCoordinates,
+    required this.geometryPoints,
+    required this.validGeometryCoordinates,
+    required this.firstGeometryPoint,
+    required this.lastGeometryPoint,
   });
   final int selectedPoints;
-  final int validCoordinates;
+  final int geometryPoints;
+  final int validGeometryCoordinates;
+  final TrackPoint? firstGeometryPoint;
+  final TrackPoint? lastGeometryPoint;
+}
+
+final class _GeometrySourceScan {
+  const _GeometrySourceScan({
+    required this.segment,
+    required this.scan,
+    required this.partIndex,
+  });
+
+  final TrackSegment segment;
+  final _SegmentScan scan;
+  final int? partIndex;
+}
+
+final class _GeometryPartScan {
+  _GeometryPartScan({required this.partNumber});
+
+  final int partNumber;
+  final List<_GeometrySourceScan> sources = <_GeometrySourceScan>[];
+  int validGeometryCoordinates = 0;
+}
+
+final class _GeometryPlan {
+  _GeometryPlan({
+    required Iterable<_GeometrySourceScan> sources,
+    required Iterable<_GeometryPartScan> parts,
+    required Iterable<InferredRouteConnector> connectors,
+    required this.selectedPoints,
+    required this.gapCount,
+  })  : sources = List<_GeometrySourceScan>.unmodifiable(sources),
+        parts = List<_GeometryPartScan>.unmodifiable(parts),
+        connectors = List<InferredRouteConnector>.unmodifiable(connectors);
+
+  final List<_GeometrySourceScan> sources;
+  final List<_GeometryPartScan> parts;
+  final List<InferredRouteConnector> connectors;
+  final int selectedPoints;
+  final int gapCount;
+
+  int get sourceSegmentCount => sources.length;
+  int get linePartCount =>
+      parts.where((part) => part.validGeometryCoordinates >= 2).length;
 }
 
 final class _CommaState {
@@ -836,6 +1030,7 @@ final class _CommaState {
 Map<String, Object?> _trackProperties(
   Track track,
   TrackExportOptions options,
+  _GeometryPlan plan,
 ) =>
     <String, Object?>{
       'trackId': track.id,
@@ -848,7 +1043,33 @@ Map<String, Object?> _trackProperties(
       'rejectedPointCount': track.rejectedPointCount,
       'distanceMeters': track.totalDistanceMeters,
       'geometrySource': _geometryLabel(options.geometry),
+      'geometryContinuity': options.geometryContinuity.name,
+      'sourceSegmentCount': plan.sourceSegmentCount,
+      'geometryPartCount': plan.parts.length,
+      'gapCount': plan.gapCount,
+      'inferredConnectorCount': plan.connectors.length,
+      'hasInferredConnectors': plan.connectors.isNotEmpty,
     };
+
+Map<String, Object?> _geoJsonConnectorFeature(
+  InferredRouteConnector connector,
+) =>
+    <String, Object?>{
+      'type': 'Feature',
+      'properties': <String, Object?>{
+        'featureType': 'inferredConnector',
+        'beforePointId': connector.beforePointId,
+        'afterPointId': connector.afterPointId,
+        'cause': connector.cause.name,
+        'durationMs': connector.duration.inMilliseconds,
+        'straightLineDistanceMeters': connector.straightLineDistanceMeters,
+        'excludedFromMeasuredDistance': true,
+      },
+      'geometry': null,
+    };
+
+String _boundaryKey(String beforeSegmentId, String afterSegmentId) =>
+    '$beforeSegmentId\u0000$afterSegmentId';
 
 String _geometryLabel(TrackGeometrySelection selection) => switch (selection) {
       RawTrackGeometry() => 'raw',

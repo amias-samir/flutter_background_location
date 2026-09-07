@@ -6,6 +6,9 @@
       <Data name="geometrySource">
         <value>raw</value>
       </Data>
+      <Data name="geometryContinuity">
+        <value>preserveEvidenceSegments</value>
+      </Data>
     </ExtendedData>
     <Placemark>
       <name>Segment 1</name>

@@ -17,8 +17,22 @@ final class MotionGate {
       : SamplingProfile.moving;
 
   MotionState add(ActivitySnapshot activity, DateTime now) {
-    if (activity.type == TrackingActivityType.stationary &&
-        activity.confidence >= config.stationaryConfidenceThreshold) {
+    final evaluated = activity.evaluatedAt(
+      now,
+      config.activityFreshnessThreshold,
+    );
+    if (evaluated.evidenceState != ActivityEvidenceState.fresh) {
+      _stillSince = null;
+      _movingEvidence = 0;
+      if (_state == MotionState.stationary &&
+          config.staleActivityFallback ==
+              StaleActivityFallback.keepMovingProfile) {
+        _state = MotionState.moving;
+      }
+      return _state;
+    }
+    if (evaluated.type == TrackingActivityType.stationary &&
+        evaluated.confidence >= config.stationaryConfidenceThreshold) {
       _stillSince ??= now;
       _movingEvidence = 0;
       if (now.difference(_stillSince!) >=
@@ -29,8 +43,8 @@ final class MotionGate {
     }
 
     _stillSince = null;
-    if (activity.type.indicatesMovement &&
-        activity.confidence >= config.movingConfidenceThreshold) {
+    if (evaluated.type.indicatesMovement &&
+        evaluated.confidence >= config.movingConfidenceThreshold) {
       _movingEvidence += 1;
       if (_movingEvidence >= config.movingConfirmationCount) {
         _state = MotionState.moving;

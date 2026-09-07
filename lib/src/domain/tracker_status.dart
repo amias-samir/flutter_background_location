@@ -1,3 +1,5 @@
+import 'motion_evidence.dart';
+
 /// Native capture lifecycle independent of the Flutter widget lifecycle.
 enum TrackerLifecycle {
   /// No native route capture is running.
@@ -53,6 +55,7 @@ final class TrackerStatus {
     this.message,
     this.motionState = MotionState.unknown,
     this.samplingProfile = SamplingProfile.moving,
+    this.motionEvidence,
   });
 
   /// Current native capture lifecycle.
@@ -73,6 +76,9 @@ final class TrackerStatus {
   /// Provider sampling profile currently in use.
   final SamplingProfile samplingProfile;
 
+  /// Latest bounded native motion-evidence decision, when supported.
+  final MotionEvidenceSnapshot? motionEvidence;
+
   /// Decodes a native status-channel payload.
   factory TrackerStatus.fromMap(Map<Object?, Object?> map) {
     final raw = map['lifecycle'] ?? map['state'] ?? map['status'];
@@ -82,6 +88,7 @@ final class TrackerStatus {
       orElse: () => TrackerLifecycle.idle,
     );
     final timestamp = map['lastPointAt'] ?? map['timestamp'];
+    final rawMotionEvidence = map['motionEvidence'];
     return TrackerStatus(
       lifecycle: lifecycle,
       trackId: map['trackId'] as String?,
@@ -102,6 +109,11 @@ final class TrackerStatus {
                   'stationary'
               ? SamplingProfile.stationary
               : SamplingProfile.moving,
+      motionEvidence: rawMotionEvidence is Map
+          ? MotionEvidenceSnapshot.fromMap(
+              rawMotionEvidence.cast<Object?, Object?>(),
+            )
+          : null,
     );
   }
 }

@@ -8,17 +8,24 @@ import 'package:uuid/uuid.dart';
 import '../domain/activity_snapshot.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
+import '../domain/motion_evidence.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
 import '../domain/track_segment.dart';
+import '../domain/tracker_status.dart';
+import '../domain/trip.dart';
+import '../domain/trip_query.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
+import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_privacy.dart';
+import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 import 'track_repository.dart';
+import 'trip_repository.dart';
 
 /// Configures connection-scoped SQLite behavior used by the track repository.
 ///
@@ -39,10 +46,16 @@ final class SqliteTrackRepository
         StreamingTrackRepository,
         ConfigurationEpochRepository,
         MutableConfigurationEpochRepository,
+        ContinuityTrackRepository,
         GapSegmentRepository,
+        LegacyGapEvidenceRepository,
         OwnerScopedTrackRepository,
         PrivacyTrackRepository,
         ManagedExportRepository,
+        TripRepository,
+        TripUploadOutboxRepository,
+        TripPrivacyRepository,
+        QualityDiagnosticsRepository,
         DerivedGeometryRepository {
   SqliteTrackRepository({
     required this.path,
@@ -94,6 +107,8 @@ final class SqliteTrackRepository
 
   static DateTime _utcNow() => DateTime.now().toUtc();
   static String _newId() => const Uuid().v4();
+  static int? _sqliteBool(bool? value) =>
+      value == null ? null : (value ? 1 : 0);
 
   Database get _db {
     final value = _database;
@@ -125,13 +140,18 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 11,
+        version: 14,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
         onUpgrade: _upgradeSchema,
       ),
     );
+    // Schema 12 is still under development. Keep this idempotent ensure so a
+    // local database opened by an earlier schema-12 build gains the additive
+    // Trip completion outbox without a destructive version bump.
+    await _createTripUploadOutboxSchema(_db);
+    await _createSchema13EvidenceTables(_db);
     await _repairInitialConfigurationEpochs(_db);
     await _emitCurrentTrack();
   }
@@ -218,6 +238,15 @@ final class SqliteTrackRepository
         persisted_at TEXT NOT NULL,
         activity_type TEXT NOT NULL,
         activity_confidence INTEGER NOT NULL,
+        activity_source TEXT,
+        activity_raw_type TEXT,
+        activity_evidence_state TEXT,
+        activity_age_ms INTEGER,
+        activity_probabilities_json TEXT,
+        native_foreground_state TEXT,
+        screen_interactive INTEGER,
+        battery_saver_active INTEGER,
+        motion_evidence_id TEXT,
         motion_state TEXT NOT NULL,
         provider TEXT,
         is_mocked INTEGER NOT NULL,
@@ -231,6 +260,10 @@ final class SqliteTrackRepository
         monotonic_fix_nanos INTEGER,
         monotonic_received_nanos INTEGER,
         monotonic_domain_id TEXT,
+        capture_generation_id TEXT,
+        native_session_started_at TEXT,
+        native_lifecycle TEXT,
+        sampling_profile TEXT,
         quality_policy_version INTEGER,
         accepted INTEGER NOT NULL,
         quality_flags INTEGER NOT NULL,
@@ -307,6 +340,8 @@ final class SqliteTrackRepository
     ''');
     await _createUploadOutboxSchema(database);
     await _createDerivedGeometrySchema(database);
+    await _createContinuityAndTripSchema(database);
+    await _createSchema13EvidenceTables(database);
   }
 
   static Future<void> _upgradeSchema(
@@ -442,6 +477,498 @@ final class SqliteTrackRepository
     if (oldVersion < 11) {
       await _createDerivedGeometrySchema(database);
     }
+    if (oldVersion < 12) {
+      final pointColumns = await database.rawQuery(
+        'PRAGMA table_info(track_points)',
+      );
+      final pointNames = pointColumns.map((row) => row['name']).toSet();
+      const additions = <String, String>{
+        'capture_generation_id': 'TEXT',
+        'native_session_started_at': 'TEXT',
+        'native_lifecycle': 'TEXT',
+        'sampling_profile': 'TEXT',
+      };
+      for (final addition in additions.entries) {
+        if (pointColumns.isNotEmpty && !pointNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE track_points ADD COLUMN ${addition.key} ${addition.value}',
+          );
+        }
+      }
+      await _createContinuityAndTripSchema(database);
+      await _backfillImplicitTrips(database);
+    }
+    if (oldVersion < 13) {
+      final tripColumns = await database.rawQuery('PRAGMA table_info(trips)');
+      final tripNames = tripColumns.map((row) => row['name']).toSet();
+      const tripAdditions = <String, String>{
+        'route_presentation': "TEXT NOT NULL DEFAULT 'separateRecordedParts'",
+        'capture_intent': "TEXT NOT NULL DEFAULT 'adaptive'",
+        'quality_policy_version': 'INTEGER NOT NULL DEFAULT 1',
+      };
+      for (final addition in tripAdditions.entries) {
+        if (tripColumns.isNotEmpty && !tripNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE trips ADD COLUMN ${addition.key} ${addition.value}',
+          );
+        }
+      }
+      final pointColumns =
+          await database.rawQuery('PRAGMA table_info(track_points)');
+      final pointNames = pointColumns.map((row) => row['name']).toSet();
+      const pointAdditions = <String, String>{
+        'activity_source': 'TEXT',
+        'activity_raw_type': 'TEXT',
+        'activity_evidence_state': 'TEXT',
+        'activity_age_ms': 'INTEGER',
+        'activity_probabilities_json': 'TEXT',
+        'native_foreground_state': 'TEXT',
+        'screen_interactive': 'INTEGER',
+        'battery_saver_active': 'INTEGER',
+        'motion_evidence_id': 'TEXT',
+      };
+      for (final addition in pointAdditions.entries) {
+        if (pointColumns.isNotEmpty && !pointNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE track_points ADD COLUMN ${addition.key} ${addition.value}',
+          );
+        }
+      }
+      final derivedColumns =
+          await database.rawQuery('PRAGMA table_info(derived_geometry_points)');
+      final derivedNames = derivedColumns.map((row) => row['name']).toSet();
+      const derivedAdditions = <String, String>{
+        'processor_confidence': 'REAL',
+        'matched': 'INTEGER NOT NULL DEFAULT 1',
+      };
+      for (final addition in derivedAdditions.entries) {
+        if (derivedColumns.isNotEmpty && !derivedNames.contains(addition.key)) {
+          await database.execute(
+            'ALTER TABLE derived_geometry_points ADD COLUMN '
+            '${addition.key} ${addition.value}',
+          );
+        }
+      }
+      await _createSchema13EvidenceTables(database);
+    }
+    if (oldVersion < 14) {
+      await _repairMeasuredDistances(database);
+    }
+  }
+
+  /// Repairs distance totals created by continuity policy version 1.
+  ///
+  /// That policy retained accepted anchors in the same canonical segment but
+  /// excluded the edge between them whenever rejected callbacks intervened.
+  /// Maps and exports still drew the edge, so stored totals could be much
+  /// shorter than their recorded geometry. Schema 14 recomputes every segment
+  /// from accepted points in bounded pages and then rolls the totals up to its
+  /// Track and Trip.
+  static Future<void> _repairMeasuredDistances(Database database) async {
+    final tableRows = await database.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table'",
+    );
+    final tables =
+        tableRows.map((row) => row['name']).whereType<String>().toSet();
+    if (!tables.containsAll(
+      const <String>{'tracks', 'track_segments', 'track_points'},
+    )) {
+      return;
+    }
+    final pointColumns =
+        await database.rawQuery('PRAGMA table_info(track_points)');
+    final pointNames =
+        pointColumns.map((row) => row['name']).whereType<String>().toSet();
+    final segmentColumns =
+        await database.rawQuery('PRAGMA table_info(track_segments)');
+    final segmentNames =
+        segmentColumns.map((row) => row['name']).whereType<String>().toSet();
+    if (!pointNames.containsAll(
+          const <String>{
+            'segment_id',
+            'sequence',
+            'latitude',
+            'longitude',
+            'accepted',
+          },
+        ) ||
+        !segmentNames.containsAll(
+          const <String>{'id', 'track_id', 'segment_number', 'distance_m'},
+        )) {
+      return;
+    }
+    const pageSize = 512;
+    final segments = await database.query(
+      'track_segments',
+      columns: const <String>['id'],
+      orderBy: 'track_id, segment_number',
+    );
+    for (final segment in segments) {
+      final segmentId = segment['id']! as String;
+      var afterSequence = -1;
+      double? previousLatitude;
+      double? previousLongitude;
+      var distance = 0.0;
+      var acceptedCount = 0;
+      while (true) {
+        final points = await database.query(
+          'track_points',
+          columns: const <String>['sequence', 'latitude', 'longitude'],
+          where: 'segment_id = ? AND accepted = 1 AND sequence > ?',
+          whereArgs: <Object?>[segmentId, afterSequence],
+          orderBy: 'sequence',
+          limit: pageSize,
+        );
+        if (points.isEmpty) break;
+        for (final point in points) {
+          final latitude = (point['latitude']! as num).toDouble();
+          final longitude = (point['longitude']! as num).toDouble();
+          if (previousLatitude != null && previousLongitude != null) {
+            distance += _distanceMeters(
+              previousLatitude,
+              previousLongitude,
+              latitude,
+              longitude,
+            );
+          }
+          previousLatitude = latitude;
+          previousLongitude = longitude;
+          afterSequence = (point['sequence']! as num).toInt();
+          acceptedCount += 1;
+        }
+        if (points.length < pageSize) break;
+      }
+      await database.update(
+        'track_segments',
+        <String, Object?>{
+          'distance_m': distance,
+          if (segmentNames.contains('accepted_point_count'))
+            'accepted_point_count': acceptedCount,
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[segmentId],
+      );
+    }
+    await database.rawUpdate('''
+      UPDATE tracks
+      SET total_distance_m = COALESCE((
+        SELECT SUM(segment.distance_m)
+        FROM track_segments AS segment
+        WHERE segment.track_id = tracks.id
+      ), 0)
+    ''');
+    if (tables.containsAll(const <String>{'trips', 'trip_legs'})) {
+      await database.rawUpdate('''
+        UPDATE trips
+        SET measured_distance_m = COALESCE((
+          SELECT SUM(track.total_distance_m)
+          FROM trip_legs AS leg
+          JOIN tracks AS track ON track.id = leg.track_id
+          WHERE leg.trip_id = trips.id
+        ), 0)
+      ''');
+    }
+    if (tables.contains('track_continuity_gaps')) {
+      await database.rawDelete('''
+        DELETE FROM track_continuity_gaps
+        WHERE treatment = ?
+          AND after_point_id IN (
+            SELECT id FROM track_points WHERE accepted = 0
+          )
+      ''', <Object?>[TrackingGapTreatment.retainCurrentSegment.name]);
+      await database.update(
+        'track_continuity_gaps',
+        <String, Object?>{
+          'distance_treatment': TrackingGapDistanceTreatment.measured.name,
+        },
+        where: 'treatment = ?',
+        whereArgs: <Object?>[TrackingGapTreatment.retainCurrentSegment.name],
+      );
+    }
+  }
+
+  static Future<void> _createContinuityAndTripSchema(
+    Database database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS track_continuity_gaps (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        before_point_id TEXT,
+        after_point_id TEXT NOT NULL,
+        before_segment_id TEXT NOT NULL,
+        after_segment_id TEXT NOT NULL,
+        provider_gap_ms INTEGER,
+        raw_receipt_gap_ms INTEGER,
+        straight_line_distance_m REAL,
+        cause TEXT NOT NULL,
+        treatment TEXT NOT NULL,
+        distance_treatment TEXT NOT NULL,
+        native_capture_generation TEXT,
+        configuration_epoch_id TEXT,
+        continuity_policy_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        FOREIGN KEY(before_point_id) REFERENCES track_points(id) ON DELETE CASCADE,
+        FOREIGN KEY(after_point_id) REFERENCES track_points(id) ON DELETE CASCADE,
+        FOREIGN KEY(before_segment_id) REFERENCES track_segments(id) ON DELETE CASCADE,
+        FOREIGN KEY(after_segment_id) REFERENCES track_segments(id) ON DELETE CASCADE,
+        FOREIGN KEY(configuration_epoch_id)
+          REFERENCES tracking_configuration_epochs(id) ON DELETE CASCADE,
+        UNIQUE(track_id, after_point_id, continuity_policy_version),
+        CHECK(provider_gap_ms IS NULL OR provider_gap_ms >= 0),
+        CHECK(raw_receipt_gap_ms IS NULL OR raw_receipt_gap_ms >= 0),
+        CHECK(straight_line_distance_m IS NULL OR straight_line_distance_m >= 0),
+        CHECK(continuity_policy_version > 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_continuity_gaps_track_created
+      ON track_continuity_gaps(track_id, created_at)
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_continuity_gaps_track_cause
+      ON track_continuity_gaps(track_id, cause)
+    ''');
+
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS trips (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        route_id TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        suspended_at TEXT,
+        ended_at TEXT,
+        current_leg_track_id TEXT,
+        leg_count INTEGER NOT NULL DEFAULT 0,
+        accepted_point_count INTEGER NOT NULL DEFAULT 0,
+        rejected_point_count INTEGER NOT NULL DEFAULT 0,
+        measured_distance_m REAL NOT NULL DEFAULT 0,
+        lifecycle_revision INTEGER NOT NULL DEFAULT 1,
+        route_presentation TEXT NOT NULL DEFAULT 'separateRecordedParts',
+        capture_intent TEXT NOT NULL DEFAULT 'adaptive',
+        quality_policy_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(current_leg_track_id) REFERENCES tracks(id) ON DELETE SET NULL,
+        CHECK(status IN ('active', 'suspended', 'completed', 'failed')),
+        CHECK(leg_count >= 0),
+        CHECK(accepted_point_count >= 0),
+        CHECK(rejected_point_count >= 0),
+        CHECK(measured_distance_m >= 0),
+        CHECK(lifecycle_revision > 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_trips_owner_started
+      ON trips(organization_id, user_id, started_at DESC, id DESC)
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_trips_status
+      ON trips(status)
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS trip_legs (
+        trip_id TEXT NOT NULL,
+        track_id TEXT NOT NULL UNIQUE,
+        leg_number INTEGER NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        day_label TEXT,
+        PRIMARY KEY(trip_id, leg_number),
+        FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        CHECK(leg_number > 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_trip_legs_track
+      ON trip_legs(track_id)
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS trip_operations (
+        id TEXT PRIMARY KEY,
+        trip_id TEXT NOT NULL,
+        operation_type TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        reason TEXT,
+        leg_track_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+        FOREIGN KEY(leg_track_id) REFERENCES tracks(id) ON DELETE SET NULL,
+        UNIQUE(trip_id, operation_type, operation_id)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_trip_operations_pending
+      ON trip_operations(stage, created_at)
+    ''');
+    await _createTripUploadOutboxSchema(database);
+  }
+
+  static Future<void> _createSchema13EvidenceTables(Database database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS track_motion_evidence (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        configuration_epoch_id TEXT,
+        fused_state TEXT NOT NULL,
+        confidence INTEGER NOT NULL,
+        policy_version INTEGER NOT NULL,
+        observed_at TEXT NOT NULL,
+        window_started_at TEXT,
+        window_ended_at TEXT,
+        supporting_sources_json TEXT NOT NULL,
+        conflicting_sources_json TEXT NOT NULL,
+        step_delta INTEGER NOT NULL DEFAULT 0,
+        significant_motion INTEGER NOT NULL DEFAULT 0,
+        accelerometer_sample_count INTEGER NOT NULL DEFAULT 0,
+        acceleration_motion_energy REAL,
+        gyroscope_sample_count INTEGER NOT NULL DEFAULT 0,
+        rotation_energy REAL,
+        compass_available INTEGER NOT NULL DEFAULT 0,
+        gps_displacement_evidence TEXT,
+        native_foreground_state TEXT,
+        screen_interactive INTEGER,
+        battery_saver_active INTEGER,
+        transition_reason TEXT NOT NULL,
+        selected_sampling_profile TEXT,
+        generation INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        FOREIGN KEY(configuration_epoch_id)
+          REFERENCES tracking_configuration_epochs(id) ON DELETE CASCADE,
+        CHECK(confidence >= 0 AND confidence <= 100),
+        CHECK(policy_version > 0),
+        CHECK(accelerometer_sample_count >= 0),
+        CHECK(gyroscope_sample_count >= 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_motion_evidence_track_observed
+      ON track_motion_evidence(track_id, observed_at DESC)
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS track_quality_runs (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        first_raw_sequence INTEGER NOT NULL,
+        last_raw_sequence INTEGER NOT NULL,
+        rejected_count INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        maximum_uncertainty_m REAL,
+        median_uncertainty_m REAL,
+        before_point_id TEXT,
+        after_point_id TEXT,
+        severity TEXT NOT NULL,
+        threshold_reason TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        FOREIGN KEY(before_point_id) REFERENCES track_points(id) ON DELETE SET NULL,
+        FOREIGN KEY(after_point_id) REFERENCES track_points(id) ON DELETE SET NULL,
+        CHECK(first_raw_sequence > 0),
+        CHECK(last_raw_sequence >= first_raw_sequence),
+        CHECK(rejected_count > 0),
+        CHECK(duration_ms >= 0),
+        CHECK(policy_version > 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_quality_runs_track_sequence
+      ON track_quality_runs(track_id, first_raw_sequence)
+    ''');
+  }
+
+  static Future<void> _createTripUploadOutboxSchema(
+    Database database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS trip_upload_outbox (
+        id TEXT PRIMARY KEY,
+        trip_id TEXT NOT NULL,
+        lifecycle_revision INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL DEFAULT 'pending',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_attempt_at TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+        UNIQUE(trip_id, lifecycle_revision),
+        CHECK(lifecycle_revision > 0),
+        CHECK(state IN ('pending', 'leased', 'acknowledged')),
+        CHECK(attempt_count >= 0)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_trip_upload_outbox_due
+      ON trip_upload_outbox(state, next_attempt_at, lease_expires_at)
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_trip_upload_outbox_trip_state
+      ON trip_upload_outbox(trip_id, state, lifecycle_revision)
+    ''');
+  }
+
+  static Future<void> _backfillImplicitTrips(Database database) async {
+    final trackColumns = await database.rawQuery('PRAGMA table_info(tracks)');
+    if (trackColumns.isEmpty) return;
+    final names = trackColumns.map((row) => row['name']).toSet();
+    final required = <String>{
+      'id',
+      'user_id',
+      'organization_id',
+      'status',
+      'started_at',
+      'accepted_point_count',
+      'rejected_point_count',
+      'total_distance_m',
+      'created_at',
+      'updated_at',
+    };
+    if (!names.containsAll(required)) return;
+    final routeExpression = names.contains('route_id') ? 'route_id' : 'NULL';
+    final endedExpression = names.contains('ended_at') ? 'ended_at' : 'NULL';
+    final pausedExpression = names.contains('paused_at') ? 'paused_at' : 'NULL';
+    await database.rawInsert('''
+      INSERT OR IGNORE INTO trips (
+        id, user_id, organization_id, route_id, status, started_at,
+        suspended_at, ended_at, current_leg_track_id, leg_count,
+        accepted_point_count, rejected_point_count, measured_distance_m,
+        lifecycle_revision, created_at, updated_at
+      )
+      SELECT id, user_id, organization_id, $routeExpression,
+        CASE
+          WHEN status IN ('starting', 'active', 'stopping') THEN 'active'
+          WHEN status IN ('paused', 'interrupted') THEN 'suspended'
+          WHEN status = 'failed' THEN 'failed'
+          ELSE 'completed'
+        END,
+        started_at,
+        CASE WHEN status IN ('paused', 'interrupted')
+          THEN COALESCE($pausedExpression, updated_at) ELSE NULL END,
+        CASE WHEN status IN ('completed', 'failed')
+          THEN COALESCE($endedExpression, updated_at) ELSE NULL END,
+        id, 1, accepted_point_count, rejected_point_count, total_distance_m,
+        1, created_at, updated_at
+      FROM tracks
+    ''');
+    await database.rawInsert('''
+      INSERT OR IGNORE INTO trip_legs (
+        trip_id, track_id, leg_number, started_at, ended_at
+      )
+      SELECT id, id, 1, started_at, $endedExpression FROM tracks
+    ''');
   }
 
   static Future<void> _createDerivedGeometrySchema(Database database) async {
@@ -475,6 +1002,8 @@ final class SqliteTrackRepository
         sequence INTEGER NOT NULL,
         latitude REAL NOT NULL,
         longitude REAL NOT NULL,
+        processor_confidence REAL,
+        matched INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY(run_id, source_point_id),
         FOREIGN KEY(run_id) REFERENCES derived_geometry_runs(id)
           ON DELETE CASCADE,
@@ -850,6 +1379,29 @@ final class SqliteTrackRepository
         'created_at': _timestamp(now),
         'updated_at': _timestamp(now),
       });
+      // Every legacy Track is also a one-leg implicit Trip. Full multi-day
+      // lifecycle APIs add later legs without changing Track semantics.
+      await transaction.insert('trips', <String, Object?>{
+        'id': trackId,
+        'user_id': userId,
+        'organization_id': organizationId,
+        'route_id': routeId,
+        'status': 'active',
+        'started_at': _timestamp(now),
+        'current_leg_track_id': trackId,
+        'leg_count': 1,
+        'lifecycle_revision': 1,
+        'capture_intent': config.captureIntent.name,
+        'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+        'created_at': _timestamp(now),
+        'updated_at': _timestamp(now),
+      });
+      await transaction.insert('trip_legs', <String, Object?>{
+        'trip_id': trackId,
+        'track_id': trackId,
+        'leg_number': 1,
+        'started_at': _timestamp(now),
+      });
     });
     await _emitCurrentTrack();
     return trackId;
@@ -885,6 +1437,15 @@ final class SqliteTrackRepository
         },
         where: 'id = ?',
         whereArgs: <Object?>[trackId],
+      );
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET status = 'active', suspended_at = NULL,
+            current_leg_track_id = ?, updated_at = ?
+        WHERE id = (SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1)
+        ''',
+        <Object?>[trackId, _timestamp(now), trackId],
       );
     });
     await _emitCurrentTrack();
@@ -934,6 +1495,20 @@ final class SqliteTrackRepository
         },
         where: 'id = ?',
         whereArgs: <Object?>[trackId],
+      );
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET status = 'suspended', suspended_at = ?,
+            current_leg_track_id = ?, updated_at = ?
+        WHERE id = (SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1)
+        ''',
+        <Object?>[
+          _timestamp(now),
+          trackId,
+          _timestamp(now),
+          trackId,
+        ],
       );
       await _recordOperation(
         transaction,
@@ -995,6 +1570,15 @@ final class SqliteTrackRepository
         where: 'id = ?',
         whereArgs: <Object?>[trackId],
       );
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET status = 'active', suspended_at = NULL,
+            current_leg_track_id = ?, updated_at = ?
+        WHERE id = (SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1)
+        ''',
+        <Object?>[trackId, _timestamp(now), trackId],
+      );
     });
     await _emitCurrentTrack();
     return newSegmentId;
@@ -1055,6 +1639,15 @@ final class SqliteTrackRepository
         where: 'id = ?',
         whereArgs: <Object?>[trackId],
       );
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET status = 'active', suspended_at = NULL,
+            current_leg_track_id = ?, updated_at = ?
+        WHERE id = (SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1)
+        ''',
+        <Object?>[trackId, _timestamp(now), trackId],
+      );
     });
     await _emitCurrentTrack();
     return (await getTrack(trackId))!;
@@ -1106,6 +1699,27 @@ final class SqliteTrackRepository
         where: 'id = ?',
         whereArgs: <Object?>[trackId],
       );
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET status = 'completed', ended_at = ?, suspended_at = NULL,
+            current_leg_track_id = ?, lifecycle_revision = lifecycle_revision + 1,
+            updated_at = ?
+        WHERE id = (SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1)
+        ''',
+        <Object?>[
+          _timestamp(now),
+          trackId,
+          _timestamp(now),
+          trackId,
+        ],
+      );
+      await transaction.update(
+        'trip_legs',
+        <String, Object?>{'ended_at': _timestamp(now)},
+        where: 'track_id = ?',
+        whereArgs: <Object?>[trackId],
+      );
       await _recordOperation(
         transaction,
         trackId,
@@ -1153,13 +1767,34 @@ final class SqliteTrackRepository
         where: 'id = ?',
         whereArgs: <Object?>[trackId],
       );
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET status = 'suspended', suspended_at = ?,
+            current_leg_track_id = ?, updated_at = ?
+        WHERE id = (SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1)
+        ''',
+        <Object?>[
+          _timestamp(now),
+          trackId,
+          _timestamp(now),
+          trackId,
+        ],
+      );
     });
     await _emitCurrentTrack();
   }
 
   @override
-  Future<TrackPoint> appendPoint(PointWriteRequest request) async {
-    final point = await _db.transaction((transaction) async {
+  Future<TrackPoint> appendPoint(PointWriteRequest request) async =>
+      (await appendPointWithContinuity(request, null)).point;
+
+  @override
+  Future<PointAppendResult> appendPointWithContinuity(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+  ) async {
+    final result = await _db.transaction((transaction) async {
       final nativeEventId = request.sample.eventId;
       if (nativeEventId != null) {
         final existing = await transaction.query(
@@ -1169,9 +1804,35 @@ final class SqliteTrackRepository
           limit: 1,
         );
         if (existing.isNotEmpty) {
-          return TrackPoint.fromDatabase(existing.single);
+          final point = TrackPoint.fromDatabase(existing.single);
+          final gapRows = await transaction.query(
+            'track_continuity_gaps',
+            where: 'track_id = ? AND after_point_id = ?',
+            whereArgs: <Object?>[request.trackId, point.id],
+            orderBy: 'continuity_policy_version DESC',
+            limit: 1,
+          );
+          return PointAppendResult(
+            point: point,
+            segmentId: point.segmentId,
+            duplicate: true,
+            gap: gapRows.isEmpty
+                ? null
+                : TrackingContinuityGap.fromDatabase(gapRows.single),
+          );
         }
       }
+
+      final trackBefore = await _requiredTrack(transaction, request.trackId);
+      if (trackBefore.status != TrackStatus.active ||
+          trackBefore.currentSegmentId == null) {
+        throw StateError('Track is not active: ${request.trackId}');
+      }
+      final previousRaw = await _lastRawPoint(transaction, request.trackId);
+      final previousAccepted =
+          await _lastAcceptedPoint(transaction, request.trackId);
+      final beforeSegmentId = trackBefore.currentSegmentId!;
+
       // Acquire the SQLite write lock before reading the allocated sequence.
       // This stays safe across multiple database connections without relying on
       // SELECT ... FOR UPDATE, which SQLite does not support.
@@ -1192,7 +1853,6 @@ final class SqliteTrackRepository
       }
       final track = await _requiredTrack(transaction, request.trackId);
       final sequence = track.nextSequence - 1;
-      final segmentId = track.currentSegmentId!;
       final configurationEpoch = await _configurationEpochForSequence(
         transaction,
         trackId: request.trackId,
@@ -1205,22 +1865,76 @@ final class SqliteTrackRepository
           trackId: request.trackId,
         );
       }
-      final previous = request.accepted
-          ? await _lastAcceptedPoint(
-              transaction,
-              request.trackId,
-              segmentId: segmentId,
-            )
-          : null;
-      final distanceDelta = previous == null
+
+      final now = _clock();
+      var segmentId = beforeSegmentId;
+      final shouldSplit = request.accepted &&
+          continuity?.treatment == TrackingGapTreatment.startNewSegment &&
+          previousAccepted?.segmentId == beforeSegmentId;
+      if (shouldSplit) {
+        segmentId = _idGenerator();
+        final nextSegmentNumber = track.segmentCount + 1;
+        await transaction.update(
+          'track_segments',
+          <String, Object?>{
+            'status': TrackSegmentStatus.interrupted.name,
+            'ended_at': _timestamp(request.sample.capturedAt),
+            'pause_reason': 'continuity_${continuity!.cause.name}',
+            'updated_at': _timestamp(now),
+          },
+          where: 'id = ?',
+          whereArgs: <Object?>[beforeSegmentId],
+        );
+        await transaction.insert('track_segments', <String, Object?>{
+          'id': segmentId,
+          'track_id': request.trackId,
+          'segment_number': nextSegmentNumber,
+          'status': TrackSegmentStatus.active.name,
+          'started_at': _timestamp(request.sample.capturedAt),
+          'resumed_from_point_id': previousAccepted?.id,
+          'pause_reason': 'continuity_${continuity.cause.name}',
+          'created_at': _timestamp(now),
+          'updated_at': _timestamp(now),
+        });
+        await transaction.update(
+          'tracks',
+          <String, Object?>{
+            'current_segment_id': segmentId,
+            'segment_count': nextSegmentNumber,
+            'updated_at': _timestamp(now),
+          },
+          where: 'id = ?',
+          whereArgs: <Object?>[request.trackId],
+        );
+      }
+
+      final connectorDistance = previousAccepted == null
           ? 0.0
           : _distanceMeters(
-              previous.latitude,
-              previous.longitude,
+              previousAccepted.latitude,
+              previousAccepted.longitude,
               request.sample.latitude,
               request.sample.longitude,
             );
-      final now = _clock();
+      final distanceDelta = request.accepted &&
+              previousAccepted != null &&
+              previousAccepted.segmentId == segmentId &&
+              !shouldSplit &&
+              !(continuity?.excludeConnectorFromMeasuredDistance ?? false)
+          ? connectorDistance
+          : 0.0;
+      final activity = request.activity.evaluatedAt(
+        request.sample.capturedAt,
+        configurationEpoch.resolvedConfig.activityFreshnessThreshold,
+      );
+      final motionEvidenceId = await _persistMotionEvidence(
+        transaction,
+        trackId: request.trackId,
+        configurationEpochId: configurationEpoch.id,
+        evidence: request.sample.capturedMotionEvidence,
+        samplingProfile: request.sample.samplingProfile,
+        now: now,
+      );
       final id = _idGenerator();
       await transaction.insert('track_points', <String, Object?>{
         'id': id,
@@ -1238,8 +1952,25 @@ final class SqliteTrackRepository
         'heading_accuracy': request.sample.headingAccuracy,
         'captured_at': _timestamp(request.sample.capturedAt),
         'persisted_at': _timestamp(now),
-        'activity_type': request.activity.type.value,
-        'activity_confidence': request.activity.confidence,
+        'activity_type': activity.type.value,
+        'activity_confidence': activity.confidence,
+        'activity_source': activity.source,
+        'activity_raw_type': activity.rawType,
+        'activity_evidence_state': activity.evidenceState.name,
+        'activity_age_ms': activity.age?.inMilliseconds,
+        'activity_probabilities_json': jsonEncode(<String, int>{
+          for (final entry in activity.probabilities.entries)
+            entry.key.value: entry.value,
+        }),
+        'native_foreground_state':
+            request.sample.capturedMotionEvidence?.nativeForegroundState,
+        'screen_interactive': _sqliteBool(
+          request.sample.capturedMotionEvidence?.screenInteractive,
+        ),
+        'battery_saver_active': _sqliteBool(
+          request.sample.capturedMotionEvidence?.batterySaverActive,
+        ),
+        'motion_evidence_id': motionEvidenceId,
         'motion_state': request.motionState.name,
         'provider': request.sample.provider,
         'is_mocked': request.sample.isMocked ? 1 : 0,
@@ -1257,6 +1988,13 @@ final class SqliteTrackRepository
         'monotonic_fix_nanos': request.sample.monotonicFixNanos,
         'monotonic_received_nanos': request.sample.monotonicReceivedNanos,
         'monotonic_domain_id': request.sample.monotonicDomainId,
+        'capture_generation_id': request.sample.captureGenerationId,
+        'native_session_started_at':
+            request.sample.nativeSessionStartedAt == null
+                ? null
+                : _timestamp(request.sample.nativeSessionStartedAt!),
+        'native_lifecycle': request.sample.nativeLifecycle?.name,
+        'sampling_profile': request.sample.samplingProfile?.name,
         'quality_policy_version': configurationEpoch.qualityPolicyVersion,
         'accepted': request.accepted ? 1 : 0,
         'quality_flags': request.qualityFlags,
@@ -1325,16 +2063,260 @@ final class SqliteTrackRepository
           ],
         );
       }
+
+      TrackingContinuityGap? committedGap;
+      if (continuity != null && previousAccepted != null) {
+        final providerGap =
+            request.sample.capturedAt.difference(previousAccepted.capturedAt);
+        final rawReceiptGap = previousRaw?.nativeReceivedAt == null ||
+                request.sample.nativeReceivedAt == null
+            ? null
+            : request.sample.nativeReceivedAt!
+                .difference(previousRaw!.nativeReceivedAt!);
+        final gapId = _idGenerator();
+        await transaction.insert(
+          'track_continuity_gaps',
+          <String, Object?>{
+            'id': gapId,
+            'track_id': request.trackId,
+            'before_point_id': previousAccepted.id,
+            'after_point_id': id,
+            'before_segment_id': beforeSegmentId,
+            'after_segment_id': segmentId,
+            'provider_gap_ms':
+                providerGap.isNegative ? null : providerGap.inMilliseconds,
+            'raw_receipt_gap_ms':
+                rawReceiptGap == null || rawReceiptGap.isNegative
+                    ? null
+                    : rawReceiptGap.inMilliseconds,
+            'straight_line_distance_m': connectorDistance,
+            'cause': continuity.cause.name,
+            'treatment': continuity.treatment.name,
+            'distance_treatment':
+                (continuity.excludeConnectorFromMeasuredDistance
+                        ? TrackingGapDistanceTreatment.excluded
+                        : TrackingGapDistanceTreatment.measured)
+                    .name,
+            'native_capture_generation': request.sample.captureGenerationId,
+            'configuration_epoch_id': configurationEpoch.id,
+            'continuity_policy_version': continuity.policyVersion,
+            'created_at': _timestamp(now),
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+        final gapRows = await transaction.query(
+          'track_continuity_gaps',
+          where: 'track_id = ? AND after_point_id = ? '
+              'AND continuity_policy_version = ?',
+          whereArgs: <Object?>[
+            request.trackId,
+            id,
+            continuity.policyVersion,
+          ],
+          limit: 1,
+        );
+        if (gapRows.isNotEmpty) {
+          committedGap = TrackingContinuityGap.fromDatabase(gapRows.single);
+        }
+      }
+
+      if (request.accepted && previousAccepted != null) {
+        await _persistQualityRun(
+          transaction,
+          trackId: request.trackId,
+          beforePoint: previousAccepted,
+          afterPointId: id,
+          afterSequence: sequence,
+          maximumAcceptedAccuracyMeters:
+              configurationEpoch.resolvedConfig.maximumAcceptedAccuracyMeters,
+          policyVersion: configurationEpoch.qualityPolicyVersion,
+          now: now,
+        );
+      }
+
+      await transaction.rawUpdate(
+        '''
+        UPDATE trips
+        SET accepted_point_count = accepted_point_count + ?,
+            rejected_point_count = rejected_point_count + ?,
+            measured_distance_m = measured_distance_m + ?,
+            updated_at = ?
+        WHERE id = (
+          SELECT trip_id FROM trip_legs WHERE track_id = ? LIMIT 1
+        )
+        ''',
+        <Object?>[
+          request.accepted ? 1 : 0,
+          request.accepted ? 0 : 1,
+          distanceDelta,
+          _timestamp(now),
+          request.trackId,
+        ],
+      );
       final rows = await transaction.query(
         'track_points',
         where: 'id = ?',
         whereArgs: <Object?>[id],
         limit: 1,
       );
-      return TrackPoint.fromDatabase(rows.single);
+      final point = TrackPoint.fromDatabase(rows.single);
+      return PointAppendResult(
+        point: point,
+        segmentId: segmentId,
+        duplicate: false,
+        gap: committedGap,
+      );
     });
     await _emitCurrentTrack();
-    return point;
+    return result;
+  }
+
+  Future<String?> _persistMotionEvidence(
+    Transaction transaction, {
+    required String trackId,
+    required String configurationEpochId,
+    required MotionEvidenceSnapshot? evidence,
+    required SamplingProfile? samplingProfile,
+    required DateTime now,
+  }) async {
+    if (evidence == null) return null;
+    final observedAt = _timestamp(evidence.observedAt);
+    final recent = await transaction.query(
+      'track_motion_evidence',
+      columns: <String>['id', 'generation', 'fused_state', 'policy_version'],
+      where: 'track_id = ? AND observed_at = ?',
+      whereArgs: <Object?>[trackId, observedAt],
+      orderBy: 'created_at DESC',
+      limit: 1,
+    );
+    if (recent.isNotEmpty &&
+        recent.single['generation'] == evidence.generation &&
+        recent.single['fused_state'] == evidence.state.name &&
+        recent.single['policy_version'] == evidence.policyVersion) {
+      return recent.single['id']! as String;
+    }
+
+    final id = _idGenerator();
+    final duration = evidence.probeDuration;
+    await transaction.insert('track_motion_evidence', <String, Object?>{
+      'id': id,
+      'track_id': trackId,
+      'configuration_epoch_id': configurationEpochId,
+      'fused_state': evidence.state.name,
+      'confidence': evidence.confidence,
+      'policy_version': evidence.policyVersion,
+      'observed_at': observedAt,
+      'window_started_at': duration == null
+          ? null
+          : _timestamp(evidence.observedAt.subtract(duration)),
+      'window_ended_at': duration == null ? null : observedAt,
+      'supporting_sources_json': jsonEncode(
+        evidence.supportingSources.map((source) => source.name).toList(),
+      ),
+      'conflicting_sources_json': jsonEncode(
+        evidence.conflictingSources.map((source) => source.name).toList(),
+      ),
+      'step_delta': evidence.stepDetected ? 1 : 0,
+      'significant_motion': evidence.significantMotionDetected ? 1 : 0,
+      'accelerometer_sample_count': evidence.accelerometerSampleCount,
+      'acceleration_motion_energy': evidence.accelerationMotionEnergy,
+      'gyroscope_sample_count': evidence.gyroscopeSampleCount,
+      'rotation_energy': evidence.rotationEnergy,
+      'compass_available': evidence.compassAvailable ? 1 : 0,
+      'gps_displacement_evidence': evidence.gpsDisplacementEvidence,
+      'native_foreground_state': evidence.nativeForegroundState,
+      'screen_interactive': _sqliteBool(evidence.screenInteractive),
+      'battery_saver_active': _sqliteBool(evidence.batterySaverActive),
+      'transition_reason': evidence.reason,
+      'selected_sampling_profile': samplingProfile?.name,
+      'generation': evidence.generation,
+      'created_at': _timestamp(now),
+    });
+    // Retain only the newest coordinate-free summaries. Raw sensor samples are
+    // never stored, and long Trips cannot grow this table without a bound.
+    await transaction.rawDelete(
+      '''
+      DELETE FROM track_motion_evidence
+      WHERE track_id = ? AND id NOT IN (
+        SELECT id FROM track_motion_evidence
+        WHERE track_id = ?
+        ORDER BY observed_at DESC, created_at DESC
+        LIMIT 512
+      )
+      ''',
+      <Object?>[trackId, trackId],
+    );
+    return id;
+  }
+
+  Future<void> _persistQualityRun(
+    Transaction transaction, {
+    required String trackId,
+    required TrackPoint beforePoint,
+    required String afterPointId,
+    required int afterSequence,
+    required double maximumAcceptedAccuracyMeters,
+    required int policyVersion,
+    required DateTime now,
+  }) async {
+    final rows = await transaction.query(
+      'track_points',
+      columns: <String>[
+        'sequence',
+        'captured_at',
+        'horizontal_accuracy',
+        'rejection_reason',
+      ],
+      where: 'track_id = ? AND sequence > ? AND sequence < ? '
+          'AND accepted = 0',
+      whereArgs: <Object?>[trackId, beforePoint.sequence, afterSequence],
+      orderBy: 'sequence ASC',
+    );
+    if (rows.isEmpty) return;
+    final accuracy = rows
+        .map((row) => (row['horizontal_accuracy'] as num?)?.toDouble())
+        .whereType<double>()
+        .where((value) => value.isFinite && value >= 0)
+        .toList()
+      ..sort();
+    final firstAt =
+        DateTime.parse(rows.first['captured_at']! as String).toUtc();
+    final lastAt = DateTime.parse(rows.last['captured_at']! as String).toUtc();
+    final duration = lastAt.difference(firstAt);
+    final maximum = accuracy.isEmpty ? null : accuracy.last;
+    final median = accuracy.isEmpty
+        ? null
+        : accuracy.length.isOdd
+            ? accuracy[accuracy.length ~/ 2]
+            : (accuracy[accuracy.length ~/ 2 - 1] +
+                    accuracy[accuracy.length ~/ 2]) /
+                2;
+    final visible = rows.length >= 3 ||
+        duration >= const Duration(seconds: 30) ||
+        (maximum != null && maximum > maximumAcceptedAccuracyMeters * 1.5);
+    final reasons = rows
+        .map((row) => row['rejection_reason']?.toString())
+        .whereType<String>()
+        .toSet()
+        .toList()
+      ..sort();
+    await transaction.insert('track_quality_runs', <String, Object?>{
+      'id': _idGenerator(),
+      'track_id': trackId,
+      'first_raw_sequence': (rows.first['sequence']! as num).toInt(),
+      'last_raw_sequence': (rows.last['sequence']! as num).toInt(),
+      'rejected_count': rows.length,
+      'duration_ms': duration.isNegative ? 0 : duration.inMilliseconds,
+      'maximum_uncertainty_m': maximum,
+      'median_uncertainty_m': median,
+      'before_point_id': beforePoint.id,
+      'after_point_id': afterPointId,
+      'severity': visible ? 'visibleGap' : 'informational',
+      'threshold_reason':
+          reasons.isEmpty ? 'rejected_fix_run' : reasons.join(','),
+      'policy_version': policyVersion,
+      'created_at': _timestamp(now),
+    });
   }
 
   @override
@@ -1352,6 +2334,953 @@ final class SqliteTrackRepository
   Future<List<Track>> listTracks() async {
     final rows = await _db.query('tracks', orderBy: 'started_at DESC');
     return rows.map(Track.fromDatabase).toList(growable: false);
+  }
+
+  @override
+  Future<Trip?> getTripForOwner(TrackingOwner owner, String tripId) async {
+    final rows = await _db.query(
+      'trips',
+      where: 'id = ? AND user_id = ? AND organization_id = ?',
+      whereArgs: <Object?>[
+        tripId,
+        owner.userId,
+        owner.organizationId,
+      ],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : Trip.fromDatabase(rows.single);
+  }
+
+  @override
+  Future<TripPage> listTripPage(TripQuery query) async {
+    if (query.limit < 1 || query.limit > 100) {
+      throw ArgumentError.value(query.limit, 'limit', 'Must be 1 through 100.');
+    }
+    final cursor = _decodeTripCursor(query.cursor);
+    final where = <String>['user_id = ?', 'organization_id = ?'];
+    final args = <Object?>[query.owner.userId, query.owner.organizationId];
+    if (query.statuses.isNotEmpty) {
+      where.add(
+          'status IN (${List.filled(query.statuses.length, '?').join(',')})');
+      args.addAll(query.statuses.map((status) => status.name));
+    }
+    if (cursor != null) {
+      where.add('(started_at < ? OR (started_at = ? AND id < ?))');
+      args.addAll(<Object?>[cursor.startedAt, cursor.startedAt, cursor.id]);
+    }
+    final rows = await _db.query(
+      'trips',
+      where: where.join(' AND '),
+      whereArgs: args,
+      orderBy: 'started_at DESC, id DESC',
+      limit: query.limit + 1,
+    );
+    final hasMore = rows.length > query.limit;
+    final visible = rows.take(query.limit).map(Trip.fromDatabase).toList();
+    return TripPage(
+      items: visible,
+      nextCursor: hasMore && visible.isNotEmpty
+          ? _encodeTripCursor(visible.last)
+          : null,
+    );
+  }
+
+  @override
+  Future<TripLegPage> listTripLegPage({
+    required TrackingOwner owner,
+    required String tripId,
+    required int limit,
+    String? cursor,
+  }) async {
+    if (limit < 1 || limit > 100) {
+      throw ArgumentError.value(limit, 'limit', 'Must be 1 through 100.');
+    }
+    await _requiredOwnedTrip(_db, owner, tripId);
+    final after = _decodeLegCursor(cursor);
+    final rows = await _db.rawQuery(
+      '''
+      SELECT l.*, t.status AS track_status
+      FROM trip_legs l
+      JOIN tracks t ON t.id = l.track_id
+      WHERE l.trip_id = ? AND l.leg_number > ?
+      ORDER BY l.leg_number ASC
+      LIMIT ?
+      ''',
+      <Object?>[tripId, after, limit + 1],
+    );
+    final hasMore = rows.length > limit;
+    final visible = rows.take(limit).map(TripLeg.fromDatabase).toList();
+    return TripLegPage(
+      items: visible,
+      nextCursor: hasMore && visible.isNotEmpty
+          ? _encodeLegCursor(visible.last.legNumber)
+          : null,
+    );
+  }
+
+  @override
+  Future<TripBundle> loadTripBundleForOwner(
+    TrackingOwner owner,
+    String tripId,
+  ) async {
+    final trip = await _requiredOwnedTrip(_db, owner, tripId);
+    final legRows = await _db.rawQuery(
+      '''
+      SELECT l.*, t.status AS track_status
+      FROM trip_legs l
+      JOIN tracks t ON t.id = l.track_id
+      WHERE l.trip_id = ?
+      ORDER BY l.leg_number ASC
+      ''',
+      <Object?>[tripId],
+    );
+    final gapRows = await _db.rawQuery(
+      '''
+      SELECT g.*
+      FROM track_continuity_gaps g
+      JOIN trip_legs l ON l.track_id = g.track_id
+      WHERE l.trip_id = ?
+      ORDER BY l.leg_number ASC, g.created_at ASC, g.id ASC
+      ''',
+      <Object?>[tripId],
+    );
+    return TripBundle(
+      trip: trip,
+      legs: legRows.map(TripLeg.fromDatabase),
+      gaps: gapRows.map(TrackingContinuityGap.fromDatabase),
+    );
+  }
+
+  @override
+  Future<PreparedTripLeg> registerImplicitTripStart({
+    required TrackingOwner owner,
+    required String tripId,
+    required String operationId,
+    MultiDayRoutePresentation routePresentation =
+        MultiDayRoutePresentation.separateRecordedParts,
+    RouteCaptureIntent captureIntent = RouteCaptureIntent.adaptive,
+    String? reason,
+  }) async {
+    final operationRecordId = await _db.transaction((transaction) async {
+      final trip = await _requiredOwnedTrip(transaction, owner, tripId);
+      final leg = await _requiredTripLeg(transaction, tripId, 1);
+      final existing = await _findTripOperation(
+        transaction,
+        tripId: trip.id,
+        type: TripOperationType.start,
+        operationId: operationId,
+      );
+      if (existing != null) return existing.id;
+      final now = _clock();
+      await transaction.update(
+        'trips',
+        <String, Object?>{
+          'route_presentation': routePresentation.name,
+          'capture_intent': captureIntent.name,
+          'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+          'updated_at': _timestamp(now),
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[trip.id],
+      );
+      final id = _idGenerator();
+      await transaction.insert('trip_operations', <String, Object?>{
+        'id': id,
+        'trip_id': trip.id,
+        'operation_type': TripOperationType.start.name,
+        'operation_id': operationId,
+        'stage': TripOperationStage.prepared.name,
+        'reason': reason,
+        'leg_track_id': leg.trackId,
+        'created_at': _timestamp(now),
+        'updated_at': _timestamp(now),
+      });
+      return id;
+    });
+    return _preparedTripLeg(operationRecordId, created: false);
+  }
+
+  @override
+  Future<PreparedTripLeg> prepareNextTripLeg({
+    required TrackingOwner owner,
+    required String tripId,
+    required TrackingConfig config,
+    required String operationId,
+    bool confirmCompletedTripContinuation = false,
+    bool allowRevisionAfterAcknowledgedCompletion = false,
+    String? dayLabel,
+  }) async {
+    config.validate(context: 'Trip continuation configuration');
+    final prepared = await _db.transaction((transaction) async {
+      final trip = await _requiredOwnedTrip(transaction, owner, tripId);
+      final existingOperation = await _findTripOperation(
+        transaction,
+        tripId: tripId,
+        type: TripOperationType.continueTrip,
+        operationId: operationId,
+      );
+      if (existingOperation != null) {
+        return (id: existingOperation.id, created: false);
+      }
+      if (trip.status == TripStatus.failed) {
+        throw TrackingTripException(
+          code: 'trip_not_continuable',
+          message: 'A failed Trip cannot be continued.',
+          tripId: trip.id,
+        );
+      }
+      if (trip.status == TripStatus.completed &&
+          !confirmCompletedTripContinuation) {
+        throw TrackingTripException(
+          code: 'completed_trip_confirmation_required',
+          message:
+              'Explicit confirmation is required to continue a completed Trip.',
+          tripId: trip.id,
+        );
+      }
+      if (trip.status == TripStatus.completed &&
+          !allowRevisionAfterAcknowledgedCompletion) {
+        final acknowledged = await transaction.query(
+          'trip_upload_outbox',
+          columns: <String>['id'],
+          where: 'trip_id = ? AND state = ?',
+          whereArgs: <Object?>[
+            trip.id,
+            TripUploadOutboxState.acknowledged.name,
+          ],
+          limit: 1,
+        );
+        if (acknowledged.isNotEmpty) {
+          throw TrackingTripException(
+            code: 'trip_already_finalized',
+            message: 'The acknowledged Trip completion cannot be revised by '
+                'the configured uploader.',
+            tripId: trip.id,
+          );
+        }
+      }
+
+      final now = _clock();
+      final currentTrackId = trip.currentLegTrackId;
+      Track? currentTrack;
+      if (currentTrackId != null) {
+        final rows = await transaction.query(
+          'tracks',
+          where: 'id = ?',
+          whereArgs: <Object?>[currentTrackId],
+          limit: 1,
+        );
+        if (rows.isNotEmpty) currentTrack = Track.fromDatabase(rows.single);
+      }
+
+      var created = false;
+      late String targetTrackId;
+      if (currentTrack != null &&
+          (currentTrack.status == TrackStatus.starting ||
+              currentTrack.status == TrackStatus.active ||
+              currentTrack.status == TrackStatus.interrupted ||
+              currentTrack.status == TrackStatus.paused)) {
+        targetTrackId = currentTrack.id;
+      } else {
+        final activeRows = await transaction.query(
+          'tracks',
+          columns: <String>['id'],
+          where: 'status IN (?, ?, ?)',
+          whereArgs: <Object?>[
+            TrackStatus.starting.name,
+            TrackStatus.active.name,
+            TrackStatus.stopping.name,
+          ],
+          limit: 1,
+        );
+        if (activeRows.isNotEmpty) {
+          throw TrackingTripException(
+            code: 'active_trip_conflict',
+            message: 'Another Trip already owns active native capture.',
+            tripId: trip.id,
+          );
+        }
+        created = true;
+        targetTrackId = _idGenerator();
+        final segmentId = _idGenerator();
+        final sessionControlToken = _sessionControlTokenGenerator();
+        final nextLegNumber = trip.legCount + 1;
+        await transaction.insert('tracks', <String, Object?>{
+          'id': targetTrackId,
+          'organization_id': owner.organizationId,
+          'user_id': owner.userId,
+          'route_id': trip.routeId,
+          'status': TrackStatus.starting.name,
+          'started_at': _timestamp(now),
+          'next_sequence': 1,
+          'current_segment_id': segmentId,
+          'segment_count': 1,
+          'tracker_provider': 'native',
+          'configuration_json': config.toJson(),
+          'session_control_token': sessionControlToken,
+          'created_at': _timestamp(now),
+          'updated_at': _timestamp(now),
+        });
+        await transaction.insert(
+          'tracking_configuration_epochs',
+          <String, Object?>{
+            'id': _initialConfigurationEpochId(targetTrackId),
+            'track_id': targetTrackId,
+            'epoch_number': 1,
+            'resolved_configuration_json': config.toJson(),
+            'preset_definition_version':
+                TrackingPolicyVersions.presetDefinition,
+            'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+            'created_at': _timestamp(now),
+            'activation_sequence': 1,
+            'activated_at': _timestamp(now),
+          },
+        );
+        await transaction.insert('track_segments', <String, Object?>{
+          'id': segmentId,
+          'track_id': targetTrackId,
+          'segment_number': 1,
+          'status': TrackSegmentStatus.starting.name,
+          'started_at': _timestamp(now),
+          'created_at': _timestamp(now),
+          'updated_at': _timestamp(now),
+        });
+        await transaction.insert('trip_legs', <String, Object?>{
+          'trip_id': trip.id,
+          'track_id': targetTrackId,
+          'leg_number': nextLegNumber,
+          'started_at': _timestamp(now),
+          'day_label': dayLabel,
+        });
+        await transaction.update(
+          'trips',
+          <String, Object?>{
+            'status': TripStatus.active.name,
+            'suspended_at': null,
+            'ended_at': null,
+            'current_leg_track_id': targetTrackId,
+            'leg_count': nextLegNumber,
+            'lifecycle_revision': trip.lifecycleRevision + 1,
+            'updated_at': _timestamp(now),
+          },
+          where: 'id = ?',
+          whereArgs: <Object?>[trip.id],
+        );
+      }
+
+      final operationRecordId = _idGenerator();
+      await transaction.insert('trip_operations', <String, Object?>{
+        'id': operationRecordId,
+        'trip_id': trip.id,
+        'operation_type': TripOperationType.continueTrip.name,
+        'operation_id': operationId,
+        'stage': TripOperationStage.prepared.name,
+        'leg_track_id': targetTrackId,
+        'created_at': _timestamp(now),
+        'updated_at': _timestamp(now),
+      });
+      return (id: operationRecordId, created: created);
+    });
+    await _emitCurrentTrack();
+    return _preparedTripLeg(prepared.id, created: prepared.created);
+  }
+
+  @override
+  Future<void> markTripOperationStage({
+    required String operationRecordId,
+    required TripOperationStage stage,
+  }) async {
+    final now = _clock();
+    final updated = await _db.update(
+      'trip_operations',
+      <String, Object?>{
+        'stage': stage.name,
+        'updated_at': _timestamp(now),
+        if (stage == TripOperationStage.completed ||
+            stage == TripOperationStage.failed)
+          'completed_at': _timestamp(now),
+      },
+      where: 'id = ?',
+      whereArgs: <Object?>[operationRecordId],
+    );
+    if (updated != 1) {
+      throw const TrackingStorageException(
+        code: 'trip_operation_missing',
+        message: 'The durable Trip operation no longer exists.',
+      );
+    }
+  }
+
+  @override
+  Future<TripOperationRecord> beginTripOperation({
+    required TrackingOwner owner,
+    required String tripId,
+    required String trackId,
+    required TripOperationType type,
+    required String operationId,
+    String? reason,
+  }) async {
+    final recordId = await _db.transaction((transaction) async {
+      final trip = await _requiredOwnedTrip(transaction, owner, tripId);
+      final membership = await transaction.query(
+        'trip_legs',
+        columns: <String>['track_id'],
+        where: 'trip_id = ? AND track_id = ?',
+        whereArgs: <Object?>[tripId, trackId],
+        limit: 1,
+      );
+      if (membership.isEmpty || trip.currentLegTrackId != trackId) {
+        throw TrackingTripException(
+          code: 'trip_operation_conflict',
+          message: 'The requested Track is not the current Trip leg.',
+          tripId: trip.id,
+        );
+      }
+      final existing = await _findTripOperation(
+        transaction,
+        tripId: tripId,
+        type: type,
+        operationId: operationId,
+      );
+      if (existing != null) return existing.id;
+      final now = _clock();
+      final id = _idGenerator();
+      await transaction.insert('trip_operations', <String, Object?>{
+        'id': id,
+        'trip_id': tripId,
+        'operation_type': type.name,
+        'operation_id': operationId,
+        'stage': TripOperationStage.prepared.name,
+        'reason': reason,
+        'leg_track_id': trackId,
+        'created_at': _timestamp(now),
+        'updated_at': _timestamp(now),
+      });
+      return id;
+    });
+    final rows = await _db.query(
+      'trip_operations',
+      where: 'id = ?',
+      whereArgs: <Object?>[recordId],
+      limit: 1,
+    );
+    return TripOperationRecord.fromDatabase(rows.single);
+  }
+
+  @override
+  Future<void> suspendTripAfterLegCompletion({
+    required TrackingOwner owner,
+    required String tripId,
+    required String trackId,
+    required String reason,
+    required String operationId,
+  }) =>
+      _finishTripLeg(
+        owner: owner,
+        tripId: tripId,
+        trackId: trackId,
+        reason: reason,
+        operationId: operationId,
+        operationType: TripOperationType.endDay,
+        finalStatus: TripStatus.suspended,
+      );
+
+  @override
+  Future<void> completeTripAfterLegCompletion({
+    required TrackingOwner owner,
+    required String tripId,
+    required String trackId,
+    required String reason,
+    required String operationId,
+  }) =>
+      _finishTripLeg(
+        owner: owner,
+        tripId: tripId,
+        trackId: trackId,
+        reason: reason,
+        operationId: operationId,
+        operationType: TripOperationType.complete,
+        finalStatus: TripStatus.completed,
+      );
+
+  Future<void> _finishTripLeg({
+    required TrackingOwner owner,
+    required String tripId,
+    required String trackId,
+    required String reason,
+    required String operationId,
+    required TripOperationType operationType,
+    required TripStatus finalStatus,
+  }) async {
+    await _db.transaction((transaction) async {
+      final trip = await _requiredOwnedTrip(transaction, owner, tripId);
+      final membership = await transaction.query(
+        'trip_legs',
+        where: 'trip_id = ? AND track_id = ?',
+        whereArgs: <Object?>[tripId, trackId],
+        limit: 1,
+      );
+      if (membership.isEmpty || trip.currentLegTrackId != trackId) {
+        throw TrackingTripException(
+          code: 'trip_operation_conflict',
+          message: 'The requested Track is not the current Trip leg.',
+          tripId: trip.id,
+        );
+      }
+      final existing = await _findTripOperation(
+        transaction,
+        tripId: tripId,
+        type: operationType,
+        operationId: operationId,
+      );
+      if (existing?.stage == TripOperationStage.completed) return;
+      final now = _clock();
+      final operationRecordId = existing?.id ?? _idGenerator();
+      if (existing == null) {
+        await transaction.insert('trip_operations', <String, Object?>{
+          'id': operationRecordId,
+          'trip_id': tripId,
+          'operation_type': operationType.name,
+          'operation_id': operationId,
+          'stage': TripOperationStage.nativeStopped.name,
+          'reason': reason,
+          'leg_track_id': trackId,
+          'created_at': _timestamp(now),
+          'updated_at': _timestamp(now),
+        });
+      }
+      final track = await _requiredTrack(transaction, trackId);
+      if (track.status != TrackStatus.completed) {
+        if (track.status == TrackStatus.failed) {
+          throw TrackingTripException(
+            code: 'trip_not_completable',
+            message: 'A failed Trip leg cannot be completed.',
+            tripId: trip.id,
+          );
+        }
+        if (track.currentSegmentId != null) {
+          await transaction.update(
+            'track_segments',
+            <String, Object?>{
+              'status': TrackSegmentStatus.completed.name,
+              'ended_at': _timestamp(now),
+              'updated_at': _timestamp(now),
+            },
+            where: 'id = ?',
+            whereArgs: <Object?>[track.currentSegmentId],
+          );
+        }
+        await transaction.update(
+          'tracks',
+          <String, Object?>{
+            'status': TrackStatus.completed.name,
+            'ended_at': _timestamp(now),
+            'current_segment_id': null,
+            'completion_reason': reason,
+            'updated_at': _timestamp(now),
+          },
+          where: 'id = ?',
+          whereArgs: <Object?>[trackId],
+        );
+        await _recordOperation(
+          transaction,
+          trackId,
+          operationId,
+          TrackOperationType.complete,
+          now,
+        );
+      }
+      await transaction.update(
+        'trip_legs',
+        <String, Object?>{'ended_at': _timestamp(now)},
+        where: 'trip_id = ? AND track_id = ?',
+        whereArgs: <Object?>[tripId, trackId],
+      );
+      await transaction.update(
+        'trips',
+        <String, Object?>{
+          'status': finalStatus.name,
+          'suspended_at':
+              finalStatus == TripStatus.suspended ? _timestamp(now) : null,
+          'ended_at':
+              finalStatus == TripStatus.completed ? _timestamp(now) : null,
+          'current_leg_track_id': trackId,
+          'lifecycle_revision': trip.lifecycleRevision + 1,
+          'updated_at': _timestamp(now),
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      await transaction.update(
+        'trip_operations',
+        <String, Object?>{
+          'stage': TripOperationStage.completed.name,
+          'updated_at': _timestamp(now),
+          'completed_at': _timestamp(now),
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[operationRecordId],
+      );
+    });
+    await _emitCurrentTrack();
+  }
+
+  @override
+  Future<List<TripOperationRecord>> pendingTripOperations() async {
+    final rows = await _db.query(
+      'trip_operations',
+      where: 'stage NOT IN (?, ?)',
+      whereArgs: <Object?>[
+        TripOperationStage.completed.name,
+        TripOperationStage.failed.name,
+      ],
+      orderBy: 'created_at ASC, id ASC',
+    );
+    return rows.map(TripOperationRecord.fromDatabase).toList(growable: false);
+  }
+
+  @override
+  Future<TripOperationRecord?> findTripOperationForOwner({
+    required TrackingOwner owner,
+    required String operationId,
+    TripOperationType? type,
+  }) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT o.*
+      FROM trip_operations o
+      JOIN trips t ON t.id = o.trip_id
+      WHERE t.user_id = ? AND t.organization_id = ?
+        AND o.operation_id = ?
+        ${type == null ? '' : 'AND o.operation_type = ?'}
+      ORDER BY o.created_at DESC, o.id DESC
+      LIMIT 1
+      ''',
+      <Object?>[
+        owner.userId,
+        owner.organizationId,
+        operationId,
+        if (type != null) type.name,
+      ],
+    );
+    return rows.isEmpty ? null : TripOperationRecord.fromDatabase(rows.single);
+  }
+
+  @override
+  Future<Trip> verifyAndRepairTripAggregates({
+    required TrackingOwner owner,
+    required String tripId,
+  }) async {
+    await _db.transaction((transaction) async {
+      await _requiredOwnedTrip(transaction, owner, tripId);
+      final totals = await transaction.rawQuery(
+        '''
+        SELECT COUNT(*) AS leg_count,
+          COALESCE(SUM(t.accepted_point_count), 0) AS accepted_count,
+          COALESCE(SUM(t.rejected_point_count), 0) AS rejected_count,
+          COALESCE(SUM(t.total_distance_m), 0) AS measured_distance
+        FROM trip_legs l
+        JOIN tracks t ON t.id = l.track_id
+        WHERE l.trip_id = ?
+        ''',
+        <Object?>[tripId],
+      );
+      final row = totals.single;
+      await transaction.update(
+        'trips',
+        <String, Object?>{
+          'leg_count': (row['leg_count'] as num).toInt(),
+          'accepted_point_count': (row['accepted_count'] as num).toInt(),
+          'rejected_point_count': (row['rejected_count'] as num).toInt(),
+          'measured_distance_m': (row['measured_distance'] as num).toDouble(),
+          'updated_at': _timestamp(_clock()),
+        },
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+    });
+    return (await getTripForOwner(owner, tripId))!;
+  }
+
+  @override
+  Future<void> deleteTripForOwner(TrackingOwner owner, String tripId) async {
+    await _db.transaction((transaction) async {
+      final trip = await _requiredOwnedTrip(transaction, owner, tripId);
+      if (trip.status == TripStatus.active ||
+          trip.status == TripStatus.suspended) {
+        throw TrackingTripException(
+          code: 'trip_not_terminal',
+          message: 'Only a terminal Trip can be deleted.',
+          tripId: trip.id,
+        );
+      }
+      final legRows = await transaction.query(
+        'trip_legs',
+        columns: <String>['track_id'],
+        where: 'trip_id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      // Clear the cyclic current-leg reference before Track cascades run.
+      await transaction.update(
+        'trips',
+        <String, Object?>{'current_leg_track_id': null},
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      for (final row in legRows) {
+        await transaction.delete(
+          'tracks',
+          where: 'id = ?',
+          whereArgs: <Object?>[row['track_id']],
+        );
+      }
+      await transaction.delete(
+        'trips',
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+    });
+    await _emitCurrentTrack();
+  }
+
+  @override
+  Future<void> enqueueTripCompletion({
+    required TrackingOwner owner,
+    required String tripId,
+  }) async {
+    await _db.transaction((transaction) async {
+      final trip = await _requiredOwnedTrip(transaction, owner, tripId);
+      if (trip.status != TripStatus.completed) {
+        throw TrackingTripException(
+          code: 'trip_not_completed',
+          message: 'Only a completed Trip can enqueue final completion.',
+          tripId: trip.id,
+        );
+      }
+      final now = _clock();
+      await transaction.insert(
+        'trip_upload_outbox',
+        <String, Object?>{
+          'id': _idGenerator(),
+          'trip_id': trip.id,
+          'lifecycle_revision': trip.lifecycleRevision,
+          'idempotency_key':
+              'trip:${trip.id}:completion:v${trip.lifecycleRevision}',
+          'state': TripUploadOutboxState.pending.name,
+          'attempt_count': 0,
+          'next_attempt_at': _timestamp(now),
+          'created_at': _timestamp(now),
+          'updated_at': _timestamp(now),
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    });
+  }
+
+  @override
+  Future<TripUploadOutboxLease?> leaseNextTripCompletion({
+    required TrackingOwner owner,
+    required String leaseOwner,
+    required Duration leaseDuration,
+  }) async {
+    if (leaseOwner.trim().isEmpty) {
+      throw ArgumentError.value(leaseOwner, 'leaseOwner');
+    }
+    if (leaseDuration <= Duration.zero) {
+      throw ArgumentError.value(leaseDuration, 'leaseDuration');
+    }
+    return _db.transaction((transaction) async {
+      final now = _clock();
+      final rows = await transaction.rawQuery(
+        '''
+        SELECT o.*
+        FROM trip_upload_outbox o
+        JOIN trips t ON t.id = o.trip_id
+        WHERE t.user_id = ? AND t.organization_id = ?
+          AND (
+            (o.state = ? AND o.next_attempt_at <= ?)
+            OR (o.state = ? AND o.lease_expires_at <= ?)
+          )
+        ORDER BY o.next_attempt_at ASC, o.created_at ASC, o.id ASC
+        LIMIT 1
+        ''',
+        <Object?>[
+          owner.userId,
+          owner.organizationId,
+          TripUploadOutboxState.pending.name,
+          _timestamp(now),
+          TripUploadOutboxState.leased.name,
+          _timestamp(now),
+        ],
+      );
+      if (rows.isEmpty) return null;
+      final candidate = TripUploadOutboxEntry.fromDatabase(rows.single);
+      final leaseExpiresAt = now.add(leaseDuration);
+      final updated = await transaction.update(
+        'trip_upload_outbox',
+        <String, Object?>{
+          'state': TripUploadOutboxState.leased.name,
+          'lease_owner': leaseOwner,
+          'lease_expires_at': _timestamp(leaseExpiresAt),
+          'attempt_count': candidate.attemptCount + 1,
+          'updated_at': _timestamp(now),
+        },
+        where: 'id = ? AND (state = ? OR '
+            '(state = ? AND lease_expires_at <= ?))',
+        whereArgs: <Object?>[
+          candidate.id,
+          TripUploadOutboxState.pending.name,
+          TripUploadOutboxState.leased.name,
+          _timestamp(now),
+        ],
+      );
+      if (updated != 1) return null;
+      final leasedRows = await transaction.query(
+        'trip_upload_outbox',
+        where: 'id = ?',
+        whereArgs: <Object?>[candidate.id],
+        limit: 1,
+      );
+      final trip = await _requiredOwnedTrip(
+        transaction,
+        owner,
+        candidate.tripId,
+      );
+      return TripUploadOutboxLease(
+        entry: TripUploadOutboxEntry.fromDatabase(leasedRows.single),
+        trip: trip,
+        leaseOwner: leaseOwner,
+      );
+    });
+  }
+
+  @override
+  Future<void> acknowledgeTripCompletionUpload({
+    required String outboxId,
+    required String leaseOwner,
+  }) async {
+    final now = _clock();
+    final updated = await _db.update(
+      'trip_upload_outbox',
+      <String, Object?>{
+        'state': TripUploadOutboxState.acknowledged.name,
+        'lease_owner': null,
+        'lease_expires_at': null,
+        'last_error': null,
+        'acknowledged_at': _timestamp(now),
+        'updated_at': _timestamp(now),
+      },
+      where: 'id = ? AND state = ? AND lease_owner = ?',
+      whereArgs: <Object?>[
+        outboxId,
+        TripUploadOutboxState.leased.name,
+        leaseOwner,
+      ],
+    );
+    if (updated != 1) {
+      throw const TrackingConflictException(
+        code: 'trip_upload_lease_conflict',
+        message: 'The Trip completion lease is no longer owned by this worker.',
+      );
+    }
+  }
+
+  @override
+  Future<void> failTripCompletionUpload({
+    required String outboxId,
+    required String leaseOwner,
+    required String error,
+    required DateTime nextAttemptAt,
+  }) async {
+    final updated = await _db.update(
+      'trip_upload_outbox',
+      <String, Object?>{
+        'state': TripUploadOutboxState.pending.name,
+        'lease_owner': null,
+        'lease_expires_at': null,
+        'last_error': error,
+        'next_attempt_at': _timestamp(nextAttemptAt.toUtc()),
+        'updated_at': _timestamp(_clock()),
+      },
+      where: 'id = ? AND state = ? AND lease_owner = ?',
+      whereArgs: <Object?>[
+        outboxId,
+        TripUploadOutboxState.leased.name,
+        leaseOwner,
+      ],
+    );
+    if (updated != 1) {
+      throw const TrackingConflictException(
+        code: 'trip_upload_lease_conflict',
+        message: 'The Trip completion lease is no longer owned by this worker.',
+      );
+    }
+  }
+
+  @override
+  Future<bool> hasAcknowledgedTripCompletion({
+    required String tripId,
+  }) async {
+    final rows = await _db.query(
+      'trip_upload_outbox',
+      columns: <String>['id'],
+      where: 'trip_id = ? AND state = ?',
+      whereArgs: <Object?>[
+        tripId,
+        TripUploadOutboxState.acknowledged.name,
+      ],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  @override
+  Future<List<TripUploadOutboxEntry>> listTripUploadEntriesForOwner(
+    TrackingOwner owner,
+  ) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT o.*
+      FROM trip_upload_outbox o
+      JOIN trips t ON t.id = o.trip_id
+      WHERE t.user_id = ? AND t.organization_id = ?
+      ORDER BY o.created_at ASC, o.id ASC
+      ''',
+      <Object?>[owner.userId, owner.organizationId],
+    );
+    return rows.map(TripUploadOutboxEntry.fromDatabase).toList(growable: false);
+  }
+
+  @override
+  Future<void> eraseTripForOwner(TrackingOwner owner, String tripId) async {
+    await _db.transaction((transaction) async {
+      await _requiredOwnedTrip(transaction, owner, tripId);
+      final legRows = await transaction.query(
+        'trip_legs',
+        columns: <String>['track_id'],
+        where: 'trip_id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      await transaction.update(
+        'trips',
+        <String, Object?>{'current_leg_track_id': null},
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      for (final row in legRows) {
+        await transaction.delete(
+          'tracks',
+          where: 'id = ?',
+          whereArgs: <Object?>[row['track_id']],
+        );
+      }
+      await transaction.delete(
+        'trips',
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+    });
+    await _emitCurrentTrack();
   }
 
   @override
@@ -2343,6 +4272,7 @@ final class SqliteTrackRepository
           trackId: track.id,
         );
       }
+      await _prepareLegacyTrackDeletion(transaction, trackId);
       await transaction.delete(
         'tracks',
         where: 'id = ?',
@@ -2398,6 +4328,7 @@ final class SqliteTrackRepository
         );
       }
       await _requireNoCommittedManagedExports(transaction, trackId);
+      await _prepareLegacyTrackDeletion(transaction, trackId);
       await transaction.delete(
         'tracks',
         where: 'id = ?',
@@ -2422,6 +4353,7 @@ final class SqliteTrackRepository
         );
       }
       await _requireNoCommittedManagedExports(transaction, trackId);
+      await _prepareLegacyTrackDeletion(transaction, trackId);
       await transaction.delete(
         'tracks',
         where: 'id = ?',
@@ -2434,25 +4366,9 @@ final class SqliteTrackRepository
   @override
   Future<void> deleteTracksExcept(Set<String> retainedTrackIds) async {
     await _db.transaction((transaction) async {
-      if (retainedTrackIds.isEmpty) {
-        await transaction.delete(
-          'tracks',
-          where:
-              "id NOT IN (SELECT track_id FROM managed_exports WHERE state = ?)",
-          whereArgs: <Object?>[ManagedExportState.committed.name],
-        );
-        return;
-      }
-      final placeholders =
-          List<String>.filled(retainedTrackIds.length, '?').join(',');
-      await transaction.delete(
-        'tracks',
-        where: 'id NOT IN ($placeholders) AND '
-            'id NOT IN (SELECT track_id FROM managed_exports WHERE state = ?)',
-        whereArgs: <Object?>[
-          ...retainedTrackIds,
-          ManagedExportState.committed.name,
-        ],
+      await _deleteTripsExcept(
+        transaction,
+        retainedTrackIds: retainedTrackIds,
       );
     });
     await _emitCurrentTrack();
@@ -2464,29 +4380,11 @@ final class SqliteTrackRepository
     Set<String> retainedTrackIds,
   ) async {
     await _db.transaction((transaction) async {
-      final conditions = <String>[
-        'user_id = ?',
-        'organization_id = ?',
-        'status IN (?, ?)',
-        'id NOT IN (SELECT track_id FROM managed_exports WHERE state = ?)',
-      ];
-      final arguments = <Object?>[
-        owner.userId,
-        owner.organizationId,
-        TrackStatus.completed.name,
-        TrackStatus.failed.name,
-        ManagedExportState.committed.name,
-      ];
-      if (retainedTrackIds.isNotEmpty) {
-        conditions.add(
-          'id NOT IN (${List<String>.filled(retainedTrackIds.length, '?').join(',')})',
-        );
-        arguments.addAll(retainedTrackIds);
-      }
-      await transaction.delete(
-        'tracks',
-        where: conditions.join(' AND '),
-        whereArgs: arguments,
+      await _deleteTripsExcept(
+        transaction,
+        retainedTrackIds: retainedTrackIds,
+        owner: owner,
+        terminalOnly: true,
       );
     });
     await _emitCurrentTrack();
@@ -2529,6 +4427,78 @@ final class SqliteTrackRepository
     String? segmentId,
   }) =>
       _lastAcceptedPoint(_db, trackId, segmentId: segmentId);
+
+  @override
+  Future<TrackPoint?> findLastRawPoint(String trackId) =>
+      _lastRawPoint(_db, trackId);
+
+  @override
+  Future<List<TrackingContinuityGap>> listContinuityGaps(
+    String trackId,
+  ) async {
+    final rows = await _db.query(
+      'track_continuity_gaps',
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      orderBy: 'created_at ASC, id ASC',
+    );
+    return rows.map(TrackingContinuityGap.fromDatabase).toList(growable: false);
+  }
+
+  @override
+  Future<Set<String>> safeLegacyAutomaticAfterSegmentIds(
+    String trackId,
+  ) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT after_segment.id AS after_segment_id
+      FROM track_segments after_segment
+      JOIN track_segments before_segment
+        ON before_segment.track_id = after_segment.track_id
+       AND before_segment.segment_number = after_segment.segment_number - 1
+      WHERE after_segment.track_id = ?
+        AND after_segment.pause_reason = 'large_callback_gap'
+        AND before_segment.pause_reason = 'large_callback_gap'
+        AND after_segment.resumed_from_point_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM tracking_operations operation
+          WHERE operation.track_id = after_segment.track_id
+            AND operation.operation_type = 'pause'
+            AND operation.completed_at >= before_segment.started_at
+            AND operation.completed_at <= after_segment.started_at
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM tracking_health_events health
+          WHERE health.track_id = after_segment.track_id
+            AND health.occurred_at >= before_segment.started_at
+            AND health.occurred_at <= after_segment.started_at
+            AND health.type IN (
+              'native_tracker_interrupted',
+              'native_tracker_failed',
+              'previous_session_interrupted',
+              'termination_recovery_started_gap_possible',
+              'authorization_changed'
+            )
+        )
+      ''',
+      <Object?>[trackId],
+    );
+    return rows.map((row) => row['after_segment_id']! as String).toSet();
+  }
+
+  static Future<TrackPoint?> _lastRawPoint(
+    DatabaseExecutor executor,
+    String trackId,
+  ) async {
+    final rows = await executor.query(
+      'track_points',
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      orderBy: 'sequence DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : TrackPoint.fromDatabase(rows.single);
+  }
 
   static Future<TrackPoint?> _lastAcceptedPoint(
     DatabaseExecutor executor,
@@ -3251,6 +5221,221 @@ final class SqliteTrackRepository
     );
   }
 
+  static Future<Trip> _requiredOwnedTrip(
+    DatabaseExecutor executor,
+    TrackingOwner owner,
+    String tripId,
+  ) async {
+    final rows = await executor.query(
+      'trips',
+      where: 'id = ? AND user_id = ? AND organization_id = ?',
+      whereArgs: <Object?>[
+        tripId,
+        owner.userId,
+        owner.organizationId,
+      ],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw const TrackingOwnershipException(
+        code: 'owner_scope_conflict',
+        message: 'The Trip does not exist in the active owner scope.',
+      );
+    }
+    return Trip.fromDatabase(rows.single);
+  }
+
+  static Future<void> _prepareLegacyTrackDeletion(
+    DatabaseExecutor executor,
+    String trackId,
+  ) async {
+    final rows = await executor.rawQuery(
+      '''
+      SELECT l.trip_id, t.leg_count
+      FROM trip_legs l
+      JOIN trips t ON t.id = l.trip_id
+      WHERE l.track_id = ?
+      LIMIT 1
+      ''',
+      <Object?>[trackId],
+    );
+    if (rows.isEmpty) return;
+    final legCount = (rows.single['leg_count'] as num).toInt();
+    if (legCount > 1) {
+      throw TrackingStorageException(
+        code: 'track_is_trip_leg',
+        message: 'Delete the containing Trip instead of one internal leg.',
+        trackId: trackId,
+      );
+    }
+    final tripId = rows.single['trip_id']! as String;
+    await executor.update(
+      'trips',
+      <String, Object?>{'current_leg_track_id': null},
+      where: 'id = ?',
+      whereArgs: <Object?>[tripId],
+    );
+    await executor.delete(
+      'trips',
+      where: 'id = ?',
+      whereArgs: <Object?>[tripId],
+    );
+  }
+
+  static Future<void> _deleteTripsExcept(
+    DatabaseExecutor executor, {
+    required Set<String> retainedTrackIds,
+    TrackingOwner? owner,
+    bool terminalOnly = false,
+  }) async {
+    final conditions = <String>[
+      '''NOT EXISTS (
+        SELECT 1 FROM trip_legs protected_legs
+        JOIN managed_exports exports ON exports.track_id = protected_legs.track_id
+        WHERE protected_legs.trip_id = trips.id AND exports.state = ?
+      )''',
+    ];
+    final args = <Object?>[ManagedExportState.committed.name];
+    if (owner != null) {
+      conditions.add('user_id = ? AND organization_id = ?');
+      args.addAll(<Object?>[owner.userId, owner.organizationId]);
+    }
+    if (terminalOnly) {
+      conditions.add('status IN (?, ?)');
+      args.addAll(<Object?>[TripStatus.completed.name, TripStatus.failed.name]);
+    }
+    if (retainedTrackIds.isNotEmpty) {
+      final placeholders = List.filled(retainedTrackIds.length, '?').join(',');
+      conditions.add('''NOT EXISTS (
+        SELECT 1 FROM trip_legs retained
+        WHERE retained.trip_id = trips.id
+          AND retained.track_id IN ($placeholders)
+      )''');
+      args.addAll(retainedTrackIds);
+    }
+    final tripRows = await executor.query(
+      'trips',
+      columns: <String>['id'],
+      where: conditions.join(' AND '),
+      whereArgs: args,
+    );
+    for (final tripRow in tripRows) {
+      final tripId = tripRow['id']! as String;
+      final legRows = await executor.query(
+        'trip_legs',
+        columns: <String>['track_id'],
+        where: 'trip_id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      await executor.update(
+        'trips',
+        <String, Object?>{'current_leg_track_id': null},
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+      for (final legRow in legRows) {
+        await executor.delete(
+          'tracks',
+          where: 'id = ?',
+          whereArgs: <Object?>[legRow['track_id']],
+        );
+      }
+      await executor.delete(
+        'trips',
+        where: 'id = ?',
+        whereArgs: <Object?>[tripId],
+      );
+    }
+  }
+
+  static Future<TripLeg> _requiredTripLeg(
+    DatabaseExecutor executor,
+    String tripId,
+    int legNumber,
+  ) async {
+    final rows = await executor.rawQuery(
+      '''
+      SELECT l.*, t.status AS track_status
+      FROM trip_legs l
+      JOIN tracks t ON t.id = l.track_id
+      WHERE l.trip_id = ? AND l.leg_number = ?
+      LIMIT 1
+      ''',
+      <Object?>[tripId, legNumber],
+    );
+    if (rows.isEmpty) {
+      throw const TrackingStorageException(
+        code: 'trip_leg_missing',
+        message: 'The Trip leg does not exist.',
+      );
+    }
+    return TripLeg.fromDatabase(rows.single);
+  }
+
+  static Future<TripOperationRecord?> _findTripOperation(
+    DatabaseExecutor executor, {
+    required String tripId,
+    required TripOperationType type,
+    required String operationId,
+  }) async {
+    final rows = await executor.query(
+      'trip_operations',
+      where: 'trip_id = ? AND operation_type = ? AND operation_id = ?',
+      whereArgs: <Object?>[tripId, type.name, operationId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : TripOperationRecord.fromDatabase(rows.single);
+  }
+
+  Future<PreparedTripLeg> _preparedTripLeg(
+    String operationRecordId, {
+    required bool created,
+  }) async {
+    final operationRows = await _db.query(
+      'trip_operations',
+      where: 'id = ?',
+      whereArgs: <Object?>[operationRecordId],
+      limit: 1,
+    );
+    if (operationRows.isEmpty) {
+      throw const TrackingStorageException(
+        code: 'trip_operation_missing',
+        message: 'The durable Trip operation does not exist.',
+      );
+    }
+    final operation = TripOperationRecord.fromDatabase(operationRows.single);
+    final tripRows = await _db.query(
+      'trips',
+      where: 'id = ?',
+      whereArgs: <Object?>[operation.tripId],
+      limit: 1,
+    );
+    final legRows = await _db.rawQuery(
+      '''
+      SELECT l.*, t.status AS track_status
+      FROM trip_legs l
+      JOIN tracks t ON t.id = l.track_id
+      WHERE l.trip_id = ? AND l.track_id = ?
+      LIMIT 1
+      ''',
+      <Object?>[operation.tripId, operation.legTrackId],
+    );
+    final track = await getTrack(operation.legTrackId!);
+    if (tripRows.isEmpty || legRows.isEmpty || track == null) {
+      throw const TrackingStorageException(
+        code: 'trip_operation_inconsistent',
+        message: 'The Trip operation references missing local state.',
+      );
+    }
+    return PreparedTripLeg(
+      trip: Trip.fromDatabase(tripRows.single),
+      leg: TripLeg.fromDatabase(legRows.single),
+      track: track,
+      operation: operation,
+      created: created,
+    );
+  }
+
   Future<void> _emitCurrentTrack() async {
     if (_currentTrackController.isClosed) return;
     _currentTrackSnapshot =
@@ -3264,6 +5449,46 @@ final class SqliteTrackRepository
       'id': track.id,
     });
     return base64Url.encode(utf8.encode(payload));
+  }
+
+  static String _encodeTripCursor(Trip trip) {
+    final payload = jsonEncode(<String, Object?>{
+      'startedAt': _timestamp(trip.startedAt),
+      'id': trip.id,
+    });
+    return base64Url.encode(utf8.encode(payload));
+  }
+
+  static _TripCursor? _decodeTripCursor(String? cursor) {
+    if (cursor == null || cursor.trim().isEmpty) return null;
+    try {
+      final decoded = jsonDecode(utf8.decode(base64Url.decode(cursor)));
+      if (decoded is! Map) return null;
+      final startedAt = decoded['startedAt'];
+      final id = decoded['id'];
+      if (startedAt is! String || id is! String || id.isEmpty) return null;
+      return _TripCursor(startedAt: startedAt, id: id);
+    } on Object {
+      throw ArgumentError.value(cursor, 'cursor', 'Invalid Trip-page cursor.');
+    }
+  }
+
+  static String _encodeLegCursor(int legNumber) => base64Url
+      .encode(utf8.encode(jsonEncode(<String, int>{'leg': legNumber})));
+
+  static int _decodeLegCursor(String? cursor) {
+    if (cursor == null || cursor.trim().isEmpty) return 0;
+    try {
+      final decoded = jsonDecode(utf8.decode(base64Url.decode(cursor)));
+      if (decoded is! Map || decoded['leg'] is! num) {
+        throw const FormatException();
+      }
+      final value = (decoded['leg'] as num).toInt();
+      if (value < 0) throw const FormatException();
+      return value;
+    } on Object {
+      throw ArgumentError.value(cursor, 'cursor', 'Invalid Trip-leg cursor.');
+    }
   }
 
   static _TrackCursor? _decodeTrackCursor(String? cursor) {
@@ -3675,7 +5900,11 @@ final class SqliteTrackRepository
             point.latitude < -90 ||
             point.latitude > 90 ||
             point.longitude < -180 ||
-            point.longitude > 180) {
+            point.longitude > 180 ||
+            (point.confidence != null &&
+                (!point.confidence!.isFinite ||
+                    point.confidence! < 0 ||
+                    point.confidence! > 1))) {
           throw const TrackingStorageException(
             code: 'invalid_derived_geometry_point',
             message: 'A derived coordinate is invalid for this run.',
@@ -3708,6 +5937,8 @@ final class SqliteTrackRepository
             'sequence': point.sequence,
             'latitude': point.latitude,
             'longitude': point.longitude,
+            'processor_confidence': point.confidence,
+            'matched': point.matched ? 1 : 0,
           },
         );
       }
@@ -3865,6 +6096,8 @@ final class SqliteTrackRepository
         sequence: (row['sequence']! as num).toInt(),
         latitude: (row['latitude']! as num).toDouble(),
         longitude: (row['longitude']! as num).toDouble(),
+        confidence: (row['processor_confidence'] as num?)?.toDouble(),
+        matched: row['matched'] != 0,
       );
       result[point.sourcePointId] = point;
     }
@@ -3924,6 +6157,125 @@ final class SqliteTrackRepository
   }
 
   @override
+  Future<TrackingQualitySummary> trackQualitySummary({
+    required TrackingOwner owner,
+    required String trackId,
+  }) async {
+    final track = await getTrackForOwner(owner, trackId);
+    if (track == null) {
+      throw const TrackingOwnershipException(
+        code: 'track_not_found_in_owner_scope',
+        message: 'The route is not available in the current owner scope.',
+      );
+    }
+    return _qualitySummaryForTrackIds(<String>[trackId]);
+  }
+
+  @override
+  Future<TrackingQualitySummary> tripQualitySummary({
+    required TrackingOwner owner,
+    required String tripId,
+  }) async {
+    final trip = await getTripForOwner(owner, tripId);
+    if (trip == null) {
+      throw const TrackingOwnershipException(
+        code: 'trip_not_found_in_owner_scope',
+        message: 'The Trip is not available in the current owner scope.',
+      );
+    }
+    final rows = await _db.query(
+      'trip_legs',
+      columns: <String>['track_id'],
+      where: 'trip_id = ?',
+      whereArgs: <Object?>[tripId],
+      orderBy: 'leg_number ASC',
+    );
+    return _qualitySummaryForTrackIds(
+      rows.map((row) => row['track_id']! as String).toList(growable: false),
+    );
+  }
+
+  Future<TrackingQualitySummary> _qualitySummaryForTrackIds(
+    List<String> trackIds,
+  ) async {
+    if (trackIds.isEmpty) {
+      return const TrackingQualitySummary(
+        rawCallbackCount: 0,
+        acceptedPointCount: 0,
+        rejectedPointCount: 0,
+        qualityRunCount: 0,
+        visibleQualityRunCount: 0,
+        continuityGapCount: 0,
+        lifecycleBoundaryCount: 0,
+        staleActivityCount: 0,
+      );
+    }
+    final placeholders = List<String>.filled(trackIds.length, '?').join(',');
+    final pointRows = await _db.rawQuery('''
+      SELECT accepted, horizontal_accuracy, activity_evidence_state
+      FROM track_points WHERE track_id IN ($placeholders)
+      ''', trackIds);
+    final qualityRows = await _db.rawQuery('''
+      SELECT severity FROM track_quality_runs
+      WHERE track_id IN ($placeholders)
+      ''', trackIds);
+    final gapRows = await _db.rawQuery('''
+      SELECT cause FROM track_continuity_gaps
+      WHERE track_id IN ($placeholders)
+      ''', trackIds);
+    final acceptedAccuracy = <double>[];
+    final rejectedAccuracy = <double>[];
+    var accepted = 0;
+    var rejected = 0;
+    var stale = 0;
+    for (final row in pointRows) {
+      final isAccepted = row['accepted'] == 1;
+      if (isAccepted) {
+        accepted += 1;
+      } else {
+        rejected += 1;
+      }
+      if (row['activity_evidence_state'] == ActivityEvidenceState.stale.name) {
+        stale += 1;
+      }
+      final accuracy = (row['horizontal_accuracy'] as num?)?.toDouble();
+      if (accuracy != null && accuracy.isFinite && accuracy >= 0) {
+        (isAccepted ? acceptedAccuracy : rejectedAccuracy).add(accuracy);
+      }
+    }
+    const lifecycleCauses = <String>{
+      'explicitPause',
+      'nativeInterruption',
+      'processRestart',
+      'permissionOrServiceLoss',
+      'overnightBoundary',
+    };
+    return TrackingQualitySummary(
+      rawCallbackCount: pointRows.length,
+      acceptedPointCount: accepted,
+      rejectedPointCount: rejected,
+      qualityRunCount: qualityRows.length,
+      visibleQualityRunCount:
+          qualityRows.where((row) => row['severity'] != 'informational').length,
+      continuityGapCount: gapRows.length,
+      lifecycleBoundaryCount:
+          gapRows.where((row) => lifecycleCauses.contains(row['cause'])).length,
+      staleActivityCount: stale,
+      acceptedAccuracyP50Meters: _percentile(acceptedAccuracy, 0.50),
+      acceptedAccuracyP95Meters: _percentile(acceptedAccuracy, 0.95),
+      rejectedAccuracyP50Meters: _percentile(rejectedAccuracy, 0.50),
+      rejectedAccuracyP95Meters: _percentile(rejectedAccuracy, 0.95),
+    );
+  }
+
+  static double? _percentile(List<double> values, double percentile) {
+    if (values.isEmpty) return null;
+    values.sort();
+    final index = ((values.length - 1) * percentile).round();
+    return values[index];
+  }
+
+  @override
   Future<void> close() async {
     await _database?.close();
     _database = null;
@@ -3936,6 +6288,13 @@ final class _TrackCursor {
     required this.startedAt,
     required this.id,
   });
+
+  final String startedAt;
+  final String id;
+}
+
+final class _TripCursor {
+  const _TripCursor({required this.startedAt, required this.id});
 
   final String startedAt;
   final String id;

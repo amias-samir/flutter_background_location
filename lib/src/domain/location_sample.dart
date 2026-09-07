@@ -1,4 +1,5 @@
 import 'activity_snapshot.dart';
+import 'motion_evidence.dart';
 import 'tracker_status.dart';
 
 /// What the operating system reported about mock/simulated location.
@@ -39,11 +40,16 @@ final class LocationSample {
     this.trackId,
     this.capturedActivity,
     this.capturedMotionState,
+    this.capturedMotionEvidence,
     this.nativeReceivedAt,
     this.providerTimeDeltaMsAtReceipt,
     this.monotonicFixNanos,
     this.monotonicReceivedNanos,
     this.monotonicDomainId,
+    this.captureGenerationId,
+    this.nativeSessionStartedAt,
+    this.nativeLifecycle,
+    this.samplingProfile,
   });
 
   /// Latitude in decimal degrees.
@@ -106,6 +112,9 @@ final class LocationSample {
   /// Native moving/stationary state captured with this fix.
   final MotionState? capturedMotionState;
 
+  /// Bounded sensor-fusion decision captured with this fix, when available.
+  final MotionEvidenceSnapshot? capturedMotionEvidence;
+
   /// Wall-clock time at which the native callback received this fix.
   final DateTime? nativeReceivedAt;
 
@@ -120,6 +129,18 @@ final class LocationSample {
 
   /// Opaque boot/process clock domain for safe monotonic comparisons.
   final String? monotonicDomainId;
+
+  /// Opaque identity of one uninterrupted native provider session.
+  final String? captureGenerationId;
+
+  /// UTC time at which that native capture generation began.
+  final DateTime? nativeSessionStartedAt;
+
+  /// Native lifecycle attached to this journaled callback.
+  final TrackerLifecycle? nativeLifecycle;
+
+  /// Native sampling profile attached to this journaled callback.
+  final SamplingProfile? samplingProfile;
 
   /// Three-state interpretation of the available mock-location evidence.
   MockLocationAssessment get mockAssessment {
@@ -151,6 +172,9 @@ final class LocationSample {
         map.containsKey('activityConfidence');
     final rawMotion =
         map['motionState'] ?? map['trackingProfile'] ?? map['samplingProfile'];
+    final rawLifecycle = map['nativeLifecycle']?.toString().toLowerCase();
+    final rawSampling = map['samplingProfile']?.toString().toLowerCase();
+    final rawMotionEvidence = map['motionEvidence'];
 
     return LocationSample(
       latitude: number('lat') ?? number('latitude') ?? double.nan,
@@ -180,22 +204,31 @@ final class LocationSample {
       monotonicFixNanos: (map['monotonicFixNanos'] as num?)?.toInt(),
       monotonicReceivedNanos: (map['monotonicReceivedNanos'] as num?)?.toInt(),
       monotonicDomainId: map['monotonicDomainId'] as String?,
-      capturedActivity: hasActivity
-          ? ActivitySnapshot(
-              type: trackingActivityTypeFromValue(map['activityType']),
-              confidence: ((map['activityConfidence'] as num?)?.round() ?? 0)
-                  .clamp(0, 100),
-              recordedAt: timestamp(
-                map['activityTimestamp'],
-                fallback: capturedAt,
+      captureGenerationId: map['captureGenerationId'] as String?,
+      nativeSessionStartedAt: map['nativeSessionStartedAt'] == null
+          ? null
+          : timestamp(map['nativeSessionStartedAt']),
+      nativeLifecycle:
+          TrackerLifecycle.values.cast<TrackerLifecycle?>().firstWhere(
+                (candidate) => candidate?.name == rawLifecycle,
+                orElse: () => null,
               ),
-            )
-          : null,
+      samplingProfile: switch (rawSampling) {
+        'stationary' => SamplingProfile.stationary,
+        'moving' => SamplingProfile.moving,
+        _ => null,
+      },
+      capturedActivity: hasActivity ? ActivitySnapshot.fromMap(map) : null,
       capturedMotionState: switch (rawMotion?.toString().toLowerCase()) {
         'moving' => MotionState.moving,
         'stationary' => MotionState.stationary,
         _ => null,
       },
+      capturedMotionEvidence: rawMotionEvidence is Map
+          ? MotionEvidenceSnapshot.fromMap(
+              rawMotionEvidence.cast<Object?, Object?>(),
+            )
+          : null,
     );
   }
 }

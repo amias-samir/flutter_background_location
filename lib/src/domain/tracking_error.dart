@@ -130,6 +130,20 @@ final class TrackingStorageException extends TrackingException {
   });
 }
 
+/// A multi-day Trip lifecycle command failed with a stable conflict code.
+final class TrackingTripException extends TrackingException {
+  const TrackingTripException({
+    required super.code,
+    required super.message,
+    this.tripId,
+    super.recoveryAction = TrackingRecoveryActions.retry,
+    super.cause,
+  });
+
+  /// Verified same-owner Trip identity, when safe to reveal.
+  final String? tripId;
+}
+
 /// A route export, destination, or share preparation operation failed.
 final class TrackingExportException extends TrackingException {
   const TrackingExportException({

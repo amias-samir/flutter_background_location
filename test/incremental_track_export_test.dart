@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_background_location_tracker/src/domain/export_models.dart';
 import 'package:flutter_background_location_tracker/src/application/derived_geometry_service.dart';
 import 'package:flutter_background_location_tracker/src/domain/derived_geometry.dart';
+import 'package:flutter_background_location_tracker/src/domain/route_geometry.dart';
 import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_error.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_start.dart';
@@ -249,6 +250,55 @@ void main() {
     expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 500)));
     expect(sink.aborted, isTrue);
     expect(sink.committed, isFalse);
+  });
+
+  test('streaming and legacy exporters agree in every continuity mode',
+      () async {
+    final trackId = await harness.createActiveTrack(trackId: 'mode-parity');
+    await harness.append(trackId: trackId, latitude: 0, longitude: 0);
+    await harness.append(trackId: trackId, latitude: 0, longitude: 0.001);
+    await harness.repository.pauseTrack(trackId, reason: 'explicit_pause');
+    await harness.repository.prepareResume(trackId);
+    await harness.repository.markTrackActive(trackId);
+    await harness.append(trackId: trackId, latitude: 1, longitude: 1);
+    await harness.append(trackId: trackId, latitude: 1, longitude: 1.001);
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+    const owner = TrackingOwner(userId: 'user-1', organizationId: 'org-1');
+    final legacy = TrackExportService(
+      repository: harness.repository,
+      fileWriter: _UnusedWriter(),
+    );
+
+    for (final continuity in RouteGeometryContinuity.values) {
+      for (final format in TrackExportFormat.values) {
+        final options = TrackExportOptions(geometryContinuity: continuity);
+        final artifact = await legacy.renderTrack(
+          trackId: trackId,
+          format: format,
+          options: options,
+        );
+        late _MemoryIncrementalSink sink;
+        final result = await IncrementalTrackExportService(
+          repository: harness.repository,
+          pointPageSize: 1,
+          segmentPageSize: 1,
+          sinkFactory: () => sink = _MemoryIncrementalSink(),
+        )
+            .start(
+              owner: owner,
+              trackId: trackId,
+              format: format,
+              options: options,
+            )
+            .result;
+
+        expect(result.sourceSegmentCount, artifact.sourceSegmentCount);
+        expect(result.geometryPartCount, artifact.geometryPartCount);
+        expect(result.gapCount, artifact.gapCount);
+        expect(result.inferredConnectorCount, artifact.inferredConnectorCount);
+        expect(sink.contents, isNotEmpty);
+      }
+    }
   });
 
   test('Q1-05 V2 export selects and labels immutable derived geometry',
