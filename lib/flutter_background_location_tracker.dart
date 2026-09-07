@@ -32,6 +32,7 @@ export 'src/application/motion_evidence_reducer.dart';
 export 'src/application/tracking_privacy_service.dart';
 export 'src/application/route_geometry_assembler.dart';
 export 'src/application/uncertainty_route_smoother.dart';
+export 'src/conversion/route_format_converter.dart';
 export 'src/domain/activity_snapshot.dart';
 export 'src/domain/adaptive_battery.dart';
 export 'src/domain/capability_report.dart';

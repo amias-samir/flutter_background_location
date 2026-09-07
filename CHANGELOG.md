@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.3
 
 - Added schema 14 distance repair so same-segment accepted geometry is counted
   even when rejected callbacks occurred between anchors; inferred lifecycle
