@@ -70,4 +70,23 @@ abstract final class NativeTrackingCapabilities {
   static const streamingExportV2 = 'streaming_export_v2';
   static const trackScopedNativeClear = 'track_scoped_native_clear';
   static const iosSignificantChangeRecovery = 'ios_significant_change_recovery';
+
+  /// Native omits unknown kinematics and invalid altitudes instead of sending
+  /// sentinel values. Dart normalizes payloads either way.
+  static const normalizedLocationValidity = 'normalized_location_validity';
+
+  /// Nested payload values such as motion evidence survive journal replay.
+  static const journalNestedJsonPayload = 'journal_nested_json_payload';
+
+  /// The location stream honors `replayOnListen: none`; other listeners get
+  /// the backlog replayed in pages.
+  static const listenReplayControl = 'listen_replay_control';
+
+  /// iOS acquires fresh fixes with a bounded in-place accuracy burst instead
+  /// of `requestLocation()`, which does nothing while updates run.
+  static const iosProbeBurst = 'ios_probe_burst';
+
+  /// Native status is a liveness tick on the fix path instead of an echo of
+  /// every fix; Dart publishes status after each commit.
+  static const statusFixEchoControl = 'status_fix_echo_control';
 }

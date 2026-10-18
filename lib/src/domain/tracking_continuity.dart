@@ -1,4 +1,5 @@
 import 'tracker_status.dart';
+import 'tracking_configuration_epoch.dart';
 
 /// Why a meaningful gap exists between route-geometry anchors.
 ///
@@ -108,6 +109,7 @@ final class TrackingContinuityEvidence {
     this.explicitBoundaryCause,
     this.acceptedGeometryGap,
     this.rawReceiptGap,
+    this.runtimeConfigurationBoundary = false,
   });
 
   /// Whether the current point passed the canonical geometry-quality policy.
@@ -160,6 +162,14 @@ final class TrackingContinuityEvidence {
 
   /// Native receipt gap between consecutive raw callbacks.
   final Duration? rawReceiptGap;
+
+  /// Whether this is the first accepted point of a configuration epoch that a
+  /// runtime update activated after the previous accepted point, within the
+  /// accepted-geometry gap threshold.
+  ///
+  /// A runtime update restarts the native provider, so the capture generation
+  /// changes even though the route never stopped.
+  final bool runtimeConfigurationBoundary;
 }
 
 /// Versioned topology decision for one accepted-geometry gap.
@@ -254,17 +264,67 @@ final class TrackingContinuityGap {
 final class TrackingContinuityClassifier {
   const TrackingContinuityClassifier({
     this.policy = TrackingContinuityPolicy.conservative,
-    this.policyVersion = 2,
+    this.policyVersion = TrackingPolicyVersions.continuityPolicy,
   }) : assert(policyVersion > 0);
 
   /// Fallback policy for incomplete evidence.
   final TrackingContinuityPolicy policy;
 
-  /// Version persisted with every durable gap decision.
+  /// Requested classifier version, normally the version recorded by the
+  /// route's active configuration epoch. Durable gap decisions record the
+  /// version actually applied by
+  /// [TrackingPolicyVersions.resolveContinuityPolicy].
   final int policyVersion;
 
   /// Classifies one already-detected accepted-geometry gap.
   TrackingContinuityDecision classify(TrackingContinuityEvidence evidence) {
+    final applied =
+        TrackingPolicyVersions.resolveContinuityPolicy(policyVersion);
+    if (applied != policyVersion) {
+      return TrackingContinuityClassifier(
+        policy: policy,
+        policyVersion: applied,
+      ).classify(evidence);
+    }
+    return switch (applied) {
+      2 => _classifyVersion2(evidence),
+      3 => _classifyVersion3(evidence),
+      _ => throw StateError('Continuity policy $applied has no classifier.'),
+    };
+  }
+
+  /// Version 2 plus continuity across runtime configuration updates.
+  ///
+  /// The provider restart that applies a runtime update changes the capture
+  /// generation inside one live route, which version 2 splits as a native
+  /// interruption. Version 3 keeps the segment when nothing else (a process
+  /// restart, an explicit boundary, or a lost permission or service) explains
+  /// the gap.
+  TrackingContinuityDecision _classifyVersion3(
+    TrackingContinuityEvidence evidence,
+  ) {
+    if (evidence.currentAcceptedForGeometry &&
+        evidence.runtimeConfigurationBoundary &&
+        evidence.explicitBoundaryCause == null &&
+        evidence.permissionAndServiceAvailable != false &&
+        evidence.nativeLifecycle == TrackerLifecycle.tracking &&
+        _sameKnownValues(evidence.expectedTrackId, evidence.currentTrackId) &&
+        !_differentKnownValues(
+          evidence.previousMonotonicDomainId,
+          evidence.currentMonotonicDomainId,
+        )) {
+      return _retain(
+        evidence.hasInterveningRejectedFixes
+            ? TrackingGapCause.acceptedFixRejectionRun
+            : TrackingGapCause.unknown,
+      );
+    }
+    return _classifyVersion2(evidence);
+  }
+
+  TrackingContinuityDecision _classifyVersion2(
+    TrackingContinuityEvidence evidence,
+  ) {
     // A rejected point may be retained as diagnostic evidence, but it can
     // never create, close, or switch a canonical segment.
     if (!evidence.currentAcceptedForGeometry) {

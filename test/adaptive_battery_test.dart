@@ -34,6 +34,64 @@ void main() {
     expect(engine.currentConfig.accuracy, TrackingAccuracy.high);
   });
 
+  test('FIX-04 adaptive proposals keep every non-sampling host field', () {
+    const hostConfig = TrackingConfig(
+      captureIntent: RouteCaptureIntent.walking,
+      motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
+      activityFreshnessThreshold: Duration(seconds: 50),
+      staleActivityFallback: StaleActivityFallback.preserveCurrentProfile,
+      unknownMotionFallback: UnknownMotionFallback.preserveCurrentProfile,
+      motionEvidenceFreshness: Duration(seconds: 40),
+      sensorProbeDuration: Duration(seconds: 3),
+      sensorProbeCooldown: Duration(seconds: 30),
+      sensorProbeMaximumDurationPerHour: Duration(minutes: 2),
+    );
+    final engine = AdaptiveBatteryPolicyEngine(
+      staticConfig: hostConfig,
+      policy: const AdaptiveBatteryPolicy(version: 1, bounds: relaxedBounds),
+    );
+
+    final proposed = engine
+        .evaluate(AdaptiveBatteryObservation(
+          observedAt: DateTime.utc(2026, 8, 26),
+          batteryPercent: 10,
+          charging: false,
+        ))
+        .proposedConfig;
+
+    expect(proposed.accuracy, TrackingAccuracy.low);
+    expect(proposed.captureIntent, RouteCaptureIntent.walking);
+    expect(proposed.motionFusionMode, MotionFusionMode.lowPowerSensorFusion);
+    expect(proposed.activityFreshnessThreshold, const Duration(seconds: 50));
+    expect(
+      proposed.staleActivityFallback,
+      StaleActivityFallback.preserveCurrentProfile,
+    );
+    expect(
+      proposed.unknownMotionFallback,
+      UnknownMotionFallback.preserveCurrentProfile,
+    );
+    expect(proposed.motionEvidenceFreshness, const Duration(seconds: 40));
+    expect(proposed.sensorProbeDuration, const Duration(seconds: 3));
+    expect(proposed.sensorProbeCooldown, const Duration(seconds: 30));
+    expect(
+      proposed.sensorProbeMaximumDurationPerHour,
+      const Duration(minutes: 2),
+    );
+    // Walking capture keeps its dense moving sampling under any preset.
+    expect(
+      proposed.movingInterval,
+      TrackingConfig(
+        accuracy: TrackingAccuracy.low,
+        captureIntent: RouteCaptureIntent.walking,
+      ).movingInterval,
+    );
+    expect(
+      proposed.maximumAcceptedAccuracyMeters,
+      hostConfig.maximumAcceptedAccuracyMeters,
+    );
+  });
+
   test('B1-04 fidelity bounds prevent implicit degradation', () {
     final engine = AdaptiveBatteryPolicyEngine(
       staticConfig: staticConfig,

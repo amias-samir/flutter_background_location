@@ -107,6 +107,8 @@ final class TrackPoint {
   final DateTime? nativeReceivedAt;
   final int? providerTimeDeltaMsAtReceipt;
   final int? monotonicFixNanos;
+
+  /// See [LocationSample.monotonicReceivedNanos]; keep it on the device.
   final int? monotonicReceivedNanos;
   final String? monotonicDomainId;
   final String? captureGenerationId;

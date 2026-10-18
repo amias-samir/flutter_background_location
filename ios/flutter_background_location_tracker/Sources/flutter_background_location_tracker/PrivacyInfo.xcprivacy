@@ -13,6 +13,15 @@
 				<string>CA92.1</string>
 			</array>
 		</dict>
+		<!-- ProcessInfo.systemUptime timestamps native fix receipt on a monotonic clock so route gaps are measured between in-app events; the value never leaves the device. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
 	</array>
 	<key>NSPrivacyCollectedDataTypes</key>
 	<array/>

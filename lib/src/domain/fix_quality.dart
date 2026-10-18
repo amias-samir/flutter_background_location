@@ -1,9 +1,8 @@
-import 'dart:math' as math;
-
 import 'location_sample.dart';
 import 'track_point.dart';
 import 'tracking_config.dart';
 import 'tracking_configuration_epoch.dart';
+import 'track_geodesy.dart';
 
 /// Stable issue codes emitted by the canonical fix-quality policy.
 abstract final class FixQualityIssue {
@@ -44,11 +43,32 @@ final class FixQualityDecision {
 
 /// Pure evaluator used as the canonical geometry acceptance policy.
 final class FixQualityPolicy {
-  const FixQualityPolicy(this.config);
+  /// Evaluates fixes under quality policy [version], normally the version
+  /// recorded by the route's active configuration epoch.
+  const FixQualityPolicy(
+    this.config, {
+    this.version = TrackingPolicyVersions.qualityPolicy,
+  });
 
   final TrackingConfig config;
 
+  /// Requested policy version. Decisions report the version actually applied
+  /// by [TrackingPolicyVersions.resolveQualityPolicy].
+  final int version;
+
   FixQualityDecision evaluate({
+    required LocationSample sample,
+    required TrackPoint? previous,
+    required DateTime now,
+  }) {
+    final applied = TrackingPolicyVersions.resolveQualityPolicy(version);
+    return switch (applied) {
+      1 => _evaluateVersion1(sample: sample, previous: previous, now: now),
+      _ => throw StateError('Quality policy $applied has no evaluator.'),
+    };
+  }
+
+  FixQualityDecision _evaluateVersion1({
     required LocationSample sample,
     required TrackPoint? previous,
     required DateTime now,
@@ -166,7 +186,7 @@ final class FixQualityPolicy {
       acceptedForGeometry: rejection == null,
       acceptedForMotionEvidence: rejection == null && motionEligible,
       issues: issues,
-      policyVersion: TrackingPolicyVersions.qualityPolicy,
+      policyVersion: 1,
       qualityFlags: flags,
       rejectionReason: rejection,
     );
@@ -178,16 +198,11 @@ final class FixQualityPolicy {
     double latitude2,
     double longitude2,
   ) {
-    const radius = 6371008.8;
-    final lat1 = latitude1 * math.pi / 180;
-    final lat2 = latitude2 * math.pi / 180;
-    final deltaLatitude = (latitude2 - latitude1) * math.pi / 180;
-    final deltaLongitude = (longitude2 - longitude1) * math.pi / 180;
-    final a = math.sin(deltaLatitude / 2) * math.sin(deltaLatitude / 2) +
-        math.cos(lat1) *
-            math.cos(lat2) *
-            math.sin(deltaLongitude / 2) *
-            math.sin(deltaLongitude / 2);
-    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return TrackGeodesy.sphericalHaversineMeters(
+      latitude1,
+      longitude1,
+      latitude2,
+      longitude2,
+    );
   }
 }

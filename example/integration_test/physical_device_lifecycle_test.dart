@@ -132,7 +132,8 @@ double _acceptedGeometryDistance(TrackBundle bundle) {
 }
 
 double _distanceMeters(TrackPoint from, TrackPoint to) {
-  const radius = 6371000.0;
+  // Same mean radius as the package's measured route distance.
+  const radius = 6371008.8;
   final latitudeDelta = _radians(to.latitude - from.latitude);
   final longitudeDelta = _radians(to.longitude - from.longitude);
   final fromLatitude = _radians(from.latitude);

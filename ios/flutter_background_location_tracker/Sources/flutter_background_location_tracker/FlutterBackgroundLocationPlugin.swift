@@ -122,7 +122,11 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
       case "startTrackingV2":
         executeLeasedCommand(arguments: arguments, result: result) { leasedResult in
           guard let trackId = arguments["trackId"] as? String else {
-            leasedResult(FlutterError(code: "invalid_track_id", message: nil, details: nil))
+            leasedResult(FlutterError(
+              code: "invalid_track_id",
+              message: "startTracking requires a non-empty trackId.",
+              details: nil
+            ))
             return
           }
           self.service.start(
@@ -250,13 +254,13 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         FlutterError(
           code: error.code,
           message: error.localizedDescription,
-          details: service.stateMap()
+          details: redactedCommandState()
         ))
     } catch {
       result(
         FlutterError(
           code: "ios_error",
-          message: error.localizedDescription,
+          message: Self.safeErrorMessage("The iOS tracking call failed.", error),
           details: nil
         ))
     }
@@ -289,7 +293,7 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
     } catch {
       result(FlutterError(
         code: "native_state_persistence_failed",
-        message: error.localizedDescription,
+        message: Self.safeErrorMessage("Could not persist the native command lease.", error),
         details: redactedCommandState()
       ))
     }
@@ -323,7 +327,11 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
       result(commandError(rejection))
       return
     } catch {
-      result(FlutterError(code: "ios_error", message: error.localizedDescription, details: nil))
+      result(FlutterError(
+        code: "ios_error",
+        message: Self.safeErrorMessage("Could not reserve the native command.", error),
+        details: nil
+      ))
       return
     }
     if permit.replayed {
@@ -349,7 +357,7 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
       } catch {
         result(FlutterError(
           code: "native_state_persistence_failed",
-          message: error.localizedDescription,
+          message: Self.safeErrorMessage("Could not persist the native command result.", error),
           details: self.redactedCommandState()
         ))
       }
@@ -358,6 +366,12 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
 
   private func commandError(_ rejection: NativeCommandCoordinator.Rejection) -> FlutterError {
     FlutterError(code: rejection.code, message: rejection.message, details: redactedCommandState())
+  }
+
+  /// Developer-facing failure text that names the error domain and code but
+  /// never echoes the platform description, which can carry paths or identifiers.
+  static func safeErrorMessage(_ summary: String, _ error: Error) -> String {
+    "\(summary) (\(redactedErrorSummary(error)))"
   }
 
   private func redactedCommandState() -> [String: Any] {
@@ -397,13 +411,13 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         FlutterError(
           code: error.code,
           message: error.localizedDescription,
-          details: service.stateMap()
+          details: redactedCommandState()
         ))
     case .failure(let error):
       result(
         FlutterError(
           code: "ios_error",
-          message: error.localizedDescription,
+          message: Self.safeErrorMessage("The iOS tracking call failed.", error),
           details: nil
         ))
     }
@@ -420,9 +434,12 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         "paged_journal",
         "byte_bounded_journal",
         "native_journal_diagnostics",
-        "track_scoped_native_clear"
-        ,"command_lease",
-        "ios_significant_change_recovery"
+        "track_scoped_native_clear",
+        "command_lease",
+        "ios_significant_change_recovery",
+        "normalized_location_validity",
+        "journal_nested_json_payload",
+        "ios_probe_burst",
       ],
     ]
   }

@@ -59,6 +59,8 @@ android {
         implementation "androidx.core:core-ktx:1.13.1"
         implementation "com.google.android.gms:play-services-location:21.3.0"
         testImplementation "junit:junit:4.13.2"
+        // android.jar only stubs org.json; unit tests need a real implementation.
+        testImplementation "org.json:json:20240303"
     }
 }
 

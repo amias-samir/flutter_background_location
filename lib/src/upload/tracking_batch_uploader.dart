@@ -80,7 +80,10 @@ final class TrackingBatchUploader {
       _outbox.enqueueTrackCompletion(trackId);
 
   /// Discovers unfinished point and completion work, including after restart.
-  Future<void> tryDrainAll() async {
+  ///
+  /// Returns whether any work was found, so callers can stop polling an
+  /// empty outbox.
+  Future<bool> tryDrainAll() async {
     final scope = owner;
     final trackIds = scope == null
         ? await _outbox.pendingUploadTrackIds()
@@ -105,6 +108,7 @@ final class TrackingBatchUploader {
     if (firstError != null) {
       Error.throwWithStackTrace(firstError!, firstStackTrace!);
     }
+    return trackIds.isNotEmpty;
   }
 
   Future<void> tryDrain(String trackId) async {

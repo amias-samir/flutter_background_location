@@ -26,6 +26,7 @@ import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 import 'track_repository.dart';
 import 'trip_repository.dart';
+import '../domain/track_geodesy.dart';
 
 /// Configures connection-scoped SQLite behavior used by the track repository.
 ///
@@ -35,6 +36,10 @@ Future<void> configureTrackDatabase(Database database) async {
   await database.execute('PRAGMA foreign_keys = ON');
   await database.rawQuery('PRAGMA busy_timeout = 5000');
   await database.rawQuery('PRAGMA journal_mode = WAL');
+  // Native fixes are acknowledged after the commit returns, so a commit must
+  // survive power loss. WAL with NORMAL (Android's framework default) may
+  // roll back the newest commits after a power cut; FULL syncs the WAL first.
+  await database.execute('PRAGMA synchronous = FULL');
 }
 
 final class SqliteTrackRepository
@@ -45,6 +50,7 @@ final class SqliteTrackRepository
         PaginatedTrackRepository,
         StreamingTrackRepository,
         ConfigurationEpochRepository,
+        ActiveConfigurationEpochRepository,
         MutableConfigurationEpochRepository,
         ContinuityTrackRepository,
         GapSegmentRepository,
@@ -102,6 +108,22 @@ final class SqliteTrackRepository
   final StreamController<Track?> _currentTrackController =
       StreamController<Track?>.broadcast();
   Track? _currentTrackSnapshot;
+  int _healthEventsSincePrune = 0;
+
+  /// Health event types that prove a lifecycle boundary. Legacy gap
+  /// classification reads them, so they are never pruned.
+  static const _gapEvidenceHealthEventTypes = <String>[
+    'native_tracker_interrupted',
+    'native_tracker_failed',
+    'previous_session_interrupted',
+    'termination_recovery_started_gap_possible',
+    'authorization_changed',
+  ];
+
+  /// Newest diagnostic health events kept per track (and for events without a
+  /// track); pruning runs after every [_healthEventPruneInterval] inserts.
+  static const _maximumDiagnosticHealthEventsPerTrack = 500;
+  static const _healthEventPruneInterval = 50;
 
   Database? _database;
 
@@ -140,7 +162,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 14,
+        version: 15,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -152,7 +174,7 @@ final class SqliteTrackRepository
     // Trip completion outbox without a destructive version bump.
     await _createTripUploadOutboxSchema(_db);
     await _createSchema13EvidenceTables(_db);
-    await _repairInitialConfigurationEpochs(_db);
+    await _db.transaction(_repairInitialConfigurationEpochs);
     await _emitCurrentTrack();
   }
 
@@ -554,6 +576,33 @@ final class SqliteTrackRepository
     if (oldVersion < 14) {
       await _repairMeasuredDistances(database);
     }
+    if (oldVersion < 15) {
+      await _ensureEpochContinuityPolicyColumn(database);
+    }
+  }
+
+  /// Schema 15 records the continuity classifier version on each epoch so a
+  /// later classifier applies only to epochs created under it.
+  ///
+  /// Existing epochs keep NULL, read as
+  /// [TrackingPolicyVersions.legacyContinuityPolicy]. The check is idempotent
+  /// because sqflite lowers the stored version without a downgrade callback,
+  /// so a downgraded database can run this branch again.
+  static Future<void> _ensureEpochContinuityPolicyColumn(
+    DatabaseExecutor executor,
+  ) async {
+    final columns = await executor.rawQuery(
+      'PRAGMA table_info(tracking_configuration_epochs)',
+    );
+    if (columns.isEmpty ||
+        columns.any((row) => row['name'] == 'continuity_policy_version')) {
+      return;
+    }
+    await executor.execute(
+      'ALTER TABLE tracking_configuration_epochs '
+      'ADD COLUMN continuity_policy_version INTEGER '
+      'CHECK(continuity_policy_version IS NULL OR continuity_policy_version > 0)',
+    );
   }
 
   /// Repairs distance totals created by continuity policy version 1.
@@ -1139,6 +1188,8 @@ final class SqliteTrackRepository
         created_at TEXT NOT NULL,
         activation_sequence INTEGER NOT NULL,
         activated_at TEXT NOT NULL,
+        continuity_policy_version INTEGER
+          CHECK(continuity_policy_version IS NULL OR continuity_policy_version > 0),
         FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
         UNIQUE(track_id, epoch_number),
         UNIQUE(track_id, activation_sequence),
@@ -1161,6 +1212,12 @@ final class SqliteTrackRepository
     ''');
   }
 
+  /// Creates epoch 1 for routes recorded before epochs existed.
+  ///
+  /// Only tracks without epoch 1 are read, so a normal startup does no
+  /// per-track work. Repaired epochs carry the legacy policy labels and only
+  /// the repaired track's own points are linked. Run it inside a transaction
+  /// so an epoch and its point links commit together.
   static Future<void> _repairInitialConfigurationEpochs(
     DatabaseExecutor executor,
   ) async {
@@ -1177,9 +1234,21 @@ final class SqliteTrackRepository
     );
     if (epochTables.isEmpty) return;
 
-    final tracks = await executor.query(
-      'tracks',
-      columns: <String>['id', 'configuration_json', 'started_at'],
+    final tracks = await executor.rawQuery('''
+      SELECT id, configuration_json, started_at
+      FROM tracks
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM tracking_configuration_epochs AS epoch
+        WHERE epoch.track_id = tracks.id AND epoch.epoch_number = 1
+      )
+    ''');
+    if (tracks.isEmpty) return;
+    final pointColumns = await executor.rawQuery(
+      'PRAGMA table_info(track_points)',
+    );
+    final linksPoints = pointColumns.any(
+      (row) => row['name'] == 'configuration_epoch_id',
     );
     for (final row in tracks) {
       final trackId = row['id'] as String?;
@@ -1192,55 +1261,43 @@ final class SqliteTrackRepository
           startedAt == null) {
         continue;
       }
+      final TrackingConfig resolved;
       try {
-        final resolved = TrackingConfig.fromJson(configurationJson);
+        resolved = TrackingConfig.fromJson(configurationJson);
         resolved.validate(context: 'Persisted TrackingConfig');
-        await executor.insert(
-          'tracking_configuration_epochs',
-          <String, Object?>{
-            'id': _initialConfigurationEpochId(trackId),
-            'track_id': trackId,
-            'epoch_number': 1,
-            'resolved_configuration_json': resolved.toJson(),
-            'preset_definition_version':
-                TrackingPolicyVersions.presetDefinition,
-            'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
-            'created_at': startedAt,
-            'activation_sequence': 1,
-            'activated_at': startedAt,
-          },
-          conflictAlgorithm: ConflictAlgorithm.ignore,
-        );
       } on Object {
         // Malformed or incomplete legacy configuration is unknown evidence.
         // Do not infer a default epoch for it.
+        continue;
+      }
+      final epochId = _initialConfigurationEpochId(trackId);
+      await executor.insert(
+        'tracking_configuration_epochs',
+        <String, Object?>{
+          'id': epochId,
+          'track_id': trackId,
+          'epoch_number': 1,
+          'resolved_configuration_json': resolved.toJson(),
+          'preset_definition_version':
+              TrackingPolicyVersions.legacyPresetDefinition,
+          'quality_policy_version': TrackingPolicyVersions.legacyQualityPolicy,
+          'created_at': startedAt,
+          'activation_sequence': 1,
+          'activated_at': startedAt,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      if (linksPoints) {
+        await executor.rawUpdate(
+          '''
+          UPDATE track_points
+          SET configuration_epoch_id = ?
+          WHERE track_id = ? AND configuration_epoch_id IS NULL
+          ''',
+          <Object?>[epochId, trackId],
+        );
       }
     }
-
-    final pointColumns = await executor.rawQuery(
-      'PRAGMA table_info(track_points)',
-    );
-    if (!pointColumns.any(
-      (row) => row['name'] == 'configuration_epoch_id',
-    )) {
-      return;
-    }
-    await executor.rawUpdate('''
-      UPDATE track_points
-      SET configuration_epoch_id = (
-        SELECT epoch.id
-        FROM tracking_configuration_epochs AS epoch
-        WHERE epoch.track_id = track_points.track_id
-          AND epoch.epoch_number = 1
-      )
-      WHERE configuration_epoch_id IS NULL
-        AND EXISTS (
-          SELECT 1
-          FROM tracking_configuration_epochs AS epoch
-          WHERE epoch.track_id = track_points.track_id
-            AND epoch.epoch_number = 1
-        )
-    ''');
   }
 
   static String _initialConfigurationEpochId(String trackId) =>
@@ -1365,6 +1422,7 @@ final class SqliteTrackRepository
           'resolved_configuration_json': config.toJson(),
           'preset_definition_version': TrackingPolicyVersions.presetDefinition,
           'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+          'continuity_policy_version': TrackingPolicyVersions.continuityPolicy,
           'created_at': _timestamp(now),
           'activation_sequence': 1,
           'activated_at': _timestamp(now),
@@ -1995,7 +2053,8 @@ final class SqliteTrackRepository
                 : _timestamp(request.sample.nativeSessionStartedAt!),
         'native_lifecycle': request.sample.nativeLifecycle?.name,
         'sampling_profile': request.sample.samplingProfile?.name,
-        'quality_policy_version': configurationEpoch.qualityPolicyVersion,
+        'quality_policy_version': request.qualityPolicyVersion ??
+            configurationEpoch.qualityPolicyVersion,
         'accepted': request.accepted ? 1 : 0,
         'quality_flags': request.qualityFlags,
         'rejection_reason': request.rejectionReason,
@@ -2120,7 +2179,12 @@ final class SqliteTrackRepository
         }
       }
 
-      if (request.accepted && previousAccepted != null) {
+      // A rejected run needs a raw point after the previous accepted one;
+      // without one the scan below would find nothing.
+      if (request.accepted &&
+          previousAccepted != null &&
+          previousRaw != null &&
+          previousRaw.sequence > previousAccepted.sequence) {
         await _persistQualityRun(
           transaction,
           trackId: request.trackId,
@@ -2129,7 +2193,8 @@ final class SqliteTrackRepository
           afterSequence: sequence,
           maximumAcceptedAccuracyMeters:
               configurationEpoch.resolvedConfig.maximumAcceptedAccuracyMeters,
-          policyVersion: configurationEpoch.qualityPolicyVersion,
+          policyVersion: request.qualityPolicyVersion ??
+              configurationEpoch.qualityPolicyVersion,
           now: now,
         );
       }
@@ -2631,6 +2696,8 @@ final class SqliteTrackRepository
             'preset_definition_version':
                 TrackingPolicyVersions.presetDefinition,
             'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+            'continuity_policy_version':
+                TrackingPolicyVersions.continuityPolicy,
             'created_at': _timestamp(now),
             'activation_sequence': 1,
             'activated_at': _timestamp(now),
@@ -3625,6 +3692,27 @@ final class SqliteTrackRepository
   }
 
   @override
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(
+    String trackId,
+  ) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT epoch.*
+      FROM tracking_configuration_epochs AS epoch
+      JOIN tracks ON tracks.id = epoch.track_id
+      WHERE epoch.track_id = ?
+        AND epoch.activation_sequence <= tracks.next_sequence
+      ORDER BY epoch.activation_sequence DESC
+      LIMIT 1
+      ''',
+      <Object?>[trackId],
+    );
+    return rows.isEmpty
+        ? null
+        : TrackingConfigurationEpoch.fromDatabase(rows.single);
+  }
+
+  @override
   Future<TrackingConfigurationEpoch?> getConfigurationEpoch({
     required TrackingOwner owner,
     required String trackId,
@@ -3774,6 +3862,7 @@ final class SqliteTrackRepository
         'resolved_configuration_json': operation.proposedConfig.toJson(),
         'preset_definition_version': TrackingPolicyVersions.presetDefinition,
         'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+        'continuity_policy_version': TrackingPolicyVersions.continuityPolicy,
         'created_at': _timestamp(operation.createdAt),
         'activation_sequence': activationSequence,
         'activated_at': _timestamp(now),
@@ -4472,16 +4561,10 @@ final class SqliteTrackRepository
           WHERE health.track_id = after_segment.track_id
             AND health.occurred_at >= before_segment.started_at
             AND health.occurred_at <= after_segment.started_at
-            AND health.type IN (
-              'native_tracker_interrupted',
-              'native_tracker_failed',
-              'previous_session_interrupted',
-              'termination_recovery_started_gap_possible',
-              'authorization_changed'
-            )
+            AND health.type IN (${List<String>.filled(_gapEvidenceHealthEventTypes.length, '?').join(', ')})
         )
       ''',
-      <Object?>[trackId],
+      <Object?>[trackId, ..._gapEvidenceHealthEventTypes],
     );
     return rows.map((row) => row['after_segment_id']! as String).toSet();
   }
@@ -5153,14 +5236,42 @@ final class SqliteTrackRepository
     String? trackId,
     required String type,
     Map<String, Object?>? details,
-  }) =>
-      _db.insert('tracking_health_events', <String, Object?>{
-        'id': _idGenerator(),
-        'track_id': trackId,
-        'type': type,
-        'occurred_at': _timestamp(_clock()),
-        'details_json': details == null ? null : jsonEncode(details),
-      });
+  }) async {
+    await _db.insert('tracking_health_events', <String, Object?>{
+      'id': _idGenerator(),
+      'track_id': trackId,
+      'type': type,
+      'occurred_at': _timestamp(_clock()),
+      'details_json': details == null ? null : jsonEncode(details),
+    });
+    if (++_healthEventsSincePrune < _healthEventPruneInterval) return;
+    _healthEventsSincePrune = 0;
+    await _pruneDiagnosticHealthEvents(trackId);
+  }
+
+  /// Keeps the newest diagnostic events for [trackId] and every lifecycle
+  /// evidence event.
+  Future<void> _pruneDiagnosticHealthEvents(String? trackId) async {
+    final protected =
+        List<String>.filled(_gapEvidenceHealthEventTypes.length, '?')
+            .join(', ');
+    await _db.rawDelete(
+      '''
+      DELETE FROM tracking_health_events
+      WHERE id IN (
+        SELECT id FROM tracking_health_events
+        WHERE track_id IS ? AND type NOT IN ($protected)
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT -1 OFFSET ?
+      )
+      ''',
+      <Object?>[
+        trackId,
+        ..._gapEvidenceHealthEventTypes,
+        _maximumDiagnosticHealthEventsPerTrack,
+      ],
+    );
+  }
 
   static Future<Track> _requiredTrack(
     DatabaseExecutor executor,
@@ -5802,17 +5913,12 @@ final class SqliteTrackRepository
     double latitude2,
     double longitude2,
   ) {
-    const radius = 6371008.8;
-    final lat1 = latitude1 * math.pi / 180;
-    final lat2 = latitude2 * math.pi / 180;
-    final deltaLatitude = (latitude2 - latitude1) * math.pi / 180;
-    final deltaLongitude = (longitude2 - longitude1) * math.pi / 180;
-    final a = math.sin(deltaLatitude / 2) * math.sin(deltaLatitude / 2) +
-        math.cos(lat1) *
-            math.cos(lat2) *
-            math.sin(deltaLongitude / 2) *
-            math.sin(deltaLongitude / 2);
-    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return TrackGeodesy.sphericalHaversineMeters(
+      latitude1,
+      longitude1,
+      latitude2,
+      longitude2,
+    );
   }
 
   @override

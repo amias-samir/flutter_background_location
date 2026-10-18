@@ -87,7 +87,10 @@ final class TrackerStatus {
       (candidate) => candidate.name == normalized,
       orElse: () => TrackerLifecycle.idle,
     );
-    final timestamp = map['lastPointAt'] ?? map['timestamp'];
+    // Current natives always send `lastPointAt`, null before the first fix.
+    // Only natives that never sent the key fall back to the status time.
+    final timestamp =
+        map.containsKey('lastPointAt') ? map['lastPointAt'] : map['timestamp'];
     final rawMotionEvidence = map['motionEvidence'];
     return TrackerStatus(
       lifecycle: lifecycle,

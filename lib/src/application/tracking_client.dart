@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as path_util;
@@ -43,6 +44,7 @@ import '../upload/tracking_batch_uploader.dart';
 import 'motion_gate.dart';
 import 'derived_geometry_service.dart';
 import 'route_geometry_assembler.dart';
+import 'upload_threshold.dart';
 
 /// Low-level route tracking contract implemented by [TrackingClient].
 ///
@@ -369,6 +371,18 @@ class TrackingClient implements Tracking {
   TrackingSessionSnapshot? _currentSession;
   TrackingHealthSnapshot? _currentHealth;
   TrackPoint? _latestPoint;
+
+  /// Epoch whose recorded policy versions evaluate the active track's fixes.
+  TrackingConfigurationEpoch? _policyEpoch;
+
+  /// Committed native event IDs whose acknowledgement failed, oldest first.
+  ///
+  /// The fixes are already durable: the native journal keeps them until an
+  /// acknowledgement lands, and replay deduplicates committed events. They
+  /// are retried with the next commit instead of failing the route.
+  final LinkedHashSet<String> _deferredAcknowledgements =
+      LinkedHashSet<String>();
+  static const _maximumDeferredAcknowledgements = 2000;
   TrackingFixState _fixState = TrackingFixState.idle;
   DateTime? _lastNativeFixAt;
   DateTime? _lastJournaledAt;
@@ -473,8 +487,10 @@ class TrackingClient implements Tracking {
       );
     }
     await _store.initialize();
-    _currentTrackSubscription = _store.currentTrackStream.listen((_) {
-      unawaited(_publishSessionSnapshot());
+    // The repository emits the current track after every change, so the
+    // snapshot can use it instead of querying it again.
+    _currentTrackSubscription = _store.currentTrackStream.listen((track) {
+      unawaited(_publishSessionSnapshot(knownTrack: (track,)));
     });
     _exportFileWriter ??= PublicDownloadsExportWriter(
       directoryName: configuration.exportDirectoryName,
@@ -1389,6 +1405,7 @@ class TrackingClient implements Tracking {
         await epochStore.activateConfigurationUpdate(
           operationId: operation.id,
         );
+        _policyEpoch = null;
         if (track.status == TrackStatus.active) {
           await _tracker.resume(
             trackId: track.id,
@@ -1452,6 +1469,7 @@ class TrackingClient implements Tracking {
         final epoch = await epochStore.activateConfigurationUpdate(
           operationId: operation.id,
         );
+        _policyEpoch = null;
         await _tracker.resume(trackId: track.id, config: config);
         _motionGate = MotionGate(config);
         _acceptingLocations = true;
@@ -2047,7 +2065,7 @@ class TrackingClient implements Tracking {
       );
       final eventId = sample.eventId;
       if (eventId != null && point != null) {
-        await _tracker.acknowledgeLocations(<String>[eventId]);
+        await _acknowledgeCommitted(eventId, trackId: track.id);
       }
       return;
     }
@@ -2065,7 +2083,12 @@ class TrackingClient implements Tracking {
         ? _store as ContinuityTrackRepository
         : null;
     final previousRaw = await continuityStore?.findLastRawPoint(track.id);
-    final decision = FixQualityPolicy(track.config).evaluate(
+    final policyEpoch = await _policyEpochFor(track.id);
+    final decision = FixQualityPolicy(
+      track.config,
+      version: policyEpoch?.qualityPolicyVersion ??
+          TrackingPolicyVersions.qualityPolicy,
+    ).evaluate(
       sample: sample,
       previous: previousInSegment,
       now: _clock(),
@@ -2077,6 +2100,9 @@ class TrackingClient implements Tracking {
       previousAccepted: previousAccepted,
       previousRaw: previousRaw,
       currentSegmentId: segmentId,
+      continuityPolicyVersion: policyEpoch?.continuityPolicyVersion ??
+          TrackingPolicyVersions.continuityPolicy,
+      policyEpoch: policyEpoch,
     );
     final capturedActivity = sample.capturedActivity ??
         _recentActivityFor(sample.capturedAt) ??
@@ -2091,6 +2117,7 @@ class TrackingClient implements Tracking {
       accepted: decision.acceptedForGeometry,
       qualityFlags: decision.qualityFlags,
       rejectionReason: decision.rejectionReason,
+      qualityPolicyVersion: decision.policyVersion,
     );
     final appendResult = continuityStore == null
         ? PointAppendResult(
@@ -2103,6 +2130,10 @@ class TrackingClient implements Tracking {
             continuityDecision,
           );
     final point = appendResult.point;
+    if (point.configurationEpochId != policyEpoch?.id) {
+      // Another epoch covered this point; look it up again for the next fix.
+      _policyEpoch = null;
+    }
     final gap = appendResult.gap;
     if (gap != null) {
       await _safeHealthEvent(
@@ -2120,7 +2151,7 @@ class TrackingClient implements Tracking {
     _lastCommittedAt = _clock();
     final eventId = sample.eventId;
     if (eventId != null) {
-      await _tracker.acknowledgeLocations(<String>[eventId]);
+      await _acknowledgeCommitted(eventId, trackId: track.id);
     }
     if (!_pointController.isClosed) _pointController.add(point);
     _latestPoint = point;
@@ -2146,13 +2177,32 @@ class TrackingClient implements Tracking {
         motionEvidence: _currentStatus.motionEvidence,
       ),
     );
-    if (point.accepted && _batchUploader != null) {
+    if (point.accepted && !appendResult.duplicate && _batchUploader != null) {
       final updated = await _store.getTrack(track.id);
       if (updated != null &&
-          updated.acceptedPointCount % track.config.batchPointCount == 0) {
+          crossesUploadThreshold(
+            acceptedBefore: updated.acceptedPointCount - 1,
+            acceptedAfter: updated.acceptedPointCount,
+            batchPointCount: track.config.batchPointCount,
+          )) {
         unawaited(_triggerUpload(track.id));
       }
     }
+  }
+
+  /// The epoch that covers [trackId]'s next point, cached per track.
+  ///
+  /// Policy versions come from this epoch so a package upgrade never
+  /// reinterprets a route that is already recording. Repositories without
+  /// [ActiveConfigurationEpochRepository] are evaluated under the current
+  /// versions.
+  Future<TrackingConfigurationEpoch?> _policyEpochFor(String trackId) async {
+    final cached = _policyEpoch;
+    if (cached != null && cached.trackId == trackId) return cached;
+    if (_store case final ActiveConfigurationEpochRepository epochs) {
+      return _policyEpoch = await epochs.activeConfigurationEpoch(trackId);
+    }
+    return null;
   }
 
   TrackingContinuityDecision? _classifyContinuity({
@@ -2162,6 +2212,8 @@ class TrackingClient implements Tracking {
     required TrackPoint? previousAccepted,
     required TrackPoint? previousRaw,
     required String currentSegmentId,
+    required int continuityPolicyVersion,
+    required TrackingConfigurationEpoch? policyEpoch,
   }) {
     if (previousAccepted == null) return null;
     // Rejected callbacks are already retained as point-quality evidence. A
@@ -2208,9 +2260,15 @@ class TrackingClient implements Tracking {
     final callbackHealthy = rawReceiptGap == null ||
         rawReceiptGap <= track.config.callbackHealthWarningThreshold;
     final batchingObserved = acceptedGapDiagnostic && callbackHealthy;
+    final previousEpochId = previousAccepted.configurationEpochId;
+    final runtimeConfigurationBoundary = policyEpoch != null &&
+        policyEpoch.epochNumber > 1 &&
+        previousEpochId != null &&
+        previousEpochId != policyEpoch.id &&
+        !acceptedGapDiagnostic;
     return TrackingContinuityClassifier(
       policy: track.config.continuityPolicy,
-      policyVersion: TrackingPolicyVersions.continuityPolicy,
+      policyVersion: continuityPolicyVersion,
     ).classify(
       TrackingContinuityEvidence(
         currentAcceptedForGeometry: quality.acceptedForGeometry,
@@ -2234,6 +2292,7 @@ class TrackingClient implements Tracking {
             : null,
         acceptedGeometryGap: acceptedGap,
         rawReceiptGap: rawReceiptGap,
+        runtimeConfigurationBoundary: runtimeConfigurationBoundary,
       ),
     );
   }
@@ -2368,7 +2427,9 @@ class TrackingClient implements Tracking {
     unawaited(_publishSessionSnapshot());
   }
 
-  Future<void> _publishSessionSnapshot() async {
+  /// Publishes the session snapshot. [knownTrack] carries a current track
+  /// the caller already has (possibly none); otherwise it is queried.
+  Future<void> _publishSessionSnapshot({(Track?,)? knownTrack}) async {
     if (!_initialized || _disposed || _sessionController.isClosed) return;
     try {
       final readiness = _latestReadiness ??
@@ -2376,8 +2437,10 @@ class TrackingClient implements Tracking {
             await _tracker.permissions(),
             _capabilityReport ?? await _tracker.capabilities(),
           );
-      final currentTrack = await _store.findActiveTrack() ??
-          await _store.findLatestPausedTrack();
+      final currentTrack = knownTrack != null
+          ? knownTrack.$1
+          : await _store.findActiveTrack() ??
+              await _store.findLatestPausedTrack();
       final snapshot = TrackingSessionSnapshot(
         revision: ++_sessionRevision,
         observedAt: _clock(),
@@ -2443,6 +2506,12 @@ class TrackingClient implements Tracking {
     _healthWatchdogTimer = null;
   }
 
+  /// Arms a health deadline instead of a periodic snapshot.
+  ///
+  /// While fixes keep committing, the deadline only re-arms; the full health
+  /// snapshot (several native calls) runs after a quiet interval, which is
+  /// when staleness is worth reporting. Deadlines compare timestamps, because
+  /// Dart timers can be delayed while the device sleeps.
   void _startHealthWatchdog(TrackingConfig config) {
     _healthWatchdogTimer?.cancel();
     final expected = config.movingInterval > config.stationaryInterval
@@ -2451,9 +2520,25 @@ class TrackingClient implements Tracking {
     final interval = Duration(
       seconds: (expected.inSeconds * 2).clamp(30, 60),
     );
-    _healthWatchdogTimer = Timer.periodic(interval, (_) {
-      unawaited(_observeHealth());
-    });
+    final armedAt = _clock();
+    void onDeadline() {
+      _healthWatchdogTimer = null;
+      final committed = _lastCommittedAt;
+      final lastActivity =
+          committed != null && committed.isAfter(armedAt) ? committed : armedAt;
+      final quiet = _clock().difference(lastActivity);
+      if (quiet < interval) {
+        _healthWatchdogTimer = Timer(interval - quiet, onDeadline);
+        return;
+      }
+      unawaited(_observeHealth().whenComplete(() {
+        if (!_disposed && _healthWatchdogTimer == null) {
+          _healthWatchdogTimer = Timer(interval, onDeadline);
+        }
+      }));
+    }
+
+    _healthWatchdogTimer = Timer(interval, onDeadline);
   }
 
   Future<void> _observeHealth() async {
@@ -2475,14 +2560,29 @@ class TrackingClient implements Tracking {
     );
   }
 
-  void _startUploadRecoveryLoop() {
-    if (_batchUploader == null) return;
+  /// Retries leftover uploads while any exist.
+  ///
+  /// The delay doubles from [TrackingConfiguration.uploadRecoveryInterval]
+  /// toward 15 minutes. An empty outbox stops the loop, so an idle client no
+  /// longer wakes every 30 s; a failed upload or drain re-arms it. Per-track
+  /// failures are also retried by the uploader's own backoff.
+  void _startUploadRecoveryLoop([Duration? delay]) {
+    if (_batchUploader == null || _disposed) return;
+    final wait = delay ?? configuration.uploadRecoveryInterval;
     _uploadRecoveryTimer?.cancel();
-    _uploadRecoveryTimer = Timer.periodic(
-      configuration.uploadRecoveryInterval,
-      (_) => unawaited(_triggerAllUploads()),
-    );
+    _uploadRecoveryTimer = Timer(wait, () async {
+      _uploadRecoveryTimer = null;
+      if (!await _triggerAllUploads()) return;
+      final doubled = wait * 2;
+      _startUploadRecoveryLoop(
+        doubled > _maximumUploadRecoveryDelay
+            ? _maximumUploadRecoveryDelay
+            : doubled,
+      );
+    });
   }
+
+  static const _maximumUploadRecoveryDelay = Duration(minutes: 15);
 
   Future<void> _triggerUpload(String trackId) async {
     final uploader = _batchUploader;
@@ -2495,19 +2595,22 @@ class TrackingClient implements Tracking {
         type: 'upload_failed',
         details: <String, Object?>{'error': error.toString()},
       );
+      if (_uploadRecoveryTimer == null) _startUploadRecoveryLoop();
     }
   }
 
-  Future<void> _triggerAllUploads() async {
+  /// Drains every pending upload; returns whether work remains possible.
+  Future<bool> _triggerAllUploads() async {
     final uploader = _batchUploader;
-    if (uploader == null) return;
+    if (uploader == null) return false;
     try {
-      await uploader.tryDrainAll();
+      return await uploader.tryDrainAll();
     } catch (error) {
       await _safeHealthEvent(
         type: 'upload_recovery_failed',
         details: <String, Object?>{'error': error.toString()},
       );
+      return true;
     }
   }
 
@@ -2516,6 +2619,46 @@ class TrackingClient implements Tracking {
     _batchUploadTimer?.cancel();
     _batchUploadTimer = null;
     _batchUploadTrackId = null;
+  }
+
+  /// Acknowledges a committed native event, retrying earlier failures with it.
+  ///
+  /// Acknowledgement only frees native journal space; a failure never undoes
+  /// the commit, so it is deferred rather than reported as a failed route.
+  Future<void> _acknowledgeCommitted(
+    String eventId, {
+    required String trackId,
+  }) async {
+    final eventIds = <String>[..._deferredAcknowledgements, eventId];
+    try {
+      await _tracker.acknowledgeLocations(eventIds);
+    } on Object catch (error) {
+      final firstFailure = _deferredAcknowledgements.isEmpty;
+      _deferredAcknowledgements.add(eventId);
+      while (
+          _deferredAcknowledgements.length > _maximumDeferredAcknowledgements) {
+        // A dropped ID stays in the native journal; replay finds the event
+        // already committed and acknowledges it then.
+        _deferredAcknowledgements.remove(_deferredAcknowledgements.first);
+      }
+      if (firstFailure) {
+        await _safeHealthEvent(
+          trackId: trackId,
+          type: 'native_acknowledgement_deferred',
+          details: <String, Object?>{'errorType': error.runtimeType.toString()},
+        );
+      }
+      return;
+    }
+    if (_deferredAcknowledgements.isNotEmpty) {
+      final recovered = _deferredAcknowledgements.length;
+      _deferredAcknowledgements.clear();
+      await _safeHealthEvent(
+        trackId: trackId,
+        type: 'native_acknowledgement_recovered',
+        details: <String, Object?>{'recoveredCount': recovered},
+      );
+    }
   }
 
   Future<void> _safeHealthEvent({

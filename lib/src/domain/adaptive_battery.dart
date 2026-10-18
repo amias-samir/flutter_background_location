@@ -237,14 +237,13 @@ final class AdaptiveBatteryPolicyEngine {
 
   TrackingConfig _boundedConfig(TrackingAccuracy requested) {
     final least = _moreAccurate(requested, policy.bounds.leastAccurateProfile);
-    final preset = TrackingConfig(accuracy: least);
+    // Start from the host's configuration so capture intent, motion fusion,
+    // notifications, and every other policy field carry over unchanged.
+    final preset = staticConfig.withPreset(least);
     Duration capDuration(Duration value, Duration maximum) =>
         value > maximum ? maximum : value;
     int capInt(int value, int maximum) => value > maximum ? maximum : value;
-    return TrackingConfig(
-      accuracy: least,
-      locationAccuracy: preset.locationAccuracy,
-      stationaryLocationAccuracy: preset.stationaryLocationAccuracy,
+    return preset.copyWith(
       movingInterval: capDuration(
           preset.movingInterval, policy.bounds.maximumMovingInterval),
       movingDistanceFilterMeters: capInt(
@@ -259,29 +258,10 @@ final class AdaptiveBatteryPolicyEngine {
         preset.stationaryDistanceFilterMeters,
         policy.bounds.maximumStationaryDistanceFilterMeters,
       ),
+      // Adaptation changes sampling only; acceptance and first-fix policy
+      // stay the host's.
       maximumAcceptedAccuracyMeters: staticConfig.maximumAcceptedAccuracyMeters,
-      maximumPlausibleSpeedMetersPerSecond:
-          staticConfig.maximumPlausibleSpeedMetersPerSecond,
-      stationaryConfirmationDuration:
-          staticConfig.stationaryConfirmationDuration,
-      stationaryProbeDisplacementMeters:
-          staticConfig.stationaryProbeDisplacementMeters,
-      stationaryConfidenceThreshold: staticConfig.stationaryConfidenceThreshold,
-      movingConfidenceThreshold: staticConfig.movingConfidenceThreshold,
-      movingConfirmationCount: staticConfig.movingConfirmationCount,
-      activityRecognitionInterval: staticConfig.activityRecognitionInterval,
-      mockLocationPolicy: staticConfig.mockLocationPolicy,
-      batchPointCount: staticConfig.batchPointCount,
-      batchMaxAge: staticConfig.batchMaxAge,
-      maximumProviderFixAge: staticConfig.maximumProviderFixAge,
-      callbackHealthWarningThreshold:
-          staticConfig.callbackHealthWarningThreshold,
-      acceptedGeometryGapThreshold: staticConfig.acceptedGeometryGapThreshold,
-      continuityPolicy: staticConfig.continuityPolicy,
       firstFixTimeout: staticConfig.firstFixTimeout,
-      androidNotificationTitle: staticConfig.androidNotificationTitle,
-      androidNotificationText: staticConfig.androidNotificationText,
-      iosTerminationRecoveryMode: staticConfig.iosTerminationRecoveryMode,
     );
   }
 

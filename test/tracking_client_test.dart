@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
+import 'package:flutter_background_location_tracker/src/storage/sqlite_track_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'test_support.dart';
 
@@ -42,6 +45,7 @@ final class _FakeTracker
   bool running = false;
   String? nativeTrackId;
   bool failNextPauseAfterStopping = false;
+  int failAcknowledgements = 0;
   PendingNativeUserAction? nativeUserAction;
   final List<String> acknowledgedNativeUserActions = <String>[];
   TrackingPermissionState permissionState = const TrackingPermissionState(
@@ -66,6 +70,10 @@ final class _FakeTracker
 
   @override
   Future<void> acknowledgeLocations(Iterable<String> eventIds) async {
+    if (failAcknowledgements > 0) {
+      failAcknowledgements -= 1;
+      throw StateError('Native acknowledgement failed.');
+    }
     final values = eventIds.toSet();
     acknowledged.addAll(values);
     pending.removeWhere((sample) => values.contains(sample.eventId));
@@ -1370,6 +1378,59 @@ void main() {
     await controller.dispose();
   });
 
+  test('FIX-03 a runtime config update keeps the route in one segment',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    const owner = TrackingOwner(userId: 'user-1', organizationId: 'org-1');
+    final controller = await TrackingClient.open(
+      owner: owner,
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(seconds: 30)),
+    );
+    final started = await controller.startNewTrack(
+      const TrackStartRequest(owner: owner, routeId: 'runtime update'),
+    );
+    final trackId = started.trackId;
+    LocationSample fix(int second, String generation) => LocationSample(
+          latitude: 0.001,
+          longitude: 0.001 + second / 1e5,
+          horizontalAccuracy: 5,
+          capturedAt: harness.now.add(Duration(seconds: second)),
+          provider: 'test',
+          trackId: trackId,
+          eventId: 'fix-$second',
+          captureGenerationId: generation,
+          monotonicDomainId: 'boot-1',
+          nativeLifecycle: TrackerLifecycle.tracking,
+        );
+    Future<void> acceptedPoints(int count) => _waitUntil(
+          () async =>
+              (await harness.repository.getTrack(trackId))!
+                  .acceptedPointCount ==
+              count,
+        );
+
+    tracker.locations.add(fix(0, 'generation-1'));
+    await acceptedPoints(1);
+    await (controller as TrackingConfigurationController).updateTrackingConfig(
+      const TrackingConfig(accuracy: TrackingAccuracy.medium),
+    );
+    // Applying the update restarts the provider: a new capture generation.
+    tracker.locations.add(fix(10, 'generation-2'));
+    await acceptedPoints(2);
+
+    final bundle = await harness.repository.loadTrackBundle(trackId);
+    expect(bundle.segments, hasLength(1));
+    expect(bundle.track.totalDistanceMeters, greaterThan(0));
+
+    await controller.completeCurrentTrack();
+    await controller.dispose();
+  });
+
   test(
       'E1-OWN resolves a redacted foreign live capture with a stale-safe token',
       () async {
@@ -1534,5 +1595,172 @@ void main() {
     expect(await harness.repository.getTrack(trackId), isNull);
     await tracker.dispose();
     await harness.repository.close();
+  });
+
+  test('FIX-02 a failed acknowledgement is retried, never a failed route',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(seconds: 30)),
+    );
+    await client.initialize();
+    final trackId = await client.startTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: harness.config,
+    );
+    final emitted = <String?>[];
+    final subscription = client.pointStream.listen(
+      (point) => emitted.add(point.nativeEventId),
+    );
+
+    tracker.failAcknowledgements = 1;
+    tracker.locations.add(LocationSample(
+      latitude: 0.001,
+      longitude: 0.001,
+      horizontalAccuracy: 5,
+      capturedAt: harness.now,
+      provider: 'test',
+      trackId: trackId,
+      eventId: 'ack-fails',
+    ));
+    await _waitUntil(() async => emitted.contains('ack-fails'));
+
+    expect(client.currentStatus.lifecycle, isNot(TrackerLifecycle.failed));
+    expect(tracker.acknowledged, isNot(contains('ack-fails')));
+    expect(
+      (await harness.repository.getTrack(trackId))!.acceptedPointCount,
+      1,
+    );
+
+    tracker.locations.add(LocationSample(
+      latitude: 0.0011,
+      longitude: 0.0011,
+      horizontalAccuracy: 5,
+      capturedAt: harness.now.add(const Duration(seconds: 5)),
+      provider: 'test',
+      trackId: trackId,
+      eventId: 'ack-succeeds',
+    ));
+    await _waitUntil(() async => tracker.acknowledged.contains('ack-succeeds'));
+
+    expect(tracker.acknowledged, contains('ack-fails'));
+    expect(client.currentStatus.lifecycle, TrackerLifecycle.tracking);
+
+    await subscription.cancel();
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+  });
+
+  test(
+      'FIX-30 evaluates fixes under the active epoch and records the applied '
+      'versions', () async {
+    sqfliteFfiInit();
+    final directory = await Directory.systemTemp.createTemp('fbl-fix30-');
+    final databasePath = '${directory.path}/route.sqlite';
+    final startedAt = DateTime.utc(2026, 7, 20, 8);
+    final repository = SqliteTrackRepository(
+      path: databasePath,
+      databaseFactoryOverride: databaseFactoryFfi,
+      singleInstance: false,
+      clock: () => startedAt,
+    );
+    await repository.initialize();
+    final trackId = await repository.createTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: const TrackingConfig(),
+      requestedTrackId: 'newer-policy-route',
+    );
+    await repository.markTrackActive(trackId);
+    await repository.appendPoint(
+      PointWriteRequest(
+        trackId: trackId,
+        sample: LocationSample(
+          latitude: 0.001,
+          longitude: 0.001,
+          capturedAt: startedAt,
+          horizontalAccuracy: 5,
+          provider: 'test',
+          trackId: trackId,
+        ),
+        activity: const ActivitySnapshot.unknown(),
+        motionState: MotionState.moving,
+        accepted: true,
+        qualityFlags: TrackPointQualityFlag.none,
+      ),
+    );
+    // A newer package activated an epoch whose policy versions this build
+    // does not know, then the app was downgraded.
+    final raw = await databaseFactoryFfi.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    final initialEpoch = (await raw.query(
+      'tracking_configuration_epochs',
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+    ))
+        .single;
+    await raw.insert('tracking_configuration_epochs', <String, Object?>{
+      ...initialEpoch,
+      'id': 'newer-epoch',
+      'epoch_number': 2,
+      'quality_policy_version': 7,
+      'continuity_policy_version': 9,
+      'activation_sequence': 2,
+    });
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = trackId
+      ..pending.add(
+        LocationSample(
+          latitude: 0.002,
+          longitude: 0.002,
+          capturedAt: startedAt.add(const Duration(minutes: 6)),
+          horizontalAccuracy: 5,
+          provider: 'test',
+          eventId: 'after-downgrade',
+          trackId: trackId,
+        ),
+      );
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => startedAt.add(const Duration(minutes: 7)),
+    );
+
+    await client.initialize();
+
+    final bundle = await repository.loadTrackBundle(trackId);
+    final replayed = bundle.segments
+        .expand((segment) => segment.points)
+        .singleWhere((point) => point.nativeEventId == 'after-downgrade');
+    expect(replayed.configurationEpochId, 'newer-epoch');
+    expect(replayed.accepted, isTrue);
+    expect(replayed.qualityPolicyVersion, TrackingPolicyVersions.qualityPolicy);
+    final gaps = await raw.query(
+      'track_continuity_gaps',
+      columns: <String>['continuity_policy_version'],
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+    expect(
+      gaps.map((row) => row['continuity_policy_version']),
+      <Object?>[TrackingPolicyVersions.continuityPolicy],
+    );
+    expect(tracker.acknowledged, <String>['after-downgrade']);
+
+    await raw.close();
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+    await repository.close();
+    await directory.delete(recursive: true);
   });
 }

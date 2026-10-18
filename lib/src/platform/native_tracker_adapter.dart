@@ -38,8 +38,11 @@ final class NativeTrackerAdapter
             activityChannel ?? const EventChannel('$_prefix/activity'),
         _statusChannel =
             statusChannel ?? const EventChannel('$_prefix/status') {
+    // TrackingClient drains the native journal by pages, so the native side
+    // must not also replay the whole backlog on every subscription.
     _locations = _locationChannel
-        .receiveBroadcastStream()
+        .receiveBroadcastStream(
+            const <String, Object?>{'replayOnListen': 'none'})
         .map(_eventMap)
         .map(LocationSample.fromMap)
         .asBroadcastStream();
@@ -94,15 +97,22 @@ final class NativeTrackerAdapter
 
   @override
   Future<NativeTrackingProtocol> protocolInfo() async {
+    // The native binary's protocol cannot change while the process runs, and
+    // capability checks precede most native calls (each journal page, for
+    // example), so the answer is cached. Failures are not cached.
+    final cached = _protocol;
+    if (cached != null) return cached;
     try {
       final result = await _methodChannel.invokeMethod<Object?>(
         'getProtocolInfo',
       );
-      return NativeTrackingProtocol.fromMap(_nullableMap(result));
+      return _protocol = NativeTrackingProtocol.fromMap(_nullableMap(result));
     } on MissingPluginException {
-      return NativeTrackingProtocol.legacy();
+      return _protocol = NativeTrackingProtocol.legacy();
     }
   }
+
+  NativeTrackingProtocol? _protocol;
 
   @override
   Future<TrackingCapabilityReport> capabilities() async {

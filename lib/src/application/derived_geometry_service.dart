@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import '../domain/derived_geometry.dart';
 import '../domain/route_geometry.dart';
 import '../domain/route_geometry_processor.dart';
@@ -8,6 +7,7 @@ import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
 import 'uncertainty_route_smoother.dart';
+import '../domain/track_geodesy.dart';
 
 /// Runs optional post-capture derivation without delaying raw point commits.
 final class DerivedGeometryService {
@@ -48,7 +48,12 @@ final class DerivedGeometryService {
     final run = await store.beginDerivedGeometryRun(
       owner: owner,
       trackId: trackId,
-      request: request,
+      request: request.algorithm == 'uncertainty_weighted_smoothing'
+          ? _withAppliedConfiguration(
+              request,
+              const UncertaintyWeightedRouteSmoother().classifier.configuration,
+            )
+          : request,
       sourceMaximumSequence: snapshot.upperSequence,
     );
     try {
@@ -92,10 +97,17 @@ final class DerivedGeometryService {
                   ? point.latitude
                   : latitude +
                       request.smoothingFactor * (point.latitude - latitude);
+              // Blend the short way across the antimeridian, then wrap.
               longitude = longitude == null
                   ? point.longitude
-                  : longitude +
-                      request.smoothingFactor * (point.longitude - longitude);
+                  : TrackGeodesy.wrapLongitude(
+                      longitude +
+                          request.smoothingFactor *
+                              TrackGeodesy.longitudeDelta(
+                                longitude,
+                                point.longitude,
+                              ),
+                    );
               derived.add(DerivedGeometryPoint(
                 runId: run.id,
                 sourcePointId: point.id,
@@ -120,6 +132,25 @@ final class DerivedGeometryService {
       rethrow;
     }
   }
+
+  /// [request] with the parameters the built-in algorithm applies, so the
+  /// run's provenance records them.
+  static DerivedGeometryRequest _withAppliedConfiguration(
+    DerivedGeometryRequest request,
+    Map<String, Object?> applied,
+  ) =>
+      DerivedGeometryRequest(
+        name: request.name,
+        algorithm: request.algorithm,
+        algorithmVersion: request.algorithmVersion,
+        smoothingFactor: request.smoothingFactor,
+        mapDataSource: request.mapDataSource,
+        mapDataVersion: request.mapDataVersion,
+        processorConfiguration: <String, Object?>{
+          ...request.processorConfiguration,
+          ...applied,
+        },
+      );
 
   Future<void> _deriveUncertaintyWeightedSegment({
     required StreamingTrackRepository stream,
@@ -348,17 +379,12 @@ final class DerivedGeometryService {
     double latitude2,
     double longitude2,
   ) {
-    const radius = 6371008.8;
-    final lat1 = latitude1 * math.pi / 180;
-    final lat2 = latitude2 * math.pi / 180;
-    final deltaLatitude = (latitude2 - latitude1) * math.pi / 180;
-    final deltaLongitude = (longitude2 - longitude1) * math.pi / 180;
-    final a = math.sin(deltaLatitude / 2) * math.sin(deltaLatitude / 2) +
-        math.cos(lat1) *
-            math.cos(lat2) *
-            math.sin(deltaLongitude / 2) *
-            math.sin(deltaLongitude / 2);
-    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return TrackGeodesy.sphericalHaversineMeters(
+      latitude1,
+      longitude1,
+      latitude2,
+      longitude2,
+    );
   }
 
   /// Loads a small route for map display using explicit raw/derived geometry.

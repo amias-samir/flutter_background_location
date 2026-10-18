@@ -355,6 +355,15 @@ internal class TrackingStateStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Records that the device began shutting down during capture, so the gap
+     * before the next boot can be explained. Synchronous: shutdown leaves no
+     * time for an asynchronous write.
+     */
+    fun markShutdownObserved(timestamp: Long = System.currentTimeMillis()) {
+        preferences.edit().putLong(KEY_LAST_SHUTDOWN_OBSERVED_AT, timestamp).commit()
+    }
+
     fun markServiceStopped() {
         preferences.edit()
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, false)
@@ -498,6 +507,8 @@ internal class TrackingStateStore(context: Context) {
             "nativeSessionStartedAt" to nativeSessionStartedAt,
             "captureStartReason" to captureStartReason,
             "serviceHeartbeatAt" to heartbeatAt,
+            "lastShutdownObservedAt" to preferences.getLong(KEY_LAST_SHUTDOWN_OBSERVED_AT, 0L)
+                .takeIf { it > 0L },
             "heartbeatFresh" to heartbeatFresh,
             "heartbeatCaptureActive" to heartbeatCaptureActive,
             "lastProviderCallbackAt" to lastProviderCallbackAt,
@@ -590,6 +601,7 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_CONFIGURATION = "tracking_configuration"
         private const val KEY_SERVICE_STARTED_AT = "service_started_at"
         private const val KEY_SERVICE_HEARTBEAT_AT = "service_heartbeat_at"
+        private const val KEY_LAST_SHUTDOWN_OBSERVED_AT = "last_shutdown_observed_at"
         private const val KEY_HEARTBEAT_CAPTURE_ACTIVE = "heartbeat_capture_active"
         private const val KEY_CAPTURE_GENERATION_ID = "capture_generation_id"
         private const val KEY_NATIVE_SESSION_STARTED_AT = "native_session_started_at"

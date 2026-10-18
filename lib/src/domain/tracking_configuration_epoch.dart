@@ -9,14 +9,57 @@ abstract final class TrackingPolicyVersions {
   static const int qualityPolicy = 1;
 
   /// Version of accepted-gap classification and topology semantics.
-  static const int continuityPolicy = 2;
+  ///
+  /// Version 3 keeps a route's segment across the provider restart that
+  /// applies a runtime configuration update.
+  static const int continuityPolicy = 3;
+
+  /// Preset label for routes recorded before epochs stored policy versions.
+  ///
+  /// Those builds did not record which definitions applied. The labels name
+  /// the oldest definitions this package resolves and never change, so a
+  /// repaired epoch keeps its label across later version bumps.
+  static const int legacyPresetDefinition = 4;
+
+  /// Quality label for routes recorded before epochs stored policy versions;
+  /// see [legacyPresetDefinition].
+  static const int legacyQualityPolicy = 1;
+
+  /// Continuity version of epochs written before epochs recorded one.
+  ///
+  /// Version 2 was the only classifier in use when the epoch gained its
+  /// continuity column, so a missing value replays exactly that behavior.
+  static const int legacyContinuityPolicy = 2;
+
+  /// Quality policy versions this build can evaluate, oldest first.
+  static const List<int> supportedQualityPolicies = <int>[1];
+
+  /// Continuity policy versions this build can evaluate, oldest first.
+  static const List<int> supportedContinuityPolicies = <int>[2, 3];
+
+  /// The quality policy that evaluates points recorded under [recorded].
+  ///
+  /// A supported version is applied as recorded, so upgrading the package
+  /// never reinterprets a route that is already recording. An unsupported
+  /// version, such as one written by a newer package, falls back to the
+  /// newest supported version; decisions store the version actually applied.
+  static int resolveQualityPolicy(int recorded) =>
+      _resolve(recorded, supportedQualityPolicies);
+
+  /// The continuity policy for [recorded]; see [resolveQualityPolicy].
+  static int resolveContinuityPolicy(int recorded) =>
+      _resolve(recorded, supportedContinuityPolicies);
+
+  static int _resolve(int recorded, List<int> supported) =>
+      supported.contains(recorded) ? recorded : supported.last;
 }
 
 /// Immutable configuration and policy provenance for a sequence range.
 ///
-/// Epoch 1 is created with each route. Runtime configuration changes are not
-/// part of this foundation; a later capability may append higher-numbered
-/// epochs but must never edit an existing row.
+/// Epoch 1 is created with each route. Each runtime configuration update
+/// appends the next epoch, active from the next point sequence. Rows are
+/// never edited; points are evaluated under the policy versions their epoch
+/// recorded.
 final class TrackingConfigurationEpoch {
   const TrackingConfigurationEpoch({
     required this.id,
@@ -28,6 +71,8 @@ final class TrackingConfigurationEpoch {
     required this.createdAt,
     required this.activationSequence,
     required this.activatedAt,
+    this.continuityPolicyVersion =
+        TrackingPolicyVersions.legacyContinuityPolicy,
   });
 
   final String id;
@@ -36,6 +81,12 @@ final class TrackingConfigurationEpoch {
   final TrackingConfig resolvedConfig;
   final int presetDefinitionVersion;
   final int qualityPolicyVersion;
+
+  /// Continuity classifier version for points in this epoch.
+  ///
+  /// Epochs written before this was recorded report
+  /// [TrackingPolicyVersions.legacyContinuityPolicy].
+  final int continuityPolicyVersion;
   final DateTime createdAt;
 
   /// First route-global point sequence evaluated by this epoch.
@@ -57,6 +108,9 @@ final class TrackingConfigurationEpoch {
         presetDefinitionVersion:
             (row['preset_definition_version']! as num).toInt(),
         qualityPolicyVersion: (row['quality_policy_version']! as num).toInt(),
+        continuityPolicyVersion:
+            (row['continuity_policy_version'] as num?)?.toInt() ??
+                TrackingPolicyVersions.legacyContinuityPolicy,
         createdAt: DateTime.parse(row['created_at']! as String).toUtc(),
         activationSequence: (row['activation_sequence']! as num).toInt(),
         activatedAt: DateTime.parse(row['activated_at']! as String).toUtc(),

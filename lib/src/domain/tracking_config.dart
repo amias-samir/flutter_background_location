@@ -404,10 +404,11 @@ final class TrackingConfig {
   /// Mock-location handling policy for incoming native fixes.
   final MockLocationPolicy mockLocationPolicy;
 
-  /// Number of accepted points kept in memory before batched persistence.
+  /// Accepted points per host upload batch; crossing a multiple triggers an
+  /// upload. Points are always committed to the route database one by one.
   final int batchPointCount;
 
-  /// Maximum time an accepted point can wait before batched persistence.
+  /// Longest an accepted point waits for a host upload batch.
   final Duration batchMaxAge;
 
   /// Maximum provider fix age accepted at native receipt.
@@ -550,6 +551,32 @@ final class TrackingConfig {
         iosTerminationRecoveryMode:
             iosTerminationRecoveryMode ?? this.iosTerminationRecoveryMode,
       );
+
+  /// This configuration with [accuracy]'s preset values; everything else is
+  /// kept.
+  ///
+  /// A preset derives the location accuracy levels, the moving and stationary
+  /// intervals and distance filters, the accepted-accuracy limit, and the
+  /// first-fix timeout. Those take [accuracy]'s defaults for this
+  /// configuration's [captureIntent]. Capture intent, motion fusion,
+  /// notifications, and every other policy field are unchanged.
+  TrackingConfig withPreset(TrackingAccuracy accuracy) {
+    final preset = TrackingConfig(
+      accuracy: accuracy,
+      captureIntent: captureIntent,
+    );
+    return copyWith(
+      accuracy: accuracy,
+      locationAccuracy: preset.locationAccuracy,
+      stationaryLocationAccuracy: preset.stationaryLocationAccuracy,
+      movingDistanceFilterMeters: preset.movingDistanceFilterMeters,
+      movingInterval: preset.movingInterval,
+      stationaryDistanceFilterMeters: preset.stationaryDistanceFilterMeters,
+      stationaryInterval: preset.stationaryInterval,
+      maximumAcceptedAccuracyMeters: preset.maximumAcceptedAccuracyMeters,
+      firstFixTimeout: preset.firstFixTimeout,
+    );
+  }
 
   void validate({String context = 'TrackingConfig'}) {
     final errors = <String>[];
@@ -792,16 +819,9 @@ final class TrackingConfig {
       continuityPolicy: TrackingContinuityPolicy.parse(
         map['continuityPolicy'],
       ),
-      firstFixTimeout: Duration(
-        milliseconds: integer('firstFixTimeoutMs') ??
-            (accuracy == TrackingAccuracy.low
-                ? 180000
-                : accuracy == TrackingAccuracy.medium
-                    ? 120000
-                    : accuracy == TrackingAccuracy.precised
-                        ? 45000
-                        : 60000),
-      ),
+      // A missing key resolves like the constructor, so a partial map and
+      // `TrackingConfig(...)` with the same fields are identical.
+      firstFixTimeout: duration('firstFixTimeoutMs'),
       androidNotificationTitle:
           map['notificationTitle'] as String? ?? 'Location tracking active',
       androidNotificationText:
@@ -843,6 +863,10 @@ final class TrackingConfiguration {
   final Duration uploadLeaseDuration;
   final Duration uploadInitialBackoff;
   final Duration uploadMaximumBackoff;
+
+  /// First delay of the upload recovery check. While leftover uploads exist
+  /// the delay doubles toward 15 minutes; an empty outbox stops the check
+  /// until an upload fails again.
   final Duration uploadRecoveryInterval;
 
   TrackingConfiguration copyWith({

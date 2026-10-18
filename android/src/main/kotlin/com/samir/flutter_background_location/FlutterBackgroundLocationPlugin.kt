@@ -17,6 +17,8 @@ import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -210,7 +212,7 @@ class FlutterBackgroundLocationPlugin :
         } catch (error: Exception) {
             result.error(
                 "native_state_persistence_failed",
-                error.message ?: "Could not persist the native command lease.",
+                safeErrorMessage("Could not persist the native command lease.", error),
                 redactedCommandState(),
             )
         }
@@ -268,7 +270,7 @@ class FlutterBackgroundLocationPlugin :
                 } catch (error: Exception) {
                     result.error(
                         "native_state_persistence_failed",
-                        error.message ?: "Could not persist the native command result.",
+                        safeErrorMessage("Could not persist the native command result.", error),
                         redactedCommandState(),
                     )
                 }
@@ -355,7 +357,7 @@ class FlutterBackgroundLocationPlugin :
                 result.success(file.absolutePath)
             }
         } catch (error: Throwable) {
-            result.error("export_failed", error.localizedMessage, null)
+            result.error("export_failed", safeErrorMessage("Could not write the export file.", error), null)
         }
     }
 
@@ -667,11 +669,10 @@ class FlutterBackgroundLocationPlugin :
         code: String,
         error: Throwable,
     ) {
-        mainHandler.post { result.error(code, error.localizedMessage ?: messageFor(error), null) }
+        mainHandler.post {
+            result.error(code, safeErrorMessage("The native export operation failed.", error), null)
+        }
     }
-
-    private fun messageFor(error: Throwable): String =
-        error::class.java.simpleName.takeIf { it.isNotBlank() } ?: "Export failed."
 
     private fun clearNativeTrackData(call: MethodCall, result: MethodChannel.Result) {
         val trackId = (call.arguments as? Map<*, *>)?.get("trackId") as? String
@@ -684,7 +685,11 @@ class FlutterBackgroundLocationPlugin :
             onSuccess = { deleted -> mainHandler.post { result.success(deleted) } },
             onFailure = { error ->
                 mainHandler.post {
-                    result.error("native_clear_failed", error.localizedMessage, null)
+                    result.error(
+                        "native_clear_failed",
+                        safeErrorMessage("Native track data could not be cleared.", error),
+                        null,
+                    )
                 }
             },
         ) { store ->
@@ -737,7 +742,11 @@ class FlutterBackgroundLocationPlugin :
                 result.success(!file.exists() || file.delete())
             }
         } catch (error: Throwable) {
-            result.error("delete_export_failed", error.localizedMessage, null)
+            result.error(
+                "delete_export_failed",
+                safeErrorMessage("Could not delete the export file.", error),
+                null,
+            )
         }
     }
 
@@ -874,8 +883,8 @@ class FlutterBackgroundLocationPlugin :
             } else {
                 result.error(
                     "tracking_already_active",
-                    "Track $existingTrackId must be stopped before a different track starts.",
-                    stateStore.statusMap(),
+                    "The active native track must be stopped before a different track starts.",
+                    redactedCommandState(),
                 )
                 return
             }
@@ -888,8 +897,8 @@ class FlutterBackgroundLocationPlugin :
         } catch (error: Exception) {
             result.error(
                 "native_state_persistence_failed",
-                error.message ?: "The native tracking state could not be persisted.",
-                stateStore.statusMap(),
+                safeErrorMessage("The native tracking state could not be persisted.", error),
+                redactedCommandState(),
             )
             return
         }
@@ -914,7 +923,7 @@ class FlutterBackgroundLocationPlugin :
         }
         val requestedTrackId = (call.arguments as? Map<*, *>)?.get("trackId") as? String
         if (requestedTrackId != null && requestedTrackId != activeTrackId) {
-            result.error("track_mismatch", "The requested track is not active.", stateStore.statusMap())
+            result.error("track_mismatch", "The requested track is not active.", redactedCommandState())
             return
         }
 
@@ -961,7 +970,7 @@ class FlutterBackgroundLocationPlugin :
             result.error(
                 "track_mismatch",
                 "The requested track does not match the paused track.",
-                stateStore.statusMap(),
+                redactedCommandState(),
             )
             return
         }
@@ -1000,7 +1009,7 @@ class FlutterBackgroundLocationPlugin :
         val arguments = call.arguments as? Map<*, *>
         val requestedTrackId = arguments?.get("trackId") as? String
         if (requestedTrackId != null && requestedTrackId != stateStore.activeTrackId) {
-            result.error("track_mismatch", "The requested track is not active.", stateStore.statusMap())
+            result.error("track_mismatch", "The requested track is not active.", redactedCommandState())
             return
         }
         val reason = arguments?.get("reason") as? String
@@ -1030,7 +1039,11 @@ class FlutterBackgroundLocationPlugin :
         val arguments = call.arguments as? Map<*, *>
         val trackId = arguments?.get("trackId") as? String
         if (trackId.isNullOrBlank() || trackId != stateStore.activeTrackId) {
-            result.error("track_mismatch", "The requested track is not active or paused.", stateStore.statusMap())
+            result.error(
+                "track_mismatch",
+                "The requested track is not active or paused.",
+                redactedCommandState(),
+            )
             return
         }
         val configuration = TrackingConfiguration.fromMap(arguments["config"] as? Map<*, *>)
@@ -1054,7 +1067,7 @@ class FlutterBackgroundLocationPlugin :
             ContextCompat.startForegroundService(applicationContext, intent)
             true
         } catch (error: Exception) {
-            val message = error.message ?: "Android rejected the foreground-service start."
+            val message = safeErrorMessage("Android rejected the foreground-service start.", error)
             stateStore.fail(message)
             stateStore.emitCurrentStatus()
             result.error("foreground_service_start_failed", message, permissionStatus())
@@ -1069,7 +1082,7 @@ class FlutterBackgroundLocationPlugin :
                 mainHandler.post {
                     result.error(
                         "pending_locations_unavailable",
-                        error.message ?: "The native pending-location queue could not be read.",
+                        safeErrorMessage("The native pending-location queue could not be read.", error),
                         null,
                     )
                 }
@@ -1103,7 +1116,7 @@ class FlutterBackgroundLocationPlugin :
                         } else {
                             "pending_locations_unavailable"
                         },
-                        error.message ?: "The native pending-location queue could not be read.",
+                        safeErrorMessage("The native pending-location queue could not be read.", error),
                         null,
                     )
                 }
@@ -1152,7 +1165,7 @@ class FlutterBackgroundLocationPlugin :
                 mainHandler.post {
                     result.error(
                         "pending_location_ack_failed",
-                        error.message ?: "Pending locations could not be acknowledged.",
+                        safeErrorMessage("Pending locations could not be acknowledged.", error),
                         null,
                     )
                 }
@@ -1184,7 +1197,7 @@ class FlutterBackgroundLocationPlugin :
             result.error(
                 "invalid_action_id",
                 "acknowledgePendingUserAction requires a non-empty actionId.",
-                stateStore.statusMap(),
+                redactedCommandState(),
             )
             return
         }
@@ -1342,7 +1355,7 @@ class FlutterBackgroundLocationPlugin :
     private fun capabilities(): Map<String, Any?> = linkedMapOf(
         "platform" to "android",
         "backgroundTracking" to true,
-        "activityRecognition" to true,
+        "activityRecognition" to activityRecognitionSupported(),
         "mockDetectionAvailable" to TrackingStateStore.MOCK_DETECTION_AVAILABLE,
         "mockDetection" to TrackingStateStore.MOCK_DETECTION_AVAILABLE,
         "mockDetectionSignal" to "platformSignal",
@@ -1354,6 +1367,19 @@ class FlutterBackgroundLocationPlugin :
         "durablePendingUserActions" to true,
         "minApi" to 21,
     )
+
+    /**
+     * Activity Recognition runs inside Google Play services, so devices without
+     * current Play services cannot classify activity. Permission is reported
+     * separately as `activityRecognitionGranted`.
+     */
+    private fun activityRecognitionSupported(): Boolean =
+        try {
+            GoogleApiAvailability.getInstance()
+                .isGooglePlayServicesAvailable(applicationContext) == ConnectionResult.SUCCESS
+        } catch (_: Throwable) {
+            false
+        }
 
     private fun protocolInfo(): Map<String, Any?> = linkedMapOf(
         "version" to 2,
@@ -1372,6 +1398,10 @@ class FlutterBackgroundLocationPlugin :
             "streaming_export_v2",
             "track_scoped_native_clear",
             "command_lease",
+            "normalized_location_validity",
+            "journal_nested_json_payload",
+            "listen_replay_control",
+            "status_fix_echo_control",
         ),
     )
 
@@ -1405,7 +1435,11 @@ class FlutterBackgroundLocationPlugin :
             }
             result.success(true)
         } catch (error: Exception) {
-            result.error("settings_unavailable", error.message, null)
+            result.error(
+                "settings_unavailable",
+                safeErrorMessage("The requested settings screen could not be opened.", error),
+                null,
+            )
         }
     }
 
@@ -1520,6 +1554,9 @@ class FlutterBackgroundLocationPlugin :
 
 private enum class StreamKind { LOCATION, ACTIVITY, STATUS }
 
+private const val REPLAY_PAGE_RECORDS = 100
+private const val REPLAY_PAGE_BYTES = 256 * 1024
+
 private class TrackingStreamHandler(
     private val kind: StreamKind,
     private val currentStatus: () -> Map<String, Any?>,
@@ -1544,13 +1581,23 @@ private class TrackingStreamHandler(
         when (kind) {
             StreamKind.LOCATION -> {
                 val replayContext = context
-                if (replayContext == null) {
+                // Dart that drains the journal by pages asks for no replay;
+                // replaying the whole backlog here would decode and post it
+                // twice (`listen_replay_control`).
+                val replay = (arguments as? Map<*, *>)?.get("replayOnListen") as? String
+                if (replayContext == null || replay == "none") {
                     TrackingEventBus.addLocationListener(listener)
                 } else {
                     replayInProgress = true
                     bufferedLocations.clear()
                     val generation = ++replayGeneration
                     TrackingEventBus.addLocationListener(listener)
+                    // Touched only on the main thread.
+                    val emittedIds = HashSet<String>()
+                    fun emit(event: Map<String, Any?>) {
+                        val eventId = event["eventId"] as? String
+                        if (eventId == null || emittedIds.add(eventId)) events.success(event)
+                    }
                     val accepted = PendingLocationCoordinator.execute(
                         replayContext,
                         onFailure = { error ->
@@ -1561,24 +1608,35 @@ private class TrackingStreamHandler(
                                 replayInProgress = false
                                 events.error(
                                     "pending_location_replay_failed",
-                                    error.message ?: "Pending locations could not be replayed.",
+                                    safeErrorMessage("Pending locations could not be replayed.", error),
                                     null,
                                 )
                                 live.forEach(events::success)
                             }
                         },
                     ) { store ->
-                        val pending = store.pending()
+                        // Post the backlog page by page so a long journal never
+                        // becomes one main-thread burst.
+                        var cursor: String? = null
+                        do {
+                            val page = store.page(
+                                cursor = cursor,
+                                maxRecords = REPLAY_PAGE_RECORDS,
+                                maxEncodedBytes = REPLAY_PAGE_BYTES,
+                            )
+                            val replayed = page.events
+                            mainHandler.post {
+                                if (generation != replayGeneration || eventSink !== events) return@post
+                                replayed.forEach(::emit)
+                            }
+                            cursor = page.nextCursor
+                        } while (page.hasMore && cursor != null)
                         mainHandler.post {
                             if (generation != replayGeneration || eventSink !== events) return@post
                             val live = bufferedLocations.toList()
                             bufferedLocations.clear()
                             replayInProgress = false
-                            val emittedIds = HashSet<String>()
-                            (pending + live).forEach { event ->
-                                val eventId = event["eventId"] as? String
-                                if (eventId == null || emittedIds.add(eventId)) events.success(event)
-                            }
+                            live.forEach(::emit)
                         }
                     }
                     if (!accepted) {
@@ -1614,4 +1672,14 @@ private class TrackingStreamHandler(
         }
         eventSink = null
     }
+}
+
+/**
+ * Developer-facing failure text that names the exception type but never echoes
+ * the platform message, which can carry paths, content URIs, journal payload
+ * fragments, or identifiers.
+ */
+private fun safeErrorMessage(summary: String, error: Throwable): String {
+    val type = error.javaClass.simpleName.takeIf { it.isNotBlank() } ?: "Exception"
+    return "$summary ($type)"
 }

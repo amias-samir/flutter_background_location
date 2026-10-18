@@ -36,7 +36,10 @@ void main() {
 
     await configureTrackDatabase(database);
 
-    expect(database.executedSql, <String>['PRAGMA foreign_keys = ON']);
+    expect(database.executedSql, <String>[
+      'PRAGMA foreign_keys = ON',
+      'PRAGMA synchronous = FULL',
+    ]);
     expect(
       database.queriedSql,
       <String>[
@@ -89,7 +92,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 14);
+    expect(await inspected.getVersion(), 15);
     final tables = await inspected.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
@@ -192,7 +195,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 14);
+    expect(await inspected.getVersion(), 15);
     final tripRows = await inspected.query(
       'trips',
       columns: const <String>['measured_distance_m'],
@@ -1356,7 +1359,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 14);
+    expect(version, 15);
     expect(
       tables.map((row) => row['name']),
       containsAll(<String>[
@@ -1511,7 +1514,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 14);
+    expect(version, 15);
     final preservedPoint = rows.singleWhere(
       (row) => row['id'] == 'preserved-point',
     );
@@ -1613,7 +1616,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 14);
+    expect(version, 15);
     expect(epoch['track_id'], 'v4-track');
     expect(point['id'], 'v4-point');
     expect(point['configuration_epoch_id'], epoch['id']);

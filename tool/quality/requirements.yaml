@@ -3,9 +3,13 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 14
+  route_database_schema: 15
   android_journal_schema: 2
+  android_journal_payload_format: 2
   ios_journal_schema: 1
+  preset_definition: 4
+  quality_policy: 1
+  continuity_policy: 3
 change_classifications:
   additive: "Adds an API, payload key, schema object, test, or documentation without removing supported behavior."
   behavior_tightening: "Narrows unsafe behavior while keeping the public symbol available."
@@ -48,17 +52,20 @@ work_packages:
   - id: R1-01
     phase: R1
     title: Correct iOS required-reason privacy manifest
-    release_gate: archive privacy inspection has no missing declaration
+    release_gate: every required-reason API used by package Swift is declared (UserDefaults CA92.1, SystemBootTime 35F9.1) and the ledger validator scans for new uses
     required_before: next publication
     evidence:
       - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/PrivacyInfo.xcprivacy
+      - tool/quality/validate_requirements.dart
+      - test/quality_ledger_validator_test.dart
   - id: R1-02
     phase: R1
-    title: Remove unused Android wake-lock permission
-    release_gate: merged manifest contains only exercised package permissions
-    required_before: next publication unless justified
+    title: Justify the retained Android wake-lock permission
+    release_gate: merged manifest contains only exercised package permissions; WAKE_LOCK is held only while capture is active and is documented
+    required_before: next publication
     evidence:
       - android/src/main/AndroidManifest.xml
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
       - README.md
       - example/README.md
   - id: R1-03
@@ -646,3 +653,344 @@ work_packages:
       - tool/quality/validate_physical_qualification.dart
       - test/physical_qualification_validator_test.dart
       - example/integration_test/physical_device_lifecycle_test.dart
+  - id: FIX-01
+    phase: FIX
+    title: Rollback-safe Android journal payload codec keeps nested evidence
+    release_gate: nested motion and activity values round-trip through the journal; format-1 rows decode without invented structure
+    required_before: slimmer journal payloads (format 3)
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/JournalPayloadCodec.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/JournalPayloadCodecTest.kt
+      - lib/src/domain/location_sample.dart
+      - test/location_sample_activity_test.dart
+  - id: FIX-02
+    phase: FIX
+    title: Failed post-commit acknowledgements are deferred, not route failures
+    release_gate: a committed fix is emitted and its acknowledgement retried with the next commit; the route stays tracking
+    required_before: batched acknowledgement coalescing
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: FIX-03
+    phase: FIX
+    title: Runtime configuration updates keep one route segment
+    release_gate: continuity v3 retains the segment across the planned provider restart; v2 epochs keep splitting; other evidence still splits
+    required_before: adaptive apply through runtime configuration epochs
+    evidence:
+      - lib/src/domain/tracking_continuity.dart
+      - lib/src/application/tracking_client.dart
+      - test/policy_version_dispatch_test.dart
+      - test/tracking_client_test.dart
+  - id: FIX-04
+    phase: FIX
+    title: Preset switches preserve every non-preset field
+    release_gate: withPreset replaces exactly the preset-derived keys for the route's capture intent; adaptive proposals keep host policy
+    required_before: adaptive apply and TrackingOptimization tables
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/adaptive_battery.dart
+      - test/preset_definition_test.dart
+      - test/adaptive_battery_test.dart
+  - id: FIX-05
+    phase: FIX
+    title: Upload batches trigger on crossing a threshold multiple
+    release_gate: single and batched commits trigger once per crossed multiple; duplicates never trigger
+    required_before: batched point commits
+    evidence:
+      - lib/src/application/upload_threshold.dart
+      - test/upload_threshold_test.dart
+  - id: FIX-06
+    phase: FIX
+    title: Location payload activity decodes only activity keys
+    release_gate: activity time is never the fix time; absent evidence falls back to the activity stream
+    required_before: activity-based stationary or stop-hold policies
+    evidence:
+      - lib/src/domain/location_sample.dart
+      - test/location_sample_activity_test.dart
+  - id: FIX-07
+    phase: FIX
+    title: Activity freshness measured from observation and aged at each fix
+    release_gate: long Core Motion episodes stay fresh at delivery; stored age is the age at the fix on both platforms
+    required_before: reachable stationary detection
+    evidence_mode: physical_manual
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: FIX-08
+    phase: FIX
+    title: Step evidence needs a cadence and probe duty uses a sliding hour
+    release_gate: fewer than 6 steps in 30 s never reports movement; reports at most every 10 s; probe budget never exceeds the hourly maximum across a boundary; departure latency on device unchanged within 10 percent
+    required_before: T2 departure accelerators
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/MotionEvidenceWindows.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/MotionEvidenceWindowsTest.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/MotionEvidenceWindows.swift
+      - example/ios/RunnerTests/MotionEvidenceWindowsTests.swift
+  - id: FIX-09
+    phase: FIX
+    title: Motion fusion state is confined to one thread or queue
+    release_gate: public calls and sensor callbacks mutate fusion state only on the Android worker thread or the iOS serial queue
+    required_before: sensor hygiene for fusion users
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/MotionSensorFusion.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/MotionSensorFusion.swift
+  - id: FIX-10
+    phase: FIX
+    title: Platform sentinels never become stored kinematics or heights
+    release_gate: negative speed, course, and accuracies decode as null; invalid altitudes are dropped; heading is normalized
+    required_before: Doppler evidence and dual altitude
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - lib/src/domain/location_sample.dart
+      - test/location_sample_activity_test.dart
+  - id: FIX-11
+    phase: FIX
+    title: TrackerStatus never invents a last fix time
+    release_gate: explicit null lastPointAt stays null; legacy natives fall back to the status time
+    required_before: stale-fix health decisions
+    evidence:
+      - lib/src/domain/tracker_status.dart
+      - test/tracker_status_test.dart
+  - id: FIX-12
+    phase: FIX
+    title: Partial configuration maps resolve like the constructor and presets are frozen per definition version
+    release_gate: every accuracy and intent preset matches the frozen fixture, and partial maps equal constructor resolution
+    required_before: any preset value or TrackingOptimization table change
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - test/fixtures/presets/preset_definition_v4.json
+      - test/preset_definition_test.dart
+  - id: FIX-13
+    phase: FIX
+    title: Configuration key coverage contract across Dart, Kotlin, and Swift
+    release_gate: every serialized key states per platform whether it is parsed; native parsers read exactly the parsed and documented native-only keys
+    required_before: any new TrackingConfig or TrackingOptimization key
+    evidence:
+      - test/fixtures/config_key_coverage_v1.json
+      - test/config_key_coverage_test.dart
+      - tool/quality/validate_requirements.dart
+  - id: FIX-14
+    phase: FIX
+    title: Android reports Activity Recognition support from Play services
+    release_gate: non-GMS devices report activityRecognition false and get no permission recommendation
+    required_before: non-GMS provider fallback
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+  - id: FIX-16
+    phase: FIX
+    title: Route database commits are power-loss durable
+    release_gate: every connection sets PRAGMA synchronous = FULL before use
+    required_before: native journal acknowledgement changes
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/sqlite_track_repository_test.dart
+  - id: FIX-27
+    phase: FIX
+    title: Release metadata stays in sync
+    release_gate: pubspec, podspec, Package.swift, and README install snippet agree
+    required_before: next publication
+    evidence:
+      - ios/flutter_background_location_tracker.podspec
+      - README.md
+      - tool/quality/validate_requirements.dart
+  - id: FIX-17
+    phase: FIX
+    title: Epoch repair touches only legacy routes with stable labels
+    release_gate: normal startup repairs nothing; legacy routes get epoch 1 labelled preset 4 and quality 1 with only their points linked
+    required_before: preset definition 5
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/policy_version_dispatch_test.dart
+  - id: FIX-18
+    phase: FIX
+    title: Diagnostic health events are capped per route
+    release_gate: diagnostic events stay within the cap with the newest kept; lifecycle evidence types are never pruned
+    required_before: multi-day detached capture
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/health_event_retention_test.dart
+  - id: FIX-19
+    phase: FIX
+    title: Android journal capacity and acknowledgement without per-fix scans
+    release_gate: counters stay exact across enqueue, acknowledge, track deletion, and diagnostics; capacity-at-bound, crash-after-commit replay, and WAL growth verified on device
+    required_before: Android batched journal inserts
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/JournalCounters.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/JournalCountersTest.kt
+  - id: FIX-20
+    phase: FIX
+    title: Android journal acknowledgements checkpoint only when the WAL is large
+    release_gate: no count or TRUNCATE checkpoint per acknowledgement; passive checkpoint above 4 MiB; WAL size bounded on device
+    required_before: Android batched acknowledgements
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+  - id: FIX-21
+    phase: FIX
+    title: Location stream subscriptions never replay the whole journal on the main thread
+    release_gate: the Dart client subscribes with replayOnListen none and drains by pages; other listeners get paged replay
+    required_before: location event envelopes
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - lib/src/platform/native_tracker_adapter.dart
+      - test/native_location_stream_test.dart
+  - id: FIX-22
+    phase: FIX
+    title: iOS journals each Core Location callback in one transaction and throttles health writes
+    release_gate: batch append keeps per-event results, order, duplicate, and capacity semantics; health timestamps persist at most every 15 s
+    required_before: iOS journal WAL mode
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - example/ios/RunnerTests/NativeLocationJournalTests.swift
+  - id: FIX-23
+    phase: FIX
+    title: One shared route distance implementation with a stable algorithm ID
+    release_gate: every Dart distance uses TrackGeodesy; native and harness radii match it
+    required_before: WGS84 measured distance
+    evidence:
+      - lib/src/domain/track_geodesy.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/StationaryDisplacementWindow.kt
+      - example/integration_test/physical_device_lifecycle_test.dart
+      - test/track_geodesy_test.dart
+  - id: FIX-24
+    phase: FIX
+    title: Export height semantics are documented until the format-correct policy ships
+    release_gate: README and Dartdoc state the per-platform datum, KML zero heights, and the missing altitudeMode; default export bytes unchanged
+    required_before: format-correct export heights
+    evidence:
+      - README.md
+      - lib/src/domain/location_sample.dart
+  - id: FIX-25
+    phase: FIX
+    title: Public docs match shipped behavior
+    release_gate: altitude datum, upload batch fields, preset values, epoch semantics, and example copy describe current behavior
+    required_before: next publication
+    evidence:
+      - lib/src/domain/location_sample.dart
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - example/lib/tracking_controls.dart
+  - id: FIX-26
+    phase: FIX
+    title: Ledger validator cross-checks work-package IDs, compatibility versions, and raised error codes
+    release_gate: ledger matches shipped versions and every literal error code is registered
+    required_before: any new LBO, FIX, SEN, COV, or RES work-package ID
+    evidence:
+      - tool/quality/validate_requirements.dart
+      - tool/quality/error_codes.yaml
+      - test/quality_ledger_validator_test.dart
+  - id: FIX-28
+    phase: FIX
+    title: iOS probes are bounded in-place accuracy bursts
+    release_gate: start, resume, and stationary exit yield a fresh converged fix within 15 s; only post-request fixes complete the probe; the profile request is restored
+    required_before: reachable stationary detection and deep stationary
+    evidence_mode: physical_manual
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: FIX-29
+    phase: FIX
+    title: Android probes flush first and never accept a cached fix
+    release_gate: flushed fixes are journaled before the fresh probe fix; batches are sorted by elapsed realtime; zero probe-caused non-monotonic rejections
+    required_before: hidden-UI batching and deep stationary
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: FIX-30
+    phase: FIX
+    title: Quality and continuity policies dispatch on the active epoch's recorded versions
+    release_gate: recorded versions replay as recorded, unknown versions fall back visibly, and points store the applied version
+    required_before: any quality or continuity policy version change
+    evidence:
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - lib/src/domain/fix_quality.dart
+      - lib/src/domain/tracking_continuity.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/application/tracking_client.dart
+      - test/policy_version_dispatch_test.dart
+      - test/tracking_client_test.dart
+  - id: FIX-31
+    phase: FIX
+    title: Derived geometry is antimeridian-safe and records applied parameters
+    release_gate: smoothing across ±180 degrees stays near its sources and in range; other routes are unchanged; runs record classifier thresholds
+    required_before: RTS derived smoother
+    evidence:
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/application/uncertainty_route_smoother.dart
+      - test/track_geodesy_test.dart
+  - id: FIX-32
+    phase: FIX
+    title: Redacted native error envelopes
+    release_gate: native errors carry fixed messages and redacted command state, never status maps or platform text
+    required_before: next publication
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/FlutterBackgroundLocationPlugin.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - tool/quality/validate_requirements.dart
+      - test/quality_ledger_validator_test.dart
+  - id: LBO-04A
+    phase: LBO
+    title: Android location requests are replaced in place and late deliveries are tagged
+    release_gate: profile switches never remove the active request; out-of-order deliveries are journaled and tagged late; callback gaps across switches unchanged or better on device
+    required_before: hidden-UI delivery batching
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: LBO-17A
+    phase: LBO
+    title: Deadline-driven health watchdog and backoff upload recovery
+    release_gate: no periodic health snapshot while fixes commit; no recovery polling with an empty outbox; leftover uploads retried with backoff to 15 minutes
+    required_before: deferred background upload cadence
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/upload/tracking_batch_uploader.dart
+      - test/tracking_batch_uploader_test.dart
+  - id: LBO-18
+    phase: LBO
+    title: Uncertainty model v1 foundation
+    release_gate: per-axis sigma, origin factors, correlated averaging, and kinematic floors are pure, versioned, and tested; acceptance thresholds unchanged
+    required_before: statistical stationary detection, quality v2, and the RTS smoother
+    evidence:
+      - lib/src/domain/uncertainty_model.dart
+      - test/uncertainty_model_test.dart
+  - id: LBO-25
+    phase: LBO
+    title: Low-battery and shutdown durability
+    release_gate: battery-death runs on two Android OEMs and an iPhone lose zero committed fixes and at most one interval of uncommitted fixes; no batching while the battery is low
+    required_before: endurance power tiers
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: LBO-09A
+    phase: LBO
+    title: Android Activity Recognition delivered in process with ordered, fresh transitions
+    release_gate: no service restart or notification rebuild per result while capturing; every transition handled in order; motion-recovery p95 within 10 percent on device
+    required_before: transition-first activity sampling
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/ActivityRecognitionReceiver.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: LBO-01A
+    phase: LBO
+    title: Android fix path without per-fix status echo or prerequisite binder calls
+    release_gate: status emitted on the fix path at most every 10 s; prerequisite checks at most every 30 s while passing; revocation still detected by the prerequisite monitor; channel messages per fix reduced on device
+    required_before: batched Android journal inserts
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: LBO-02A
+    phase: LBO
+    title: Single-fix path diet (protocol memoization, snapshot reuse, skipped empty scans)
+    release_gate: protocol info fetched once per adapter; snapshot publication after an append issues no track query; no rejected-run scan without intervening rejected fixes
+    required_before: batched Dart ingestion
+    evidence:
+      - lib/src/platform/native_tracker_adapter.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/native_location_stream_test.dart

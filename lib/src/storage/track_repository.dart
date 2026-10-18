@@ -29,6 +29,7 @@ final class PointWriteRequest {
     required this.accepted,
     required this.qualityFlags,
     this.rejectionReason,
+    this.qualityPolicyVersion,
   });
 
   final String trackId;
@@ -38,6 +39,11 @@ final class PointWriteRequest {
   final bool accepted;
   final int qualityFlags;
   final String? rejectionReason;
+
+  /// Quality policy version that produced [accepted], [qualityFlags] and
+  /// [rejectionReason]. Repositories persist it as point provenance; when it
+  /// is null they record the version of the epoch that covers the point.
+  final int? qualityPolicyVersion;
 }
 
 /// Result of one atomic point/topology/gap transaction.
@@ -242,6 +248,17 @@ abstract interface class QualityDiagnosticsRepository {
     required TrackingOwner owner,
     required String tripId,
   });
+}
+
+/// Optional lookup of the immutable epoch that covers an active track's next
+/// point.
+///
+/// The tracking client evaluates each fix under the policy versions this epoch
+/// recorded, so upgrading the package never reinterprets a route that is
+/// already recording. Repositories without this capability are evaluated under
+/// the current policy versions.
+abstract interface class ActiveConfigurationEpochRepository {
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(String trackId);
 }
 
 /// Optional owner-scoped lookup for immutable point-policy provenance.

@@ -5,11 +5,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Location
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -23,6 +27,7 @@ import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.ActivityRecognitionClient
 import com.google.android.gms.location.ActivityTransition
 import com.google.android.gms.location.ActivityTransitionRequest
+import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.DetectedActivity
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.Granularity
@@ -54,7 +59,9 @@ class LocationTrackingService : Service() {
     private var currentActivityTransitionPendingIntent: PendingIntent? = null
     private val monotonicDomainId = "android_process_${UUID.randomUUID()}"
     private var latestActivity: Map<String, Any?>? = null
-    private var latestActivityTimestamp = 0L
+    // Newest handled reading per source; periodic samples and transitions
+    // have separate clocks, so neither may discard the other as "older".
+    private val latestActivityTimestamps = HashMap<String, Long>()
     private var lastLocation: Location? = null
     private var lastLocationObservedAt: Long? = null
     private var stationaryReferenceLocation: Location? = null
@@ -69,6 +76,25 @@ class LocationTrackingService : Service() {
     private val stationaryExitProbeCoordinator = StationaryExitProbeCoordinator()
     private var stationaryExitProbeCancellation: CancellationTokenSource? = null
     private var stationaryExitProbeTimeout: Runnable? = null
+    private var stationaryExitFlushWait: Runnable? = null
+    private var batteryLow = false
+    @Volatile
+    private var lastPrerequisiteCheckPassedAt = Long.MIN_VALUE / 2
+    private var lastFixStatusEmittedAt = Long.MIN_VALUE / 2
+    private var powerReceiverRegistered = false
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SHUTDOWN, ACTION_QUICKBOOT_POWEROFF -> onDeviceShutdown(goAsync())
+                Intent.ACTION_BATTERY_LOW -> onBatteryLowChanged(true)
+                Intent.ACTION_BATTERY_OKAY -> onBatteryLowChanged(false)
+            }
+        }
+    }
+
+    // Newest provider fix journaled in the current capture generation.
+    private var deliveryHighWaterGeneration: String? = null
+    private var deliveryHighWaterNanos = Long.MIN_VALUE
 
     private val stationaryTransition = Runnable {
         tryEnterStationaryProfile()
@@ -94,7 +120,9 @@ class LocationTrackingService : Service() {
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             if (!captureStarted) return
-            result.locations.forEach(::handleLocation)
+            // Batched and flushed deliveries are not guaranteed to be in
+            // capture order; journal them oldest first.
+            result.locations.sortedBy { it.elapsedRealtimeNanos }.forEach(::handleLocation)
         }
     }
 
@@ -121,6 +149,7 @@ class LocationTrackingService : Service() {
         activityRecognitionClient = ActivityRecognition.getClient(this)
         isServiceAliveNow = true
         isCaptureAliveNow = false
+        liveService = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -191,10 +220,12 @@ class LocationTrackingService : Service() {
         captureStarted = false
         isCaptureAliveNow = false
         isServiceAliveNow = false
+        if (liveService === this) liveService = null
         stationaryDisplacementWindow.reset()
         runCatching { fusedLocationClient.removeLocationUpdates(locationCallback) }
         removeCurrentActivityUpdates(clearGeneration = false)
         motionSensorFusion.stop()
+        unregisterPowerReceiver()
         releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
         if (::stateStore.isInitialized) {
@@ -346,7 +377,32 @@ class LocationTrackingService : Service() {
             intent.getStringExtra(EXTRA_ACTIVITY_PROBABILITIES),
             intent.getStringExtra(EXTRA_ACTIVITY_SOURCE)
                 ?: "android_activity_recognition",
+            intent.getLongExtra(EXTRA_ACTIVITY_EPISODE_STARTED_AT, -1L).takeIf { it > 0L },
         )
+    }
+
+    /**
+     * Handles an activity result in process while capture runs. Results reach
+     * the receiver on the main thread every few seconds; restarting the
+     * service for each one rebuilt the notification and re-read the
+     * configuration. Returns false when capture is not running, so the caller
+     * falls back to starting the service.
+     */
+    internal fun deliverActivityInProcess(
+        trackId: String?,
+        generation: Long,
+        activityType: Int,
+        confidence: Int,
+        timestamp: Long,
+        probabilitiesJson: String?,
+        source: String,
+        episodeStartedAt: Long?,
+    ): Boolean {
+        if (!captureStarted) return false
+        if (!stateStore.trackingEnabled || stateStore.isPaused) return false
+        if (!stateStore.acceptsActivityRecognitionEvent(trackId, generation)) return true
+        handleActivity(activityType, confidence, timestamp, probabilitiesJson, source, episodeStartedAt)
+        return true
     }
 
     private fun updateConfiguration(intent: Intent) {
@@ -422,6 +478,8 @@ class LocationTrackingService : Service() {
 
         captureStarted = true
         isCaptureAliveNow = true
+        lastPrerequisiteCheckPassedAt = Long.MIN_VALUE / 2
+        lastFixStatusEmittedAt = Long.MIN_VALUE / 2
         acquireCaptureWakeLock()
         currentProfile = TrackingStateStore.PROFILE_MOVING
         stillSince = null
@@ -438,6 +496,7 @@ class LocationTrackingService : Service() {
         nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
         recentFixDeduplicator.clear()
 
+        registerPowerReceiver()
         requestActivityUpdates()
         motionSensorFusion.start(configuration)
         requestLocationUpdates(currentProfile)
@@ -467,13 +526,14 @@ class LocationTrackingService : Service() {
         }
         removeCurrentActivityUpdates(clearGeneration = true)
         motionSensorFusion.stop()
+        unregisterPowerReceiver()
         releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
         currentProfile = TrackingStateStore.PROFILE_IDLE
         stillSince = null
         movingEvidence = 0
         latestActivity = null
-        latestActivityTimestamp = 0L
+        latestActivityTimestamps.clear()
         lastLocation = null
         lastLocationObservedAt = null
         stationaryReferenceLocation = null
@@ -483,6 +543,8 @@ class LocationTrackingService : Service() {
         stationaryExitProbeCancellation = null
         stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
         stationaryExitProbeTimeout = null
+        stationaryExitFlushWait?.let(mainHandler::removeCallbacks)
+        stationaryExitFlushWait = null
         recentFixDeduplicator.clear()
         stateStore.markServiceHeartbeat(captureActive = false)
         PendingLocationCoordinator.closeAsync(this)
@@ -543,8 +605,11 @@ class LocationTrackingService : Service() {
                 configuration.captureIntent != "adaptive")
         val request = LocationRequest.Builder(priority, interval)
             .setMinUpdateIntervalMillis((interval / 2L).coerceAtLeast(1_000L))
-            // Live walking capture must not be hidden in a long provider batch.
-            .setMaxUpdateDelayMillis(if (highFidelity) interval else (interval * 2L))
+            // Live walking capture must not be hidden in a long provider batch,
+            // and on a low battery a batch could die with the phone.
+            .setMaxUpdateDelayMillis(
+                if (highFidelity || batteryLow) interval else (interval * 2L),
+            )
             // Never satisfy a new high-fidelity request with a cached fix.
             .setMaxUpdateAgeMillis(if (highFidelity) 0L else interval)
             .setMinUpdateDistanceMeters(distance)
@@ -555,21 +620,21 @@ class LocationTrackingService : Service() {
             .setWaitForAccurateLocation(highFidelity)
             .build()
 
-        fusedLocationClient.removeLocationUpdates(locationCallback).addOnCompleteListener {
-            if (!captureStarted || generation != requestGeneration) return@addOnCompleteListener
-            try {
-                fusedLocationClient.requestLocationUpdates(
-                    request,
-                    locationCallback,
-                    workerThread.looper,
-                ).addOnFailureListener { error ->
-                    if (captureStarted && generation == requestGeneration) {
-                        failCapture("Location updates failed: ${error.message.orEmpty()}")
-                    }
+        // Requesting again with the same callback replaces the active request
+        // in place. Removing it first left a gap that could restart the
+        // location engine on every profile switch.
+        try {
+            fusedLocationClient.requestLocationUpdates(
+                request,
+                locationCallback,
+                workerThread.looper,
+            ).addOnFailureListener { error ->
+                if (captureStarted && generation == requestGeneration) {
+                    failCapture("Location updates failed: ${error.message.orEmpty()}")
                 }
-            } catch (error: SecurityException) {
-                failCapture("Location permission was revoked: ${error.message.orEmpty()}")
             }
+        } catch (error: SecurityException) {
+            failCapture("Location permission was revoked: ${error.message.orEmpty()}")
         }
     }
 
@@ -645,9 +710,13 @@ class LocationTrackingService : Service() {
         }
     }
 
-    private fun handleLocation(location: Location, onDurablyHandled: (() -> Unit)? = null) {
+    private fun handleLocation(
+        location: Location,
+        captureOrigin: String = CAPTURE_ORIGIN_PROVIDER_STREAM,
+        onDurablyHandled: (() -> Unit)? = null,
+    ) {
         if (!captureStarted) return
-        if (!checkActivePrerequisites()) return
+        if (!checkActivePrerequisitesForFix()) return
         val trackId = stateStore.activeTrackId ?: return
         val captureGenerationId = stateStore.captureGenerationId ?: run {
             failCapture("Native capture generation is unavailable.")
@@ -677,6 +746,7 @@ class LocationTrackingService : Service() {
             return
         }
 
+        val (activityEvidenceState, activityAgeMs) = activityEvidenceAt(nativeReceivedAt)
         val event = linkedMapOf<String, Any?>(
             "eventId" to eventId,
             "trackId" to trackId,
@@ -716,6 +786,8 @@ class LocationTrackingService : Service() {
             "captureGenerationId" to captureGenerationId,
             "nativeSessionStartedAt" to stateStore.nativeSessionStartedAt,
             "nativeLifecycle" to TrackingStateStore.STATE_TRACKING,
+            "captureOrigin" to captureOrigin,
+            "deliveryOrder" to deliveryOrder(captureGenerationId, location.elapsedRealtimeNanos),
             "isMocked" to mocked,
             "mockDetectionAvailable" to TrackingStateStore.MOCK_DETECTION_AVAILABLE,
             "mockEvidence" to if (mocked) {
@@ -728,8 +800,8 @@ class LocationTrackingService : Service() {
             "activityTimestamp" to latestActivity?.get("timestamp"),
             "activitySource" to latestActivity?.get("source"),
             "activityRawType" to latestActivity?.get("rawType"),
-            "activityEvidenceState" to latestActivity?.get("evidenceState"),
-            "activityAgeMs" to latestActivity?.get("ageMs"),
+            "activityEvidenceState" to activityEvidenceState,
+            "activityAgeMs" to activityAgeMs,
             "activityProbabilities" to latestActivity?.get("probabilities"),
             "motionEvidence" to TrackingEventBus.lastMotionEvidence,
             "motionState" to if (currentProfile == TrackingStateStore.PROFILE_STATIONARY) {
@@ -779,7 +851,14 @@ class LocationTrackingService : Service() {
     ) {
         if (!captureStarted || stateStore.activeTrackId != trackId) return
         TrackingEventBus.emitLocation(event)
-        stateStore.emitCurrentStatus()
+        // Dart publishes its own status after each commit, so the native
+        // status (binder calls plus a channel message) is a liveness tick
+        // here rather than a per-fix echo.
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (nowElapsed - lastFixStatusEmittedAt >= FIX_STATUS_LIVENESS_INTERVAL_MS) {
+            lastFixStatusEmittedAt = nowElapsed
+            stateStore.emitCurrentStatus()
+        }
 
         val observedAt = System.currentTimeMillis()
         if (!isMotionEvidenceEligible(location)) {
@@ -832,15 +911,33 @@ class LocationTrackingService : Service() {
         }
     }
 
+    /**
+     * Evidence state and age of the latest activity reading at a fix. A
+     * reading is aged at the fix, not at its own delivery; readings that were
+     * never available keep their state.
+     */
+    private fun activityEvidenceAt(fixReceivedAt: Long): Pair<Any?, Any?> {
+        val activity = latestActivity ?: return null to null
+        val state = activity["evidenceState"]
+        val observedAt = activity["timestamp"] as? Long
+        if (observedAt == null || (state != "fresh" && state != "stale")) {
+            return state to activity["ageMs"]
+        }
+        val age = (fixReceivedAt - observedAt).coerceAtLeast(0L)
+        val fresh = age <= configuration.activityFreshnessThresholdMs
+        return (if (fresh) "fresh" else "stale") to age
+    }
+
     private fun handleActivity(
         activityType: Int,
         confidence: Int,
         timestamp: Long,
         probabilitiesJson: String? = null,
         source: String = "android_activity_recognition",
+        episodeStartedAt: Long? = null,
     ) {
-        if (timestamp < latestActivityTimestamp) return
-        latestActivityTimestamp = timestamp
+        if (timestamp < (latestActivityTimestamps[source] ?: 0L)) return
+        latestActivityTimestamps[source] = timestamp
         val now = System.currentTimeMillis()
         val age = (now - timestamp).coerceAtLeast(0L)
         val fresh = age <= configuration.activityFreshnessThresholdMs
@@ -850,6 +947,7 @@ class LocationTrackingService : Service() {
             put("evidenceState", if (fresh) "fresh" else "stale")
             put("ageMs", age)
             put("probabilities", parseActivityProbabilities(probabilitiesJson))
+            if (episodeStartedAt != null) put("episodeStartedAt", episodeStartedAt)
         }
         latestActivity = event
         TrackingEventBus.emitActivity(event)
@@ -963,6 +1061,24 @@ class LocationTrackingService : Service() {
         stateStore.markStationaryExitProbeRequested()
         stateStore.emitCurrentStatus()
 
+        // Deliver batched fixes before asking for a fresh one. A fresh fix
+        // journaled ahead of older flushed fixes made Dart reject those as
+        // non-monotonic. The probe starts when the flush completes, or after
+        // a short wait if the flush is slow.
+        val requestFreshFix = object : Runnable {
+            private var requested = false
+
+            override fun run() {
+                if (requested) return
+                requested = true
+                // A newer probe may already own the wait slot.
+                if (stationaryExitFlushWait === this) stationaryExitFlushWait = null
+                requestFreshProbeFix(token)
+            }
+        }
+        stationaryExitFlushWait?.let(mainHandler::removeCallbacks)
+        stationaryExitFlushWait = requestFreshFix
+        mainHandler.postDelayed(requestFreshFix, STATIONARY_EXIT_FLUSH_WAIT_MS)
         fusedLocationClient.flushLocations()
             .addOnSuccessListener {
                 if (captureStarted) stateStore.markStationaryExitFlushOutcome("succeeded")
@@ -975,7 +1091,108 @@ class LocationTrackingService : Service() {
                     )
                 }
             }
+            .addOnCompleteListener {
+                mainHandler.removeCallbacks(requestFreshFix)
+                requestFreshFix.run()
+            }
+    }
 
+    /**
+     * Requests one fresh, fine fix for [token]: never a cached location, and
+     * bounded by the probe timeout.
+     */
+    /**
+     * `late` when a fix arrives behind a newer fix of the same capture
+     * generation (out-of-order batch or flush delivery). Late fixes are still
+     * journaled; the tag only explains why Dart rejects them as non-monotonic.
+     * Provider callbacks arrive on the worker looper and probe fixes on the
+     * main thread, hence the lock.
+     */
+    private fun registerPowerReceiver() {
+        if (powerReceiverRegistered) return
+        batteryLow = isBatteryLowNow()
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SHUTDOWN)
+            addAction(ACTION_QUICKBOOT_POWEROFF)
+            addAction(Intent.ACTION_BATTERY_LOW)
+            addAction(Intent.ACTION_BATTERY_OKAY)
+        }
+        // System broadcasts only; nothing outside the app may send them here.
+        ContextCompat.registerReceiver(this, powerReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        powerReceiverRegistered = true
+    }
+
+    private fun unregisterPowerReceiver() {
+        if (!powerReceiverRegistered) return
+        powerReceiverRegistered = false
+        runCatching { unregisterReceiver(powerReceiver) }
+    }
+
+    private fun isBatteryLowNow(): Boolean {
+        val status = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return status.getBooleanExtra(BatteryManager.EXTRA_BATTERY_LOW, false)
+        }
+        val level = status.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = status.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        return level >= 0 && scale > 0 && level * 100 <= scale * LOW_BATTERY_PERCENT
+    }
+
+    private fun onBatteryLowChanged(low: Boolean) {
+        if (!captureStarted || batteryLow == low) return
+        batteryLow = low
+        requestLocationUpdates(currentProfile)
+    }
+
+    /**
+     * The device is shutting down. Hand batched fixes to the callback, then
+     * wait until the journal has committed every write queued before the fence,
+     * so a dying phone loses no captured fix. Android allows a receiver only a
+     * few seconds here, so the wait is bounded.
+     */
+    private fun onDeviceShutdown(pending: BroadcastReceiver.PendingResult) {
+        var finished = false
+        val finish = Runnable {
+            if (finished) return@Runnable
+            finished = true
+            pending.finish()
+        }
+        if (!captureStarted) {
+            finish.run()
+            return
+        }
+        stateStore.markShutdownObserved()
+        mainHandler.postDelayed(finish, SHUTDOWN_FLUSH_WAIT_MS)
+        fusedLocationClient.flushLocations().addOnCompleteListener {
+            // Flushed deliveries are already queued on the worker looper; the
+            // journal fence follows the writes they enqueue.
+            workerHandler.post {
+                val fenced = PendingLocationCoordinator.execute(
+                    applicationContext,
+                    onFailure = { mainHandler.post(finish) },
+                ) { mainHandler.post(finish) }
+                if (!fenced) mainHandler.post(finish)
+            }
+        }
+    }
+
+    @Synchronized
+    private fun deliveryOrder(generationId: String, elapsedRealtimeNanos: Long): String {
+        if (generationId != deliveryHighWaterGeneration) {
+            deliveryHighWaterGeneration = generationId
+            deliveryHighWaterNanos = Long.MIN_VALUE
+        }
+        if (elapsedRealtimeNanos < deliveryHighWaterNanos) return "late"
+        deliveryHighWaterNanos = elapsedRealtimeNanos
+        return "inOrder"
+    }
+
+    private fun requestFreshProbeFix(token: Long) {
+        if (!captureStarted) return
+        if (!hasLocationPermission()) {
+            completeStationaryExitProbe(token, "permission_unavailable")
+            return
+        }
         if (!stationaryExitProbeCoordinator.beginCurrentFixRequest(token)) return
         stationaryExitProbeCancellation?.cancel()
         val cancellation = CancellationTokenSource()
@@ -995,13 +1212,18 @@ class LocationTrackingService : Service() {
 
         try {
             fusedLocationClient.getCurrentLocation(
-                Priority.PRIORITY_HIGH_ACCURACY,
+                CurrentLocationRequest.Builder()
+                    .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                    .setMaxUpdateAgeMillis(0)
+                    .setGranularity(Granularity.GRANULARITY_FINE)
+                    .setDurationMillis(STATIONARY_EXIT_PROBE_TIMEOUT_MS)
+                    .build(),
                 cancellation.token,
             ).addOnSuccessListener { location ->
                 if (location == null) {
                     completeStationaryExitProbe(token, "no_fix")
                 } else {
-                    handleLocation(location) {
+                    handleLocation(location, CAPTURE_ORIGIN_EXIT_PROBE) {
                         completeStationaryExitProbe(token, "succeeded")
                     }
                 }
@@ -1023,6 +1245,8 @@ class LocationTrackingService : Service() {
         if (!stationaryExitProbeCoordinator.complete(token)) return
         stationaryExitProbeTimeout?.let(mainHandler::removeCallbacks)
         stationaryExitProbeTimeout = null
+        stationaryExitFlushWait?.let(mainHandler::removeCallbacks)
+        stationaryExitFlushWait = null
         stationaryExitProbeCancellation = null
         stateStore.markStationaryExitProbeCompleted(outcome)
         stateStore.emitCurrentStatus()
@@ -1042,6 +1266,19 @@ class LocationTrackingService : Service() {
         stateStore.emitCurrentStatus()
         runCatching { removeForegroundNotification() }
         stopSelf()
+    }
+
+    /**
+     * The per-fix prerequisite check, reused for 30 s once it passes. Each
+     * check costs binder calls; the 60 s prerequisite monitor and the provider
+     * itself still catch revocations between checks.
+     */
+    private fun checkActivePrerequisitesForFix(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPrerequisiteCheckPassedAt < PREREQUISITE_FIX_CHECK_INTERVAL_MS) return true
+        val passed = checkActivePrerequisites()
+        if (passed) lastPrerequisiteCheckPassedAt = now
+        return passed
     }
 
     private fun checkActivePrerequisites(): Boolean {
@@ -1380,6 +1617,7 @@ class LocationTrackingService : Service() {
         internal const val EXTRA_ACTIVITY_GENERATION = "activity_generation"
         internal const val EXTRA_ACTIVITY_PROBABILITIES = "activity_probabilities"
         internal const val EXTRA_ACTIVITY_SOURCE = "activity_source"
+        internal const val EXTRA_ACTIVITY_EPISODE_STARTED_AT = "activity_episode_started_at"
 
         private const val NOTIFICATION_ID = 45_001
         private const val REQUEST_OPEN_APP = 45_001
@@ -1393,6 +1631,15 @@ class LocationTrackingService : Service() {
         private const val PREREQUISITE_MONITOR_INTERVAL_MS = 60_000L
         private const val MINIMUM_BASELINE_FRESHNESS_MS = 30_000L
         private const val STATIONARY_EXIT_PROBE_TIMEOUT_MS = 15_000L
+        private const val STATIONARY_EXIT_FLUSH_WAIT_MS = 2_000L
+        private const val SHUTDOWN_FLUSH_WAIT_MS = 4_000L
+        private const val PREREQUISITE_FIX_CHECK_INTERVAL_MS = 30_000L
+        private const val FIX_STATUS_LIVENESS_INTERVAL_MS = 10_000L
+        private const val LOW_BATTERY_PERCENT = 15
+        // Fast-boot power-off on some OEM builds instead of ACTION_SHUTDOWN.
+        private const val ACTION_QUICKBOOT_POWEROFF = "android.intent.action.QUICKBOOT_POWEROFF"
+        private const val CAPTURE_ORIGIN_PROVIDER_STREAM = "providerStream"
+        private const val CAPTURE_ORIGIN_EXIT_PROBE = "exitProbe"
         private const val CAPTURE_REASON_NEW_TRACK = "new_track"
         private const val CAPTURE_REASON_RESUME = "resume"
         private const val CAPTURE_REASON_PROCESS_RECOVERY = "process_recovery"
@@ -1406,6 +1653,11 @@ class LocationTrackingService : Service() {
 
         @Volatile
         internal var isCaptureAliveNow: Boolean = false
+            private set
+
+        /** The running service, for in-process activity hand-off. */
+        @Volatile
+        internal var liveService: LocationTrackingService? = null
             private set
     }
 }

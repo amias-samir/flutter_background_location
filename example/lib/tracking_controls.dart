@@ -417,7 +417,7 @@ class TrackingConfigurationControls extends StatelessWidget {
                   const SizedBox(width: 10),
                   const Expanded(
                     child: Text(
-                      'Precised requests 5-second navigation-grade updates, accepts fixes within 15 m, and can use significantly more battery.',
+                      'Precised requests 3-second navigation-grade updates, accepts fixes within 15 m, and can use significantly more battery.',
                     ),
                   ),
                 ],

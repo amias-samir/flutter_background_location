@@ -106,6 +106,7 @@ internal class StationaryDisplacementWindow {
 
     companion object {
         private const val MINIMUM_FIX_COUNT = 2
-        private const val EARTH_RADIUS_METERS = 6_371_000.0
+        // IUGG mean radius, matching Dart `TrackGeodesy.meanEarthRadiusMeters`.
+        private const val EARTH_RADIUS_METERS = 6_371_008.8
     }
 }

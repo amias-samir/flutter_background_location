@@ -32,6 +32,14 @@ enum NativeLocationJournalError: LocalizedError {
   }
 }
 
+/// Names a platform error by domain and code only. Platform descriptions can
+/// carry container paths, payload fragments, or identifiers, so package errors
+/// and status messages never echo them.
+func redactedErrorSummary(_ error: Error) -> String {
+  let nsError = error as NSError
+  return "\(nsError.domain) \(nsError.code)"
+}
+
 struct NativeLocationJournalAcknowledgement {
   let deleted: Int
   let remaining: Int
@@ -94,6 +102,17 @@ final class NativeLocationJournalQueue {
   ) {
     execute(completion: completion) {
       try self.journal.append(event)
+    }
+  }
+
+  /// Appends one Core Location callback's events in a single transaction; see
+  /// ``NativeLocationJournal/appendAll(_:)``.
+  func appendAll(
+    _ events: [[String: Any]],
+    completion: @escaping (Result<[Result<Int, Error>], Error>) -> Void
+  ) {
+    execute(completion: completion) {
+      try self.journal.appendAll(events)
     }
   }
 
@@ -207,7 +226,9 @@ final class NativeLocationJournal {
       "opened": false,
       "databaseName": databaseName,
       "errorType": String(describing: type(of: error)),
-      "errorMessage": error.localizedDescription,
+      "errorMessage": error is NativeLocationJournalError
+        ? error.localizedDescription
+        : "The native location journal failed (\(redactedErrorSummary(error))).",
     ]
   }
 
@@ -312,8 +333,61 @@ final class NativeLocationJournal {
   /// Commits the exact envelope before it is delivered over EventChannel.
   @discardableResult
   func append(_ event: [String: Any]) throws -> Int {
-    try prepare()
+    guard let result = try appendAll([event]).first else {
+      throw NativeLocationJournalError.invalidEvent("No event was appended.")
+    }
+    return try result.get()
+  }
 
+  /// Appends one Core Location callback's events in a single transaction.
+  ///
+  /// Each event gets its own result: an invalid event or a full journal fails
+  /// only that event, and later events are still tried, as separate appends
+  /// were. A SQLite failure rolls the whole batch back and is thrown.
+  func appendAll(_ events: [[String: Any]]) throws -> [Result<Int, Error>] {
+    try prepare()
+    let encoded = events.map { event in Result { try encode(event) } }
+    guard encoded.contains(where: { if case .success = $0 { return true } else { return false } })
+    else {
+      return encoded.map { $0.map { _ in pendingCount } }
+    }
+    return try transaction {
+      let statement = try prepareStatement(Self.insertSQL, operation: "prepare insert")
+      defer { sqlite3_finalize(statement) }
+      return try encoded.map { item -> Result<Int, Error> in
+        switch item {
+        case .failure(let error):
+          return .failure(error)
+        case .success(let event):
+          guard pendingCount < Self.maximumPendingEvents else {
+            return .failure(
+              NativeLocationJournalError.capacity(
+                current: pendingCount,
+                maximum: Self.maximumPendingEvents
+              ))
+          }
+          try insert(event, using: statement)
+          return .success(pendingCount)
+        }
+      }
+    }
+  }
+
+  private static let insertSQL =
+    """
+    INSERT OR IGNORE INTO pending_locations(
+      event_id, track_id, captured_at_ms, created_at_ms, payload
+    ) VALUES (?, ?, ?, ?, ?)
+    """
+
+  private struct EncodedEvent {
+    let eventId: String
+    let trackId: String
+    let capturedAtMs: Int64
+    let payload: Data
+  }
+
+  private func encode(_ event: [String: Any]) throws -> EncodedEvent {
     guard let eventId = event["eventId"] as? String, !eventId.isEmpty else {
       throw NativeLocationJournalError.invalidEvent("eventId is required.")
     }
@@ -331,56 +405,52 @@ final class NativeLocationJournal {
     do {
       payload = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
     } catch {
-      throw NativeLocationJournalError.invalidEvent(error.localizedDescription)
+      throw NativeLocationJournalError.invalidEvent(
+        "payload could not be encoded (\(redactedErrorSummary(error)))."
+      )
     }
     guard payload.count <= Self.maximumPayloadBytes else {
       throw NativeLocationJournalError.invalidEvent(
         "payload is \(payload.count) bytes; maximum is \(Self.maximumPayloadBytes)."
       )
     }
+    return EncodedEvent(
+      eventId: eventId,
+      trackId: trackId,
+      capturedAtMs: timestamp.int64Value,
+      payload: payload
+    )
+  }
 
-    return try transaction {
-      guard pendingCount < Self.maximumPendingEvents else {
-        throw NativeLocationJournalError.capacity(
-          current: pendingCount,
-          maximum: Self.maximumPendingEvents
-        )
-      }
+  /// Inserts [event] with a prepared insert, leaving it reset for reuse.
+  private func insert(_ event: EncodedEvent, using statement: OpaquePointer) throws {
+    defer {
+      sqlite3_reset(statement)
+      sqlite3_clear_bindings(statement)
+    }
+    try bind(event.eventId, to: statement, index: 1, operation: "bind event ID")
+    try bind(event.trackId, to: statement, index: 2, operation: "bind track ID")
+    sqlite3_bind_int64(statement, 3, event.capturedAtMs)
+    sqlite3_bind_int64(statement, 4, epochMilliseconds(Date()))
+    let bindPayloadCode = event.payload.withUnsafeBytes { bytes in
+      sqlite3_bind_blob(
+        statement,
+        5,
+        bytes.baseAddress,
+        Int32(bytes.count),
+        sqliteTransient
+      )
+    }
+    guard bindPayloadCode == SQLITE_OK else {
+      throw databaseError(operation: "bind payload", code: bindPayloadCode)
+    }
 
-      let sql =
-        """
-        INSERT OR IGNORE INTO pending_locations(
-          event_id, track_id, captured_at_ms, created_at_ms, payload
-        ) VALUES (?, ?, ?, ?, ?)
-        """
-      let statement = try prepareStatement(sql, operation: "prepare insert")
-      defer { sqlite3_finalize(statement) }
-
-      try bind(eventId, to: statement, index: 1, operation: "bind event ID")
-      try bind(trackId, to: statement, index: 2, operation: "bind track ID")
-      sqlite3_bind_int64(statement, 3, timestamp.int64Value)
-      sqlite3_bind_int64(statement, 4, epochMilliseconds(Date()))
-      let bindPayloadCode = payload.withUnsafeBytes { bytes in
-        sqlite3_bind_blob(
-          statement,
-          5,
-          bytes.baseAddress,
-          Int32(bytes.count),
-          sqliteTransient
-        )
-      }
-      guard bindPayloadCode == SQLITE_OK else {
-        throw databaseError(operation: "bind payload", code: bindPayloadCode)
-      }
-
-      let stepCode = sqlite3_step(statement)
-      guard stepCode == SQLITE_DONE else {
-        throw databaseError(operation: "insert", code: stepCode)
-      }
-      if sqlite3_changes(requiredDatabase()) > 0 {
-        pendingCount += 1
-      }
-      return pendingCount
+    let stepCode = sqlite3_step(statement)
+    guard stepCode == SQLITE_DONE else {
+      throw databaseError(operation: "insert", code: stepCode)
+    }
+    if sqlite3_changes(requiredDatabase()) > 0 {
+      pendingCount += 1
     }
   }
 
@@ -425,7 +495,9 @@ final class NativeLocationJournal {
       do {
         decoded = try JSONSerialization.jsonObject(with: payload)
       } catch {
-        throw NativeLocationJournalError.corruptEvent(error.localizedDescription)
+        throw NativeLocationJournalError.corruptEvent(
+          "payload could not be decoded (\(redactedErrorSummary(error)))."
+        )
       }
       guard let event = decoded as? [String: Any],
         event["eventId"] as? String == eventId,
@@ -641,7 +713,9 @@ final class NativeLocationJournal {
       resourceValues.isExcludedFromBackup = true
       try directory.setResourceValues(resourceValues)
     } catch {
-      throw NativeLocationJournalError.fileSystem(error.localizedDescription)
+      throw NativeLocationJournalError.fileSystem(
+        "the journal directory could not be prepared (\(redactedErrorSummary(error)))."
+      )
     }
     return directory.appendingPathComponent(Self.databaseName, isDirectory: false)
   }
@@ -657,7 +731,9 @@ final class NativeLocationJournal {
       resourceValues.isExcludedFromBackup = true
       try protectedURL.setResourceValues(resourceValues)
     } catch {
-      throw NativeLocationJournalError.fileSystem(error.localizedDescription)
+      throw NativeLocationJournalError.fileSystem(
+        "journal file protection could not be applied (\(redactedErrorSummary(error)))."
+      )
     }
   }
 
@@ -760,7 +836,9 @@ final class NativeLocationJournal {
     do {
       decoded = try JSONSerialization.jsonObject(with: payload)
     } catch {
-      throw NativeLocationJournalError.corruptEvent(error.localizedDescription)
+      throw NativeLocationJournalError.corruptEvent(
+        "payload could not be decoded (\(redactedErrorSummary(error)))."
+      )
     }
     guard let event = decoded as? [String: Any],
       event["eventId"] as? String == eventId,

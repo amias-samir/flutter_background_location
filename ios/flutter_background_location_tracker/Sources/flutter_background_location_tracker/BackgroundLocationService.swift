@@ -1,6 +1,7 @@
 import CoreLocation
 import CoreMotion
 import Foundation
+import UIKit
 
 protocol BackgroundLocationServiceDelegate: AnyObject {
   func backgroundLocationService(
@@ -156,6 +157,19 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var configuration = TrackingConfiguration.defaults
   private var lastLocationEvent: [String: Any]?
   private var lastActivityEvent: [String: Any]?
+  private var lastContinuityHealthPersistedAt: Date?
+
+  /// Unplugged at or below 5 %. Requires battery monitoring, which capture
+  /// enables; an unknown level (-1) never counts as nearly empty.
+  private var isBatteryNearlyEmpty: Bool {
+    let device = UIDevice.current
+    guard device.isBatteryMonitoringEnabled, device.batteryState == .unplugged else {
+      return false
+    }
+    let level = device.batteryLevel
+    return level >= 0 && level <= 0.05
+  }
+  private static let continuityHealthPersistInterval: TimeInterval = 15
   private var lastMotionEvidence: [String: Any]?
   private lazy var motionSensorFusion = MotionSensorFusion { [weak self] evidence in
     DispatchQueue.main.async {
@@ -189,6 +203,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var lastProbeCompletedAt: Date?
   private var lastProbeOutcome: String?
   private var probeTimeoutWorkItem: DispatchWorkItem?
+  /// End of the active probe burst; nil when no burst is running.
+  private var probeBurstEndsAt: Date?
+  private var probeBurstConvergedFixes = 0
+  private static let probeBurstDuration: TimeInterval = 15
+  private static let probeBurstConvergedFixTarget = 3
   private var recentProviderFixKeys: Set<String> = []
   private var recentProviderFixKeyOrder: [String] = []
   private var pendingTerminationRecovery = false
@@ -430,6 +449,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     emitStatus()
 
     configureLocationManager(for: .moving)
+    UIDevice.current.isBatteryMonitoringEnabled = true
     startBackgroundActivitySessionIfNeeded()
     startMotionUpdatesIfPossible()
     motionSensorFusion.start(configuration: configuration)
@@ -620,9 +640,11 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         terminationRecoveryGapStartedAt
       )
     }
+    // Always send the key: Dart treats an absent key as a legacy native and
+    // falls back to the status time, which would invent a fix that never came.
+    state["lastPointAt"] = lastLocationEvent?["timestamp"] ?? NSNull()
     if let lastLocationEvent {
       state["lastLocation"] = lastLocationEvent
-      state["lastPointAt"] = lastLocationEvent["timestamp"]
     }
     if let lastActivityEvent {
       state["lastActivity"] = lastActivityEvent
@@ -786,9 +808,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       serviceError = .locationJournalCapacity(current: current, maximum: maximum)
     } else {
       serviceError = .locationJournalFailure(
-        error.localizedDescription.isEmpty
-          ? "The durable location journal failed."
-          : error.localizedDescription
+        error is NativeLocationJournalError
+          ? error.localizedDescription
+          : "The durable location journal failed (\(redactedErrorSummary(error)))."
       )
     }
 
@@ -875,6 +897,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     sessionGeneration += 1
     probeTimeoutWorkItem?.cancel()
     probeTimeoutWorkItem = nil
+    probeBurstEndsAt = nil
     locationManager.stopUpdatingLocation()
     locationManager.stopMonitoringSignificantLocationChanges()
     locationManager.allowsBackgroundLocationUpdates = false
@@ -1086,6 +1109,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     profile = newProfile
     lastEmittedLocation = nil
     lastProfileTransitionAt = Date()
+    probeBurstEndsAt = nil
     configureLocationManager(for: newProfile)
     persistState()
     if newProfile == .moving {
@@ -1106,13 +1130,20 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     lastProbeOutcome = nil
     probeTimeoutWorkItem?.cancel()
     probeTimeoutWorkItem = nil
+    probeBurstEndsAt = nil
     recentProviderFixKeys.removeAll(keepingCapacity: true)
     recentProviderFixKeyOrder.removeAll(keepingCapacity: true)
   }
 
-  /// Requests one immediate fix after leaving the stationary profile. The
-  /// normal provider remains active, and timeout/failure is health evidence,
-  /// never a reason to stop capture.
+  /// Acquires fresh fixes at start, resume, and stationary exit. The normal
+  /// provider remains active, and timeout/failure is health evidence, never
+  /// a reason to stop capture.
+  ///
+  /// `requestLocation()` does nothing while standard updates run, so the probe
+  /// is an in-place burst instead: at least Best accuracy with no distance
+  /// filter until three converged fixes arrive or 15 s pass, then the active
+  /// profile's configuration is restored. Every burst fix is emitted and
+  /// tagged `captureOrigin: probeBurst`.
   private func requestStationaryExitProbe() {
     guard lifecycle == .tracking || lifecycle == .starting else { return }
 
@@ -1122,19 +1153,37 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     lastProbeOutcome = "pending"
     persistContinuityHealth()
 
+    probeBurstEndsAt = requestedAt.addingTimeInterval(Self.probeBurstDuration)
+    probeBurstConvergedFixes = 0
+    locationManager.desiredAccuracy = min(
+      configuration.movingDesiredAccuracy,
+      kCLLocationAccuracyBest
+    )
+    locationManager.distanceFilter = kCLDistanceFilterNone
+
     probeTimeoutWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
-      guard let self, self.lastProbeOutcome == "pending" else { return }
+      guard let self else { return }
+      self.probeTimeoutWorkItem = nil
+      self.endProbeBurst()
+      guard self.lastProbeOutcome == "pending" else { return }
       self.lastProbeCompletedAt = Date()
       self.lastProbeOutcome = "timed_out"
-      self.probeTimeoutWorkItem = nil
       self.persistContinuityHealth()
       self.emitStatus(message: "stationary_exit_probe_timed_out")
     }
     probeTimeoutWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
-    locationManager.requestLocation()
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.probeBurstDuration, execute: workItem)
     emitStatus(message: "stationary_exit_probe_requested")
+  }
+
+  /// Restores the active profile's request after a probe burst.
+  private func endProbeBurst() {
+    guard probeBurstEndsAt != nil else { return }
+    probeBurstEndsAt = nil
+    probeBurstConvergedFixes = 0
+    guard lifecycle == .tracking || lifecycle == .starting else { return }
+    configureLocationManager(for: profile)
   }
 
   private func completeStationaryExitProbe(outcome: String) {
@@ -1259,11 +1308,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "eventId": providerFixEventId(providerFixKey),
       "lat": location.coordinate.latitude,
       "lon": location.coordinate.longitude,
-      "altitude": location.altitude,
       "accuracy": location.horizontalAccuracy,
-      "verticalAccuracy": location.verticalAccuracy,
-      "heading": location.course,
-      "speed": location.speed,
       "timestamp": providerTimestampMs,
       "nativeReceivedAt": nativeReceivedAtMs,
       "providerTimeDeltaMsAtReceipt": nativeReceivedAtMs - providerTimestampMs,
@@ -1282,12 +1327,26 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     if let nativeSessionStartedAt = captureGeneration.startedAt {
       event["nativeSessionStartedAt"] = epochMilliseconds(nativeSessionStartedAt)
     }
+    // Core Location marks unknown values with negative sentinels; send only
+    // valid ones (`normalized_location_validity`). A negative vertical
+    // accuracy means the altitude itself is invalid.
+    if location.verticalAccuracy >= 0 {
+      event["altitude"] = location.altitude
+      event["verticalAccuracy"] = location.verticalAccuracy
+    }
+    if location.course >= 0 {
+      event["heading"] = location.course
+    }
+    if location.speed >= 0 {
+      event["speed"] = location.speed
+    }
     if #available(iOS 13.4, *) {
-      event["headingAccuracy"] = location.courseAccuracy
-      event["speedAccuracy"] = location.speedAccuracy
-    } else {
-      event["headingAccuracy"] = -1.0
-      event["speedAccuracy"] = -1.0
+      if location.courseAccuracy >= 0 {
+        event["headingAccuracy"] = location.courseAccuracy
+      }
+      if location.speedAccuracy >= 0 {
+        event["speedAccuracy"] = location.speedAccuracy
+      }
     }
     if let trackId {
       event["trackId"] = trackId
@@ -1296,14 +1355,20 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       event["activityType"] = activity["type"]
       event["activityConfidence"] = activity["confidence"]
       event["activityTimestamp"] = activity["timestamp"]
+      event["activityEpisodeStartedAt"] = activity["episodeStartedAt"]
       event["activitySource"] = activity["source"]
       event["activityRawType"] = activity["rawType"]
-      event["activityEvidenceState"] = activity["evidenceState"]
-      event["activityAgeMs"] = activity["ageMs"]
+      // Age the reading at this fix, not at its own delivery.
+      if let observedAt = activity["timestamp"] as? Int64 {
+        let ageMs = max(0, epochMilliseconds(Date()) - observedAt)
+        event["activityAgeMs"] = ageMs
+        event["activityEvidenceState"] =
+          Double(ageMs) <= configuration.activityFreshnessThresholdMs ? "fresh" : "stale"
+      } else {
+        event["activityAgeMs"] = activity["ageMs"]
+        event["activityEvidenceState"] = activity["evidenceState"]
+      }
       event["activityProbabilities"] = activity["probabilities"]
-    } else {
-      event["activityType"] = "unknown"
-      event["activityConfidence"] = 0
     }
     if let lastMotionEvidence {
       event["motionEvidence"] = lastMotionEvidence
@@ -1348,10 +1413,13 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       type = "unknown"
     }
 
-    let timestamp = epochMilliseconds(activity.startDate)
-    let ageMs = max(0, epochMilliseconds(Date()) - timestamp)
-    let evidenceState = Double(ageMs) <= configuration.activityFreshnessThresholdMs
-      ? "fresh" : "stale"
+    // `startDate` is when Core Motion's current activity episode began, which
+    // can be hours ago during a long stop. The reading itself is current when
+    // it is delivered, so freshness is measured from receipt; the episode
+    // start is kept separately for diagnostics.
+    let timestamp = epochMilliseconds(Date())
+    let ageMs: Int64 = 0
+    let evidenceState = "fresh"
     let normalizedConfidence = motionConfidence(activity.confidence)
     var probabilities: [String: Int] = [:]
     if activity.stationary { probabilities["stationary"] = normalizedConfidence }
@@ -1366,6 +1434,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       "rawType": type,
       "confidence": normalizedConfidence,
       "timestamp": timestamp,
+      "episodeStartedAt": epochMilliseconds(activity.startDate),
       "source": "ios_core_motion_activity",
       "evidenceState": evidenceState,
       "ageMs": ageMs,
@@ -1513,7 +1582,21 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     userDefaults.synchronize()
   }
 
-  private func persistContinuityHealth() {
+  /// Persists continuity health for recovery after process death.
+  ///
+  /// Every provider callback refreshes `lastProviderCallbackAt`; writing five
+  /// keys per callback was the main per-fix I/O, so callbacks persist at most
+  /// every 15 s. Profile transitions and probe outcomes persist immediately.
+  private func persistContinuityHealth(throttled: Bool = false) {
+    let now = Date()
+    // iOS gives no shutdown signal, so near an empty battery every callback
+    // is persisted.
+    if throttled, !isBatteryNearlyEmpty, let last = lastContinuityHealthPersistedAt,
+      now.timeIntervalSince(last) < Self.continuityHealthPersistInterval
+    {
+      return
+    }
+    lastContinuityHealthPersistedAt = now
     userDefaults.set(
       lastProviderCallbackAt?.timeIntervalSince1970,
       forKey: PersistenceKey.lastProviderCallbackAt
@@ -1621,9 +1704,17 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard lifecycle == .tracking else { return }
-    lastProviderCallbackAt = Date()
-    persistContinuityHealth()
-    completeStationaryExitProbe(outcome: "succeeded")
+    let now = Date()
+    lastProviderCallbackAt = now
+    persistContinuityHealth(throttled: true)
+    // Only a fix captured after the request proves the probe; a cached or
+    // queued older fix does not.
+    if let requestedAt = lastProbeRequestedAt,
+      locations.contains(where: { $0.timestamp >= requestedAt })
+    {
+      completeStationaryExitProbe(outcome: "succeeded")
+    }
+    var events: [(event: [String: Any], generation: Int64)] = []
     for location in locations {
       let generation = sessionGeneration
       let fixKey = providerFixKey(location)
@@ -1632,11 +1723,36 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       if shouldExitStationary(for: location) {
         transition(to: .moving)
       }
-      guard shouldEmit(location) else { continue }
+      let inBurst = probeBurstEndsAt.map { now < $0 } ?? false
+      if inBurst, location.horizontalAccuracy > 0,
+        location.horizontalAccuracy <= configuration.maximumAcceptedAccuracyMeters
+      {
+        probeBurstConvergedFixes += 1
+      }
+      guard inBurst || shouldEmit(location) else { continue }
       lastEmittedLocation = location
-      let event = locationMap(location, providerFixKey: fixKey)
-      locationJournalQueue.append(event) { [weak self] result in
-        guard let self else { return }
+      var event = locationMap(location, providerFixKey: fixKey)
+      event["captureOrigin"] = inBurst ? "probeBurst" : "providerStream"
+      events.append((event, generation))
+    }
+    if let endsAt = probeBurstEndsAt,
+      now >= endsAt || probeBurstConvergedFixes >= Self.probeBurstConvergedFixTarget
+    {
+      endProbeBurst()
+    }
+    guard !events.isEmpty else { return }
+    // One journal transaction per callback instead of one per fix.
+    locationJournalQueue.appendAll(events.map(\.event)) { [weak self] batch in
+      guard let self else { return }
+      let results: [Result<Int, Error>]
+      switch batch {
+      case .success(let perEvent):
+        results = perEvent
+      case .failure(let error):
+        results = Array(repeating: .failure(error), count: events.count)
+      }
+      for (index, result) in results.enumerated() {
+        let (event, generation) = events[index]
         switch result {
         case .success(let pendingCount):
           self.journalPendingCount = pendingCount
@@ -1644,15 +1760,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
           guard generation == self.sessionGeneration,
             self.lifecycle == .tracking || self.lifecycle == .starting
           else {
-            return
+            continue
           }
           self.lastLocationEvent = event
           self.notifyObservers {
             $0.backgroundLocationService(self, didReceiveLocation: event)
           }
         case .failure(let error):
-          guard generation == self.sessionGeneration else { return }
+          guard generation == self.sessionGeneration else { continue }
           self.failLocationJournal(error)
+          return
         }
       }
     }

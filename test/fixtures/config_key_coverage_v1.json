@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "note": "Every TrackingConfig.toMap() key and whether each native configuration parser reads it. The Dart suite checks the key set; the ledger validator checks the native parsers.",
+  "keys": {
+    "accuracy": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart resolves the preset; natives read the resolved desiredAccuracy and sampling keys."
+    },
+    "desiredAccuracy": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "stationaryDesiredAccuracy": {
+      "android": "ignored",
+      "ios": "parsed",
+      "reason": "Android keeps the moving request priority while stationary until reachable stationary detection (LBO-05) adds a separate stationary request level."
+    },
+    "movingDistanceFilterMeters": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "movingIntervalMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "stationaryDistanceFilterMeters": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "stationaryIntervalMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "maximumAcceptedAccuracyMeters": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "maximumPlausibleSpeedMetersPerSecond": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Enforced by the Dart fix-quality policy."
+    },
+    "stationaryConfirmationMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "stationaryProbeDisplacementMeters": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "stationaryConfidenceThreshold": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "movingConfidenceThreshold": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "movingConfirmationCount": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "activityRecognitionIntervalMs": {
+      "android": "parsed",
+      "ios": "ignored",
+      "reason": "Core Motion delivers activity changes without a sampling interval."
+    },
+    "captureIntent": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "activityFreshnessThresholdMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "staleActivityFallback": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "motionFusionMode": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "unknownMotionFallback": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "motionEvidenceFreshnessMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "sensorProbeDurationMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "sensorProbeCooldownMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "sensorProbeMaximumDurationPerHourMs": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
+    "mockLocationPolicy": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Enforced by the Dart fix-quality policy."
+    },
+    "batchPointCount": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart upload batching."
+    },
+    "batchMaxAgeMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart upload batching."
+    },
+    "largeGapThresholdMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Legacy alias of acceptedGeometryGapThresholdMs kept for older readers."
+    },
+    "maximumProviderFixAgeMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Enforced by the Dart fix-quality policy."
+    },
+    "callbackHealthWarningThresholdMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart health watchdog."
+    },
+    "acceptedGeometryGapThresholdMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart continuity classifier and quality policy."
+    },
+    "continuityPolicy": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart continuity classifier."
+    },
+    "firstFixTimeoutMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Dart first-fix timer."
+    },
+    "notificationTitle": {
+      "android": "parsed",
+      "ios": "ignored",
+      "reason": "The Android foreground-service notification; iOS has none."
+    },
+    "notificationText": {
+      "android": "parsed",
+      "ios": "ignored",
+      "reason": "The Android foreground-service notification; iOS has none."
+    },
+    "iosTerminationRecoveryMode": {
+      "android": "ignored",
+      "ios": "parsed",
+      "reason": "iOS-only relaunch behavior."
+    }
+  },
+  "nativeOnlyKeys": {
+    "android": {
+      "stationaryTimeoutMs": "Legacy alias of stationaryConfirmationMs for early clients.",
+      "notificationChannelId": "Optional host override of the notification channel.",
+      "notificationChannelName": "Optional host override of the notification channel.",
+      "notificationChannelDescription": "Optional host override of the notification channel."
+    },
+    "ios": {
+      "stationaryTimeoutMs": "Legacy alias of stationaryConfirmationMs for early clients.",
+      "activityType": "Flattened early-client key; Dart does not send it, so iOS uses .fitness until intent-derived activity types (LBO-07).",
+      "allowBackgroundLocationUpdates": "Flattened early-client key; Dart does not send it.",
+      "requireAlwaysAuthorization": "Flattened early-client key; Dart does not send it.",
+      "showBackgroundLocationIndicator": "Flattened early-client key; Dart does not send it."
+    }
+  }
+}

@@ -3,7 +3,6 @@ package com.samir.flutter_background_location
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
-import org.json.JSONObject
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.ArrayBlockingQueue
@@ -66,6 +65,10 @@ internal class PendingLocationStore(context: Context) : Closeable {
     private val databaseFile = File(context.noBackupFilesDir, DATABASE_NAME)
     private val database: SQLiteDatabase
 
+    // PendingLocationCoordinator owns the only store, so no other writer can
+    // change the table behind these counters; diagnostics resynchronize them.
+    private val counters = JournalCounters(MAX_PENDING_ROWS, MAX_DATABASE_BYTES)
+
     init {
         databaseFile.parentFile?.mkdirs()
         database = SQLiteDatabase.openDatabase(
@@ -93,6 +96,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
                 "ON $TABLE_PENDING_LOCATIONS($COLUMN_JOURNAL_SEQUENCE)",
         )
         database.version = JOURNAL_SCHEMA_VERSION
+        loadCounters()
     }
 
     @Synchronized
@@ -111,29 +115,32 @@ internal class PendingLocationStore(context: Context) : Closeable {
             throw PendingLocationCapacityException("A native location event exceeded its safety limit.")
         }
 
-        // A duplicate provider-fix identity is already durable. Returning false
-        // also prevents a flush/current-location overlap from being emitted a
-        // second time before Dart has a chance to acknowledge the first row.
-        if (contains(eventId)) return false
-        if (isAtCapacity(stats(performMaintenance = false)) &&
-            isAtCapacity(stats(performMaintenance = true))
-        ) {
-            throw PendingLocationCapacityException(
-                "The native pending-location queue is full; reconnect the app to persist pending fixes.",
-            )
+        if (isAtCapacity(performMaintenance = false)) {
+            // A duplicate provider-fix identity is already durable, even when
+            // the queue is full.
+            if (contains(eventId)) return false
+            if (isAtCapacity(performMaintenance = true)) {
+                throw PendingLocationCapacityException(
+                    "The native pending-location queue is full; reconnect the app to persist pending fixes.",
+                )
+            }
         }
 
+        val sequence = counters.nextSequence()
         val values = ContentValues().apply {
             put(COLUMN_EVENT_ID, eventId)
             put(COLUMN_TRACK_ID, trackId)
             put(COLUMN_CAPTURED_AT, capturedAt)
             put(COLUMN_PAYLOAD, payload)
             put(COLUMN_CREATED_AT, System.currentTimeMillis())
-            put(COLUMN_JOURNAL_SEQUENCE, nextJournalSequence())
+            put(COLUMN_JOURNAL_SEQUENCE, sequence)
         }
         var inserted = false
         database.beginTransaction()
         try {
+            // IGNORE reports a duplicate provider-fix identity as -1, which
+            // keeps a flush/current-location overlap from being emitted twice
+            // before Dart acknowledges the first row.
             val rowId = database.insertWithOnConflict(
                 TABLE_PENDING_LOCATIONS,
                 null,
@@ -148,6 +155,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
         } finally {
             database.endTransaction()
         }
+        if (inserted) counters.recordInsert(sequence, payload.length)
         return inserted
     }
 
@@ -239,24 +247,25 @@ internal class PendingLocationStore(context: Context) : Closeable {
         if (validIds.isEmpty()) return 0
 
         var deleted = 0
+        var deletedLength = 0L
         database.beginTransaction()
         try {
             validIds.chunked(MAX_SQL_ARGUMENTS).forEach { chunk ->
                 val placeholders = List(chunk.size) { "?" }.joinToString(",")
+                val arguments = chunk.toTypedArray()
+                deletedLength += payloadLength("$COLUMN_EVENT_ID IN ($placeholders)", arguments)
                 deleted += database.delete(
                     TABLE_PENDING_LOCATIONS,
                     "$COLUMN_EVENT_ID IN ($placeholders)",
-                    chunk.toTypedArray(),
+                    arguments,
                 )
             }
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
         }
-        val remaining = count()
-        if (remaining == 0) {
-            stats(performMaintenance = true)
-        }
+        counters.recordDelete(deleted, deletedLength)
+        checkpointIfLarge()
         return deleted
     }
 
@@ -266,22 +275,29 @@ internal class PendingLocationStore(context: Context) : Closeable {
         require(trackId.isNotBlank() && trackId.length <= MAX_IDENTIFIER_LENGTH) {
             "A valid trackId is required."
         }
-        val deleted = database.delete(
-            TABLE_PENDING_LOCATIONS,
-            "$COLUMN_TRACK_ID = ?",
-            arrayOf(trackId),
-        )
-        if (count() == 0) stats(performMaintenance = true)
+        var deleted = 0
+        var deletedLength = 0L
+        database.beginTransaction()
+        try {
+            deletedLength = payloadLength("$COLUMN_TRACK_ID = ?", arrayOf(trackId))
+            deleted = database.delete(
+                TABLE_PENDING_LOCATIONS,
+                "$COLUMN_TRACK_ID = ?",
+                arrayOf(trackId),
+            )
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+        counters.recordDelete(deleted, deletedLength)
+        // Erasing a route's evidence should also shrink the files.
+        if (counters.rows == 0) stats(performMaintenance = true)
         return deleted
     }
 
+    /** Unacknowledged rows, from the in-memory counter. */
     @Synchronized
-    fun count(): Int = database.rawQuery(
-        "SELECT COUNT(*) FROM $TABLE_PENDING_LOCATIONS",
-        null,
-    ).use { cursor ->
-        if (cursor.moveToFirst()) cursor.getInt(0) else 0
-    }
+    fun count(): Int = counters.rows
 
     @Synchronized
     fun stats(performMaintenance: Boolean = false): PendingLocationJournalStats {
@@ -292,9 +308,10 @@ internal class PendingLocationStore(context: Context) : Closeable {
         val freelistPages = pragmaLong("freelist_count").coerceAtLeast(0L)
             .coerceAtMost(pageCount)
         val livePages = (pageCount - freelistPages).coerceAtLeast(0L)
+        loadCounters()
         return PendingLocationJournalStats(
-            pendingRows = count(),
-            pendingPayloadBytes = pendingPayloadBytes(),
+            pendingRows = counters.rows,
+            pendingPayloadBytes = counters.payloadLength,
             pageSizeBytes = pageSize,
             pageCount = pageCount,
             freelistPages = freelistPages,
@@ -330,10 +347,50 @@ internal class PendingLocationStore(context: Context) : Closeable {
         if (database.isOpen) database.close()
     }
 
-    private fun isAtCapacity(stats: PendingLocationJournalStats): Boolean =
-        stats.pendingRows >= MAX_PENDING_ROWS ||
-            stats.pendingPayloadBytes >= MAX_DATABASE_BYTES ||
-            stats.liveDatabaseBytes >= MAX_DATABASE_BYTES
+    /**
+     * Whether another row would exceed a safety bound. Row and payload limits
+     * come from the counters; page counts are read only once the payload is
+     * at least half the file bound, because payload text dominates the file.
+     */
+    private fun isAtCapacity(performMaintenance: Boolean): Boolean {
+        if (counters.isFull()) return true
+        if (!counters.needsPageCheck()) return false
+        if (performMaintenance) checkpointWal()
+        val pageSize = pragmaLong("page_size").coerceAtLeast(1L)
+        val pageCount = pragmaLong("page_count").coerceAtLeast(0L)
+        val freelistPages = pragmaLong("freelist_count").coerceIn(0L, pageCount)
+        return (pageCount - freelistPages) * pageSize >= MAX_DATABASE_BYTES
+    }
+
+    private fun loadCounters() {
+        database.rawQuery(
+            "SELECT COUNT(*), COALESCE(SUM(length($COLUMN_PAYLOAD)), 0), " +
+                "COALESCE(MAX($COLUMN_JOURNAL_SEQUENCE), 0) FROM $TABLE_PENDING_LOCATIONS",
+            null,
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                counters.load(cursor.getInt(0), cursor.getLong(1), cursor.getLong(2))
+            }
+        }
+    }
+
+    private fun payloadLength(where: String, arguments: Array<String>): Long =
+        database.rawQuery(
+            "SELECT COALESCE(SUM(length($COLUMN_PAYLOAD)), 0) FROM $TABLE_PENDING_LOCATIONS WHERE $where",
+            arguments,
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+        }
+
+    /**
+     * A passive checkpoint once the WAL is large. SQLite also checkpoints
+     * automatically; truncating on every drained ack cost an fsync per fix,
+     * so truncation is left to maintenance and close.
+     */
+    private fun checkpointIfLarge() {
+        if (walBytes() < WAL_CHECKPOINT_BYTES) return
+        database.rawQuery("PRAGMA wal_checkpoint(PASSIVE)", null).use { it.moveToFirst() }
+    }
 
     private fun contains(eventId: String): Boolean = database.query(
         TABLE_PENDING_LOCATIONS,
@@ -345,13 +402,6 @@ internal class PendingLocationStore(context: Context) : Closeable {
         null,
         "1",
     ).use { it.moveToFirst() }
-
-    private fun nextJournalSequence(): Long = database.rawQuery(
-        "SELECT COALESCE(MAX($COLUMN_JOURNAL_SEQUENCE), 0) + 1 FROM $TABLE_PENDING_LOCATIONS",
-        null,
-    ).use { cursor ->
-        if (cursor.moveToFirst()) cursor.getLong(0) else 1L
-    }
 
     private fun migrateToSequenceSchema() {
         val columns = mutableSetOf<String>()
@@ -386,13 +436,6 @@ internal class PendingLocationStore(context: Context) : Closeable {
         }
     }
 
-    private fun pendingPayloadBytes(): Long = database.rawQuery(
-        "SELECT COALESCE(SUM(length($COLUMN_PAYLOAD)), 0) FROM $TABLE_PENDING_LOCATIONS",
-        null,
-    ).use { cursor ->
-        if (cursor.moveToFirst()) cursor.getLong(0) else 0L
-    }
-
     private fun pragmaLong(name: String): Long = database.rawQuery(
         "PRAGMA $name",
         null,
@@ -421,19 +464,9 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
     private fun walBytes(): Long = File("${databaseFile.absolutePath}-wal").length()
 
-    private fun encode(event: Map<String, Any?>): String = JSONObject().apply {
-        event.forEach { (key, value) -> put(key, value ?: JSONObject.NULL) }
-    }.toString()
+    private fun encode(event: Map<String, Any?>): String = JournalPayloadCodec.encode(event)
 
-    private fun decode(payload: String): Map<String, Any?> {
-        val json = JSONObject(payload)
-        return buildMap {
-            json.keys().forEach { key ->
-                val value = json.opt(key)
-                put(key, if (value == JSONObject.NULL) null else value)
-            }
-        }
-    }
+    private fun decode(payload: String): Map<String, Any?> = JournalPayloadCodec.decode(payload)
 
     companion object {
         val databaseNameForDiagnostics: String = DATABASE_NAME
@@ -456,6 +489,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
         private const val MAX_PAGE_RECORDS = 250
         private const val JOURNAL_SCHEMA_VERSION = 2
         private const val MAX_SQL_ARGUMENTS = 500
+        private const val WAL_CHECKPOINT_BYTES = 4L * 1024L * 1024L
         private const val MAINTENANCE_NOT_RUN = "not_run"
     }
 }

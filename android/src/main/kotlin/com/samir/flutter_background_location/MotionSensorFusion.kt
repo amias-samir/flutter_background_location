@@ -16,7 +16,9 @@ import kotlin.math.sqrt
  * Active-capture-only motion collector.
  *
  * Continuous sensor values are reduced to one bounded feature window on the
- * service worker thread. Raw vectors never leave this class.
+ * service worker thread. Raw vectors never leave this class. Every state
+ * change runs on [workerHandler]: the public methods post there, and sensor
+ * callbacks are delivered there or hop there.
  */
 internal class MotionSensorFusion(
     context: Context,
@@ -30,8 +32,8 @@ internal class MotionSensorFusion(
     private var probeActive = false
     private var probeStartedElapsed = 0L
     private var lastProbeCompletedElapsed = Long.MIN_VALUE
-    private var probeDurationUsedInWindow = 0L
-    private var probeDutyWindowStartedElapsed = 0L
+    private val probeBudget = RollingProbeBudget()
+    private val stepCadence = StepCadenceWindow()
     private var accelerationSamples = 0
     private var accelerationSquaredSum = 0.0
     private var gyroscopeSamples = 0
@@ -47,20 +49,36 @@ internal class MotionSensorFusion(
 
     private val significantMotionListener = object : TriggerEventListener() {
         override fun onTrigger(event: TriggerEvent?) {
-            if (!active) return
-            emit(
-                state = "moving",
-                confidence = 85,
-                supporting = listOf("significantMotion"),
-                reason = "significant_motion",
-                significantMotion = true,
-            )
-            armSignificantMotion()
+            // Trigger sensors report on the main thread.
+            workerHandler.post {
+                if (!active) return@post
+                emit(
+                    state = "moving",
+                    confidence = 85,
+                    supporting = listOf("significantMotion"),
+                    reason = "significant_motion",
+                    significantMotion = true,
+                )
+                armSignificantMotion()
+            }
         }
     }
 
     fun start(configuration: TrackingConfiguration) {
-        stop()
+        workerHandler.post { startOnWorker(configuration) }
+    }
+
+    fun stop() {
+        workerHandler.post { stopOnWorker() }
+    }
+
+    /** Starts one ambiguity probe if enhanced mode, cooldown, and duty allow. */
+    fun requestAmbiguityProbe(stationaryCandidate: Boolean = false) {
+        workerHandler.post { startProbeOnWorker(stationaryCandidate) }
+    }
+
+    private fun startOnWorker(configuration: TrackingConfiguration) {
+        stopOnWorker()
         this.configuration = configuration
         active = true
         generation += 1L
@@ -88,9 +106,10 @@ internal class MotionSensorFusion(
         )
     }
 
-    fun stop() {
+    private fun stopOnWorker() {
         active = false
         generation += 1L
+        stepCadence.reset()
         workerHandler.removeCallbacks(finishProbe)
         sensors.unregisterListener(this)
         significantMotionSensor?.let {
@@ -105,8 +124,7 @@ internal class MotionSensorFusion(
         resetProbeFeatures()
     }
 
-    /** Starts one ambiguity probe if enhanced mode, cooldown, and duty allow. */
-    fun requestAmbiguityProbe(stationaryCandidate: Boolean = false): Boolean {
+    private fun startProbeOnWorker(stationaryCandidate: Boolean): Boolean {
         if (!active ||
             configuration.motionFusionMode != MODE_ENHANCED_SENSOR_FUSION ||
             probeActive
@@ -119,14 +137,11 @@ internal class MotionSensorFusion(
         ) {
             return false
         }
-        if (probeDutyWindowStartedElapsed == 0L ||
-            now - probeDutyWindowStartedElapsed >= ONE_HOUR_MS
-        ) {
-            probeDutyWindowStartedElapsed = now
-            probeDurationUsedInWindow = 0L
-        }
-        if (probeDurationUsedInWindow + configuration.sensorProbeDurationMs >
-            configuration.sensorProbeMaximumDurationPerHourMs
+        if (!probeBudget.allows(
+                now,
+                configuration.sensorProbeDurationMs,
+                configuration.sensorProbeMaximumDurationPerHourMs,
+            )
         ) {
             return false
         }
@@ -159,13 +174,17 @@ internal class MotionSensorFusion(
     override fun onSensorChanged(event: SensorEvent) {
         if (!active) return
         when (event.sensor.type) {
-            Sensor.TYPE_STEP_DETECTOR -> emit(
-                state = "moving",
-                confidence = 95,
-                supporting = listOf("step"),
-                reason = "fresh_step",
-                stepDetected = true,
-            )
+            // One step is not movement; sustained stepping is, reported at
+            // most every 10 s instead of once per step.
+            Sensor.TYPE_STEP_DETECTOR -> if (stepCadence.onStep(SystemClock.elapsedRealtime())) {
+                emit(
+                    state = "moving",
+                    confidence = 95,
+                    supporting = listOf("step"),
+                    reason = "fresh_step",
+                    stepDetected = true,
+                )
+            }
 
             Sensor.TYPE_LINEAR_ACCELERATION -> if (probeActive) {
                 accumulateAcceleration(event.values, removeGravity = false)
@@ -204,7 +223,7 @@ internal class MotionSensorFusion(
         rotationVectorSensor?.let { sensors.unregisterListener(this, it) }
         val now = SystemClock.elapsedRealtime()
         val duration = (now - probeStartedElapsed).coerceAtLeast(0L)
-        probeDurationUsedInWindow += duration
+        probeBudget.record(probeStartedElapsed, now)
         lastProbeCompletedElapsed = now
         val accelerationEnergy = rootMeanSquare(accelerationSquaredSum, accelerationSamples)
         val rotationEnergy = rootMeanSquare(gyroscopeSquaredSum, gyroscopeSamples)
@@ -228,7 +247,7 @@ internal class MotionSensorFusion(
                 "gyroscopeSampleCount" to gyroscopeSamples,
                 "rotationEnergy" to rotationEnergy,
                 "compassAvailable" to rotationVectorAvailable,
-                "probeDutyUsedMs" to probeDurationUsedInWindow,
+                "probeDutyUsedMs" to probeBudget.usedMs(now),
             ),
         )
         resetProbeFeatures()
@@ -307,7 +326,6 @@ internal class MotionSensorFusion(
 
     companion object {
         private const val POLICY_VERSION = 1
-        private const val ONE_HOUR_MS = 3_600_000L
         private const val MODE_PLATFORM_ACTIVITY_ONLY = "platformActivityOnly"
         private const val MODE_ENHANCED_SENSOR_FUSION = "enhancedSensorFusion"
     }

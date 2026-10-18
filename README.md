@@ -109,7 +109,7 @@ Add the package to your application:
 
 ```yaml
 dependencies:
-  flutter_background_location_tracker: ^0.1.2
+  flutter_background_location_tracker: ^1.0.0
 ```
 
 Then run:
@@ -1216,6 +1216,9 @@ const options = TrackExportOptions(
 - GeoJSON segments with fewer than two accepted coordinates are omitted from
   line geometry. Optional point features can preserve them for diagnostics.
 - KML writes a line per multi-point segment and a point for a one-fix segment.
+  Heights are written as recorded, with 0 for unknown and no `altitudeMode`,
+  so KML clients clamp the route to the ground. Android heights are above the
+  WGS 84 ellipsoid and iOS heights above mean sea level.
 - GPX writes one `<trkseg>` per stored segment, including one-fix segments.
 - Rejected points can be included as diagnostics but never enter route
   geometry when their coordinates are invalid or non-finite.
