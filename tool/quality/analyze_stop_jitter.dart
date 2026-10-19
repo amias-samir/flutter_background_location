@@ -125,6 +125,23 @@ final class StopSummary {
       duration.inSeconds == 0 ? 0 : acceptedCount / (duration.inSeconds / 3600);
 }
 
+/// A stop the route recorded: an export's `featureType: stop` feature.
+final class RecordedStop {
+  RecordedStop({
+    required this.startedAt,
+    required this.duration,
+    required this.kind,
+    required this.evidenceCount,
+    this.endedAt,
+  });
+
+  final DateTime startedAt;
+  final DateTime? endedAt;
+  final Duration duration;
+  final String kind;
+  final int evidenceCount;
+}
+
 /// Coordinate-free report of a whole export.
 final class StopJitterReport {
   StopJitterReport({
@@ -133,6 +150,7 @@ final class StopJitterReport {
     required this.rejectionReasons,
     required this.acceptedDistanceMeters,
     required this.stops,
+    this.recordedStops = const <RecordedStop>[],
   });
 
   final int pointCount;
@@ -141,18 +159,36 @@ final class StopJitterReport {
   final double acceptedDistanceMeters;
   final List<StopSummary> stops;
 
+  /// Stops the route recorded, oldest first.
+  final List<RecordedStop> recordedStops;
+
   double get stopPhantomDistanceMeters =>
       stops.fold(0, (total, stop) => total + stop.phantomDistanceMeters);
 }
 
 StopJitterReport analyzeStopJitter(Map<Object?, Object?> geoJson) {
   final points = <DiagnosticPoint>[];
+  final recorded = <RecordedStop>[];
   for (final raw in geoJson['features'] as List<Object?>? ?? const []) {
     final feature = raw as Map;
     final geometry = feature['geometry'] as Map?;
     if (geometry?['type'] != 'Point') continue;
     final coordinates = geometry!['coordinates'] as List;
     final properties = (feature['properties'] as Map?) ?? const {};
+    if (properties['featureType'] == 'stop') {
+      final startedAt = DateTime.tryParse('${properties['startedAt']}');
+      if (startedAt == null) continue;
+      recorded.add(RecordedStop(
+        startedAt: startedAt.toUtc(),
+        endedAt: DateTime.tryParse('${properties['endedAt']}')?.toUtc(),
+        duration: Duration(
+          seconds: (properties['durationSeconds'] as num?)?.toInt() ?? 0,
+        ),
+        kind: '${properties['kind']}',
+        evidenceCount: (properties['evidenceCount'] as num?)?.toInt() ?? 0,
+      ));
+      continue;
+    }
     final capturedAt = DateTime.tryParse('${properties['capturedAt']}');
     if (capturedAt == null) continue;
     points.add(DiagnosticPoint(
@@ -186,6 +222,7 @@ StopJitterReport analyzeStopJitter(Map<Object?, Object?> geoJson) {
     rejectionReasons: reasons,
     acceptedDistanceMeters: _pathMeters(accepted),
     stops: _stops(points),
+    recordedStops: recorded..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
   );
 }
 
@@ -539,6 +576,15 @@ String formatStopJitterReport(StopJitterReport report) {
       ..writeln('    still evidence ${stop.stillEvidence ? 'yes' : 'no'}; '
           'activity ${stop.activityMix}; reliable Doppler p50 '
           '${fixed(stop.reliableDopplerP50, 2)} m/s');
+  }
+  String clock(DateTime value) => value.toIso8601String().substring(11, 19);
+  buffer.writeln('recorded stops: ${report.recordedStops.length}');
+  for (final (index, stop) in report.recordedStops.indexed) {
+    buffer.writeln('  recorded ${index + 1}: ${stop.kind}, '
+        '${clock(stop.startedAt)}–'
+        '${stop.endedAt == null ? 'open' : clock(stop.endedAt!)} UTC, '
+        '${(stop.duration.inSeconds / 60).toStringAsFixed(1)} min, '
+        'held ${stop.evidenceCount}');
   }
   return buffer.toString();
 }

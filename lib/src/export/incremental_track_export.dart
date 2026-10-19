@@ -14,12 +14,14 @@ import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_segment.dart';
+import '../domain/track_stop.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
 import 'track_export_service.dart';
 import 'export_diagnostics.dart';
+import 'export_stops.dart';
 
 /// Internal descriptor used by the S1 incremental sink foundation.
 ///
@@ -213,6 +215,10 @@ final class IncrementalTrackExportService {
             ? await (repository as LegacyGapEvidenceRepository)
                 .safeLegacyAutomaticAfterSegmentIds(track.id)
             : const <String>{},
+        // A completed route's stops are closed and no longer change.
+        stops: options.includeStops && repository is TrackStopRepository
+            ? await (repository as TrackStopRepository).listTrackStops(track.id)
+            : const <TrackStop>[],
       );
       final counts = switch (format) {
         TrackExportFormat.geoJson => await encoder.writeGeoJson(),
@@ -473,7 +479,9 @@ final class _PagedTrackEncoder {
     required this.isOwnerScopeCurrent,
     required Iterable<TrackingContinuityGap> gaps,
     required this.safeLegacyAfterSegmentIds,
-  }) : gaps = List<TrackingContinuityGap>.unmodifiable(gaps);
+    Iterable<TrackStop> stops = const <TrackStop>[],
+  })  : gaps = List<TrackingContinuityGap>.unmodifiable(gaps),
+        stops = List<TrackStop>.unmodifiable(stops);
 
   final StreamingTrackRepository repository;
   final TrackingOwner owner;
@@ -486,6 +494,9 @@ final class _PagedTrackEncoder {
   final bool Function() isOwnerScopeCurrent;
   final List<TrackingContinuityGap> gaps;
   final Set<String> safeLegacyAfterSegmentIds;
+
+  /// Recorded stops to write, already filtered by [TrackExportOptions].
+  final List<TrackStop> stops;
   static const RouteGeometryAssembler _geometryAssembler =
       RouteGeometryAssembler();
 
@@ -555,6 +566,12 @@ final class _PagedTrackEncoder {
       await operation.addChunk(
         sink,
         ',${jsonEncode(_geoJsonConnectorFeature(connector))}',
+      );
+    }
+    for (final stop in stops) {
+      await operation.addChunk(
+        sink,
+        ',${jsonEncode(stopGeoJsonFeature(stop, (time) => _formatTime(time, options)))}',
       );
     }
 
@@ -637,6 +654,27 @@ final class _PagedTrackEncoder {
         '</ExtendedData></Placemark>',
       );
     }
+    for (final stop in stops) {
+      final fields =
+          stopExportFields(stop, (time) => _formatTime(time, options));
+      final data = StringBuffer();
+      for (final MapEntry(:key, :value) in fields.entries) {
+        data.write(
+          '<Data name="$key"><value>${_xmlText('$value')}</value></Data>',
+        );
+      }
+      final endedAt = fields['endedAt'];
+      await operation.addChunk(
+        sink,
+        '<Placemark><name>Stop</name>'
+        '<description>${_xmlText(stopDescription(stop))}</description>'
+        '<TimeSpan><begin>${fields['startedAt']}</begin>'
+        '${endedAt == null ? '' : '<end>$endedAt</end>'}</TimeSpan>'
+        '<ExtendedData>$data</ExtendedData>'
+        '<Point><coordinates>${_coordinate(stop.longitude)},'
+        '${_coordinate(stop.latitude)}</coordinates></Point></Placemark>',
+      );
+    }
     await operation.addChunk(sink, '</Document></kml>');
     return _counts(plan);
   }
@@ -655,8 +693,27 @@ final class _PagedTrackEncoder {
       'http://www.topografix.com/GPX/1/1/gpx.xsd">'
       '<metadata><name>$name</name><time>${_formatTime(track.startedAt, options)}</time>'
       '<desc>${options.geometryContinuity.name}</desc>'
-      '</metadata><trk><name>$name</name>',
+      '</metadata>',
     );
+    // GPX 1.1 orders waypoints before tracks.
+    for (final stop in stops) {
+      final fields =
+          stopExportFields(stop, (time) => _formatTime(time, options));
+      final extensions = StringBuffer();
+      for (final MapEntry(:key, :value) in fields.entries) {
+        if (key == 'featureType') continue;
+        extensions.write('<fbl:$key>${_xmlText('$value')}</fbl:$key>');
+      }
+      await operation.addChunk(
+        sink,
+        '<wpt lat="${_coordinate(stop.latitude)}" '
+        'lon="${_coordinate(stop.longitude)}">'
+        '<time>${fields['startedAt']}</time><name>Stop</name>'
+        '<desc>${_xmlText(stopDescription(stop))}</desc><type>stop</type>'
+        '<extensions>$extensions</extensions></wpt>',
+      );
+    }
+    await operation.addChunk(sink, '<trk><name>$name</name>');
     if (plan.connectors.isNotEmpty) {
       await operation.addChunk(
         sink,

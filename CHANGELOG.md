@@ -26,23 +26,54 @@
     `TrackingConfig` carries the new `motionPolicyVersion` key, set by the
     package (configurations persisted without it stay on version 1), and
     native code advertises the `stationary_policy_v2` capability.
-- Adaptive capture now treats a stop as a stay at a place (quality policy 3,
-  the default for new adaptive routes). A second field test still drew
-  scribbles at a temple, at home and at a roadside motorbike stop: with the
-  phone in a pocket, Activity Recognition reported unknown, tilting or on foot
-  instead of still, so no stop started, and walking between rooms ended one.
-  - A stop also starts after two minutes within the hold radius with no net
-    progress (least-squares velocity less twice its standard error, at most
-    0.15 m/s) and no moving evidence. A slow walk with short pauses keeps
-    its distance.
-  - Walking inside the radius stays part of the stop. It ends when a fix
-    leaves the radius with a measured Doppler speed, with current moving
-    evidence on the second outside fix, or for good.
-  - Rejections during a stop, including poor-accuracy indoor fixes, carry the
+- Adaptive capture now records a clean route and the stops along it (quality
+  policy 3, the default for new adaptive routes). A second field test still
+  drew scribbles at a temple, at home and at a roadside motorbike stop: with
+  the phone in a pocket, Activity Recognition reported unknown, tilting or on
+  foot instead of still, so no stop started, and walking between rooms ended
+  one.
+  - A stay starts at the first quiet fix: one with no moving reading in the
+    last 30 s and no measured walking-pace Doppler speed. Its fixes are held
+    from then on. A moving fix ends a pause at once, so walking on keeps its
+    distance.
+  - Once a stay lasts two minutes with no net progress (least-squares
+    velocity less twice its standard error, at most 0.15 m/s), or with still
+    evidence, it is a stop and the hold centres on its fixes. Walking inside
+    the radius stays part of the stop. It ends when a fix leaves the radius
+    with a measured Doppler speed, with current moving evidence on the second
+    outside fix, or for good.
+  - A stay the provider sent no fixes in is a stop when the first fix
+    afterwards is still at the place.
+  - Rejections during a stay, including poor-accuracy indoor fixes, carry the
     new `TrackPointQualityFlag.duringStop` bit and no longer mark visible gaps.
+  - With no activity readings at all (iOS reports only changes, and some
+    Android devices have no Activity Recognition) and no precise Doppler
+    speed, a fix is neither moving nor quiet: only two minutes of accepted
+    fixes confined with no net progress start a stop.
   - Routes recorded under quality policies 1 and 2 decide exactly as before.
-    The first two minutes of a stop without still evidence are recorded
-    before it is recognised; the cleaned view collapses them.
+- Routes now keep a record of each stop: where it was and how long it lasted
+  (route database schema 16, table `track_stops`). A record is written in the
+  same transaction as the fix that opens, extends or ends it, survives
+  restarts, and ends at the departure fix or, when the route pauses or
+  completes during a stop, at its last fix. Fixes held at a stop stay on the
+  device as rejected evidence and never enter the route, its distance or
+  default exports.
+  - `TrackStop`, `TrackStopKind` and the optional `TrackingStopController`
+    capability (`listTrackStops`, `listTripStops`) are exported, and
+    `TrackBundle.stops` carries a route's stops. Custom repositories can
+    implement the optional `TrackStopRepository`; without it, stops are not
+    recorded.
+  - GeoJSON, GPX and KML exports include stops by default
+    (`TrackExportOptions.includeStops`): a Point feature with
+    `featureType: stop`, a GPX `<wpt>` with `fbl:` extensions before the
+    track, and a timed KML Placemark, in single-route, streamed and Trip
+    exports. Routes without stop records export byte for byte as before.
+    Uploads are unchanged.
+  - The example map draws recorded stops in both views (tap one for its
+    times), and the Trip list shows the number of stops and the time stopped.
+- `exportTrack` on the owner-scoped controllers now accepts
+  `TrackGeometrySelection.derived` and writes the derived coordinates. It
+  previously failed with `derived_geometry_requires_v2_export`.
 - Native stationary capture no longer anchors a stop on the first fix after a
   long silence. A still phone delivers no fix, so the stop is entered without
   one, and the first fix afterwards is often a re-acquisition outlier tens of
@@ -67,7 +98,7 @@
   age, native receipt delay, and quality policy version. Default exports are
   byte-for-byte unchanged. `tool/quality/analyze_stop_jitter.dart` turns
   such an export into a coordinate-free stop report, finding stops with the
-  same stay rule.
+  same stay rule and listing the recorded ones.
 - Added seeded field-test replicas to the testing library:
   `SyntheticTrackingRoute.indoorStop`, `reacquisitionBurst`, `slowLaneRide`,
   `pocketStop`, `placeWander`, `roadsideStop` and `slowStrollWithPauses`,

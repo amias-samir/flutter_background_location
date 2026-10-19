@@ -192,6 +192,9 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                 trip.id,
               )
             : null;
+        final stops = tracking is TrackingStopController
+            ? await (tracking as TrackingStopController).listTripStops(trip.id)
+            : const <TrackStop>[];
         var segmentCount = 0;
         for (final leg in bundle.legs) {
           final track = await _tracking!.getTrack(leg.trackId);
@@ -204,6 +207,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
           qualityEventCount: quality?.qualityRunCount ?? bundle.gaps.length,
           visibleGapCount:
               quality?.visibleQualityRunCount ?? bundle.gaps.length,
+          stopCount: stops.length,
+          stoppedFor: stops.fold(
+            Duration.zero,
+            (total, stop) => total + stop.duration,
+          ),
         );
       }),
     );

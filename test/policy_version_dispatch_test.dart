@@ -283,7 +283,7 @@ void main() {
         TrackingPolicyVersions.legacyContinuityPolicy,
       );
       final upgradedRaw = await openRaw('upgraded');
-      expect(await upgradedRaw.getVersion(), 15);
+      expect(await upgradedRaw.getVersion(), 16);
       final stored = await upgradedRaw.query(
         'tracking_configuration_epochs',
         columns: <String>['continuity_policy_version'],

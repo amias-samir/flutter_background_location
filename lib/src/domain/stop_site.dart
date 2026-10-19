@@ -4,17 +4,24 @@ import 'activity_snapshot.dart';
 import 'motion_policy.dart';
 import 'track_geodesy.dart';
 
-/// Rules of quality policy 3, where a stop is a stay at a place.
+/// Rules of quality policy 3, where a stop is a stay at a place and the route
+/// keeps only movement.
 ///
-/// A stop starts from a motion-policy-2 still episode, or from a dwell: fixes
-/// that stay within the hold radius for [dwellMinimumDuration] with no net
-/// progress and no moving evidence, as a phone in a pocket reports while its
-/// owner stands, sits or walks about in one place. Walking inside the radius
-/// stays part of the stop. Dart only: native sampling keeps motion policy 2.
+/// A *stay* starts at the first quiet fix, one without moving evidence, or at
+/// a motion-policy-2 still episode. Its quiet fixes are held from the start,
+/// so no stop or pause jitter enters the route. A stay that lasts
+/// [dwellMinimumDuration] with no net progress, or with still evidence,
+/// becomes a stop: walking inside its radius is then part of it, and a stop
+/// record keeps where it was and how long it lasted. A shorter stay is a
+/// pause and ends at the first moving fix. Dart only: native sampling keeps
+/// motion policy 2.
 abstract final class StopSitePolicy {
-  /// How long fixes must stay within the hold radius before a stop without
-  /// still evidence is current.
+  /// How long a stay must last before it is a stop.
   static const dwellMinimumDuration = Duration(minutes: 2);
+
+  /// A moving reading this recent makes a fix a moving one. Activity
+  /// Recognition reports every few seconds while its owner walks or rides.
+  static const quietWindow = Duration(seconds: 30);
 
   /// Largest net progress of a dwell's fixes, in metres per second: their
   /// least-squares velocity less twice its standard error, so scattered fixes
@@ -30,6 +37,11 @@ abstract final class StopSitePolicy {
   /// Largest speed accuracy, in metres per second, of a Doppler speed that
   /// counts as moving evidence.
   static const movingDopplerMaximumSpeedAccuracy = 0.4;
+
+  /// A precise Doppler speed whose value plus accuracy stays within this, in
+  /// metres per second, shows the device is still, whatever an older activity
+  /// reading said. A slow walk measures more.
+  static const stillDopplerMaximumMetersPerSecond = 0.5;
 
   /// How long a moving reading stays current for a departure. Leaving the
   /// radius with current moving evidence departs on the second outside fix.
@@ -56,6 +68,33 @@ abstract final class StopSitePolicy {
               movingDopplerSpeedMetersPerSecond,
               MotionPolicyV2.departureSpeedAccuracyFactor * speedAccuracy,
             );
+  }
+
+  /// Whether a measured Doppler speed shows movement, at walking pace when
+  /// precisely measured or as a clear departure otherwise.
+  static bool showsMovement({
+    required double? speed,
+    required double? speedAccuracy,
+  }) =>
+      dopplerShowsMovement(speed: speed, speedAccuracy: speedAccuracy) ||
+      MotionPolicyV2.dopplerConfirmsDeparture(
+        speed: speed,
+        speedAccuracy: speedAccuracy,
+      );
+
+  /// Whether a precise Doppler speed shows the device is still: measured to
+  /// within [movingDopplerMaximumSpeedAccuracy] and, with that accuracy
+  /// added, at most [stillDopplerMaximumMetersPerSecond].
+  static bool dopplerShowsStillness({
+    required double? speed,
+    required double? speedAccuracy,
+  }) {
+    if (speed == null || speedAccuracy == null) return false;
+    if (!speed.isFinite || !speedAccuracy.isFinite || speedAccuracy < 0) {
+      return false;
+    }
+    return speedAccuracy <= movingDopplerMaximumSpeedAccuracy &&
+        speed + speedAccuracy <= stillDopplerMaximumMetersPerSecond;
   }
 
   /// Whether [activity] is moving evidence: a moving reading at or above its

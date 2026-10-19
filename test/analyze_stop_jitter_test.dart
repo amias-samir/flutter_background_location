@@ -65,6 +65,24 @@ void main() {
     for (var step = 1; step <= 25; step += 1) {
       point(130 + 60 * 20 + step * 5, step * 6.0, 0);
     }
+    // The stop record of a quality policy 3 route.
+    features.add(<String, Object?>{
+      'type': 'Feature',
+      'geometry': <String, Object?>{
+        'type': 'Point',
+        'coordinates': <double>[0.5, 0.5],
+      },
+      'properties': <String, Object?>{
+        'featureType': 'stop',
+        'stopId': 'stop-1',
+        'kind': 'dwell',
+        'startedAt': start.add(const Duration(seconds: 125)).toIso8601String(),
+        'endedAt': start.add(const Duration(seconds: 1335)).toIso8601String(),
+        'durationSeconds': 1210,
+        'evidenceCount': 30,
+        'radiusMeters': 25.0,
+      },
+    });
     return <String, Object?>{'type': 'FeatureCollection', 'features': features};
   }
 
@@ -86,9 +104,16 @@ void main() {
     expect(stop.stationaryProfileShare, inInclusiveRange(0.7, 0.9));
     expect(stop.longestActivitySilence, const Duration(minutes: 15));
 
+    final recorded = report.recordedStops.single;
+    expect(recorded.duration, const Duration(seconds: 1210));
+    expect(recorded.kind, 'dwell');
+    expect(recorded.evidenceCount, 30);
+
     final text = formatStopJitterReport(report);
     expect(text, contains('still evidence yes'));
     expect(text, contains('stops'));
+    expect(
+        text, contains('recorded 1: dwell, 13:02:05–13:22:15 UTC, 20.2 min'));
     // Coordinate-free: no degree values appear in the report.
     expect(text, isNot(contains('0.50')));
   });

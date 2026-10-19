@@ -5,6 +5,7 @@ import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
+import '../domain/track_stop.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
@@ -14,10 +15,19 @@ import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 
 final class TrackBundle {
-  const TrackBundle({required this.track, required this.segments});
+  const TrackBundle({
+    required this.track,
+    required this.segments,
+    this.stops = const <TrackStop>[],
+  });
 
   final Track track;
   final List<TrackSegmentWithPoints> segments;
+
+  /// Stops recorded for the track, oldest first, read in the same snapshot.
+  /// Empty for routes recorded without stop records and for repositories
+  /// without [TrackStopRepository].
+  final List<TrackStop> stops;
 }
 
 final class PointWriteRequest {
@@ -53,12 +63,16 @@ final class PointAppendResult {
     required this.segmentId,
     required this.duplicate,
     this.gap,
+    this.stop,
   });
 
   final TrackPoint point;
   final String segmentId;
   final TrackingContinuityGap? gap;
   final bool duplicate;
+
+  /// The stop the transaction opened, extended or closed, if any.
+  final TrackStop? stop;
 }
 
 /// Optional atomic continuity capability for repositories that support the
@@ -72,6 +86,25 @@ abstract interface class ContinuityTrackRepository {
   );
 
   Future<List<TrackingContinuityGap>> listContinuityGaps(String trackId);
+}
+
+/// Optional capability: stop records written atomically with the fixes that
+/// open, extend and close them (route database schema 16).
+abstract interface class TrackStopRepository {
+  /// Appends [request] like [ContinuityTrackRepository.appendPointWithContinuity]
+  /// and applies [stop] in the same transaction. A duplicate native event
+  /// applies no stop change.
+  Future<PointAppendResult> appendPointWithStop(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
+  );
+
+  /// The current stop of [trackId], if one is open.
+  Future<TrackStop?> findOpenTrackStop(String trackId);
+
+  /// Stops of [trackId], oldest first.
+  Future<List<TrackStop>> listTrackStops(String trackId);
 }
 
 enum TrackOperationType { pause, complete }

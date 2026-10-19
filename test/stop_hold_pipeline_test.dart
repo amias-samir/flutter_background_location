@@ -157,14 +157,45 @@ void main() {
     expect(after.every((point) => point.accepted), isTrue);
   });
 
-  test('a slow lane ride without still evidence is not held', () async {
-    final run = await StopReplay.start(t0, config: const TrackingConfig());
+  test('quality policy 2 does not hold a slow lane ride', () async {
+    final run = await StopReplay.start(
+      t0,
+      config: const TrackingConfig(),
+      qualityPolicy: 2,
+    );
     final lane = SyntheticTrackingRoute.slowLaneRide(
       startedAt: t0,
       trackId: run.trackId,
     );
     final points = await run.replay(lane);
     expect(points.every((point) => point.accepted), isTrue);
+  });
+
+  test('a slow lane ride keeps moving fixes and holds stuck positions',
+      () async {
+    // Quality policy 3: positions that stop following the vehicle are quiet
+    // fixes, held as a pause; fixes near a walking or vehicle transition
+    // move and stay in the route. No stay lasts long enough to be a stop.
+    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    final lane = SyntheticTrackingRoute.slowLaneRide(
+      startedAt: t0,
+      trackId: run.trackId,
+    );
+    final points = await run.replay(lane);
+    String id(int step) => 'lane-$step';
+    bool accepted(int step) =>
+        points.singleWhere((point) => point.nativeEventId == id(step)).accepted;
+    expect(accepted(6), isTrue, reason: 'ENTER WALKING');
+    expect(accepted(12), isTrue, reason: 'ENTER IN_VEHICLE');
+    final held = points.where((point) => !point.accepted).toList();
+    expect(held.length, greaterThanOrEqualTo(6));
+    for (final point in held) {
+      expect(
+        point.qualityFlags & TrackPointQualityFlag.duringStop,
+        TrackPointQualityFlag.duringStop,
+      );
+    }
+    expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
   });
 
   test('a Dart restart in the middle of a stop restores the hold', () async {

@@ -330,27 +330,45 @@ classified as stationary. `adaptive` remains the battery-aware intent that may
 enter stationary sampling. Explicit `movingInterval` and
 `movingDistanceFilterMeters` values still win.
 
-Adaptive capture holds stops, and a stop is a stay at a place. Indoors, or
-in a pocket, a phone that isn't going anywhere still reports fixes that wander
-several metres while claiming good accuracy. Fixes near the stop are stored as
-rejected `stationary_hold` evidence. They add no distance and don't draw a
-scribble.
+Adaptive capture records a clean route and the stops along it. Indoors, or in
+a pocket, a phone that isn't going anywhere still reports fixes that wander
+several metres while claiming good accuracy. From the first quiet fix of a
+stay, fixes near it are stored as rejected `stationary_hold` evidence. They
+add no distance, don't draw a scribble, and stay out of default exports and
+uploads.
 
-- **What starts a stop:** activity evidence that the device is still, which
-  also lets the native stationary profile engage. Or two minutes within the
-  hold radius with no net progress and no moving evidence, as when the phone
-  sits in a pocket and Activity Recognition reports unknown or tilting.
+- **What starts a stay:** a quiet fix, with no moving reading in the last
+  30 s and no measured walking-pace Doppler speed. A moving fix ends a short
+  pause at once, so walking on keeps its distance.
+- **What makes it a stop:** two minutes within the hold radius with no net
+  progress, or activity evidence that the device is still, which also lets
+  the native stationary profile engage. A stay the provider sent no fixes in
+  is a stop when the first fix afterwards is still at the place.
 - **What keeps it:** unknown, tilting or low-confidence readings, activity
   silence, and walking about inside the place, such as between rooms.
 - **What ends it:** a fix outside the hold radius with a measured Doppler
   speed, a second outside fix while moving evidence is current, or fixes that
   keep moving away for a minute.
 - **What counts as distance:** the stop-to-departure chord. Movement within a
-  site smaller than the hold radius (at least 25 m) is not measured. The first
-  two minutes of a stop without still evidence are recorded before it is
-  recognised; the cleaned view below collapses them too.
+  site smaller than the hold radius (at least 25 m) is not measured.
 - **Scope:** new routes with the adaptive intent only. Explicit travel intents
   record every fix.
+
+Each stop is recorded with its place and its start and end times. The
+owner-scoped controllers implement `TrackingStopController`:
+
+```dart
+final stops = await (tracking as TrackingStopController).listTripStops(tripId);
+for (final stop in stops) {
+  print('${stop.startedAt}: stayed ${stop.duration.inMinutes} min');
+}
+```
+
+`TrackStop` carries the stop's centre, hold radius, `startedAt`, `endedAt`
+(null while the stop is current), `duration`, `kind` (`TrackStopKind.still`
+or `dwell`) and the number of fixes held. A stop ends at the departure fix,
+or at its last fix when the route pauses or completes during it.
+`TrackBundle.stops` carries a route's stops, and exports include them.
 
 Vehicle capture also uses a bounded urban-visibility acceptance envelope:
 `high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
@@ -1183,8 +1201,9 @@ try {
 To export a completed derived run, set
 `TrackExportOptions(geometry: TrackGeometrySelection.derived(run.id))`. The V2
 GeoJSON/KML/GPX output labels its source as `derived:<run-id>`. Raw remains the
-default and is labeled `raw`. Derived exports intentionally reject
-`includeRejectedPoints`, because rejected points have no derived coordinates.
+default and is labeled `raw`. The controllers' `exportTrack` accepts the same
+option. Derived exports intentionally reject `includeRejectedPoints`, because
+rejected points have no derived coordinates.
 
 On Android 10+, `contentUri` is the reopenable MediaStore handle and
 `displayPath` is informational only. On iOS and pre-scoped-storage Android,
@@ -1270,6 +1289,12 @@ const options = TrackExportOptions(
 - GPX writes one `<trkseg>` per stored segment, including one-fix segments.
 - Rejected points can be included as diagnostics but never enter route
   geometry when their coordinates are invalid or non-finite.
+- Recorded stops are exported by default: a GeoJSON Point feature with
+  `featureType: stop`, `startedAt`, `endedAt`, `durationSeconds`, `kind`,
+  `evidenceCount` and `radiusMeters`; a GPX `<wpt>` of type `stop`, before the
+  track, with those values as `fbl:` extensions; and a KML Placemark with a
+  `TimeSpan`. Set `TrackExportOptions.includeStops` to false to leave them
+  out. Routes without stop records export as before.
 - `TrackExportOptions.includeDiagnosticProperties` adds coordinate-free
   per-fix evidence to GeoJSON point features and GPX `fbl:` extensions:
   vertical accuracy, Doppler speed and heading with their accuracies,

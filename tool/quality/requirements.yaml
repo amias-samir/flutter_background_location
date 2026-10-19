@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 15
+  route_database_schema: 16
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
@@ -1071,6 +1071,41 @@ work_packages:
       - test/stop_site_test.dart
       - test/stop_site_pipeline_test.dart
       - test/stop_hold_pipeline_test.dart
+  - id: LBO-21C
+    phase: LBO
+    title: Clean route from the first quiet fix (quality policy 3 pauses and stops)
+    release_gate: on the mixed-route re-test no fix held at a stop or pause enters the canonical route; each stay of two minutes or more is one stop record whose place and length match the noted stay within one minute, including stays the provider sent no fixes in; walking legs within 10 percent of quality policy 2; routes recorded under quality policies 1 and 2 decide bit for bit as before
+    required_before: promoting quality policy 3 beyond the field re-test
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/stop_site.dart
+      - lib/src/domain/fix_quality.dart
+      - lib/src/application/tracking_client.dart
+      - test/fix_quality_v3_test.dart
+      - test/stop_site_pipeline_test.dart
+      - test/stop_hold_pipeline_test.dart
+  - id: LBO-28
+    phase: LBO
+    title: Stop records in storage, API, exports and the example map
+    release_gate: schema 16 stores each stop atomically with the fix that opens, extends, closes or records it, survives restarts, upgrades from schema 15 and reopens; stops are listed owner-scoped per route and per Trip; GeoJSON, GPX and KML exports carry stops by default in the materialized, streamed and Trip exports; derived-geometry exports work through the facade; uploads are unchanged
+    required_before: stop records beyond the example app
+    evidence:
+      - lib/src/domain/track_stop.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/export/export_stops.dart
+      - lib/src/export/track_export_service.dart
+      - lib/src/export/incremental_track_export.dart
+      - lib/src/export/trip_export_service.dart
+      - example/lib/route_map_page.dart
+      - example/lib/recorded_trips_section.dart
+      - tool/quality/analyze_stop_jitter.dart
+      - test/track_stop_repository_test.dart
+      - test/stop_export_test.dart
+      - test/public_api_compatibility_test.dart
+      - test/analyze_stop_jitter_test.dart
+      - example/test/widget_test.dart
   - id: LBO-13B
     phase: LBO
     title: Stop-aware route cleaning version 2 (stays at a place, from held evidence too)

@@ -10,6 +10,8 @@ final class RecordedTripSummary {
     required this.gapCount,
     this.qualityEventCount = 0,
     this.visibleGapCount = 0,
+    this.stopCount = 0,
+    this.stoppedFor = Duration.zero,
   });
 
   final Trip trip;
@@ -17,6 +19,10 @@ final class RecordedTripSummary {
   final int gapCount;
   final int qualityEventCount;
   final int visibleGapCount;
+
+  /// Stops the Trip recorded, and how long they lasted together.
+  final int stopCount;
+  final Duration stoppedFor;
 }
 
 enum RecordedTripAction {
@@ -193,6 +199,13 @@ class RecordedTripsSection extends StatelessWidget {
                 icon: Icons.polyline_outlined,
                 label: '${summary.segmentCount} segment(s)',
               ),
+              if (summary.stopCount > 0)
+                _TripDetail(
+                  icon: Icons.local_parking_rounded,
+                  label:
+                      '${summary.stopCount} stop(s) • '
+                      '${_stopped(summary.stoppedFor)}',
+                ),
               _TripDetail(
                 icon: Icons.warning_amber_rounded,
                 label: '${summary.qualityEventCount} quality event(s)',
@@ -265,6 +278,10 @@ class RecordedTripsSection extends StatelessWidget {
       ),
     );
   }
+
+  static String _stopped(Duration duration) => duration.inMinutes >= 60
+      ? '${duration.inHours} h ${duration.inMinutes % 60} min'
+      : '${duration.inMinutes} min';
 
   static IconData _statusIcon(TripStatus status) => switch (status) {
     TripStatus.active => Icons.navigation_rounded,

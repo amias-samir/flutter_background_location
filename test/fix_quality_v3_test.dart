@@ -196,6 +196,88 @@ void main() {
     );
   });
 
+  group('a pause, a stay not yet a stop', () {
+    const pause = StopContext(
+      stillEpisodeActive: false,
+      site: centre,
+      stopRecognized: false,
+    );
+
+    test('a quiet fix is held inside the radius', () {
+      final decision =
+          decide(fixNorth(8, speed: 0, speedAccuracy: 2), stop: pause);
+      expect(decision.rejectionReason, FixQualityIssue.stationaryHold);
+      expect(
+        decision.qualityFlags & TrackPointQualityFlag.duringStop,
+        TrackPointQualityFlag.duringStop,
+      );
+    });
+
+    test('a quiet fix outside the radius is an outlier', () {
+      final decision =
+          decide(fixNorth(40, speed: 0, speedAccuracy: 2), stop: pause);
+      expect(decision.rejectionReason, FixQualityIssue.stationaryOutlier);
+      expect(
+        decision.qualityFlags & TrackPointQualityFlag.duringStop,
+        TrackPointQualityFlag.duringStop,
+      );
+    });
+
+    test('a recent moving reading ends the pause at once', () {
+      final decision = decide(
+        fixNorth(5, speed: 0, speedAccuracy: 2),
+        stop: const StopContext(
+          stillEpisodeActive: false,
+          site: centre,
+          stopRecognized: false,
+          recentMovingReading: true,
+        ),
+      );
+      expect(decision.acceptedForGeometry, isTrue);
+      expect(decision.qualityFlags, TrackPointQualityFlag.none);
+    });
+
+    test('a walking Doppler speed ends the pause, but not a stop', () {
+      final walkingFix = fixNorth(5, speed: 1.2, speedAccuracy: 0.3);
+      expect(decide(walkingFix, stop: pause).acceptedForGeometry, isTrue);
+      expect(
+        decide(walkingFix).rejectionReason,
+        FixQualityIssue.stationaryHold,
+        reason: 'walking inside a place is part of its stop',
+      );
+    });
+
+    test('moving evidence since the stay began does not end it alone', () {
+      final decision = decide(
+        fixNorth(36, seconds: 65, speed: 0, speedAccuracy: 2),
+        stop: StopContext(
+          stillEpisodeActive: false,
+          site: centre,
+          stopRecognized: false,
+          movingEvidenceCurrent: true,
+          outsideRunCount: 1,
+          outsideRunStartedAt: t0.add(const Duration(seconds: 60)),
+          outsideRunFarthestMeters: 30,
+        ),
+      );
+      expect(decision.rejectionReason, FixQualityIssue.stationaryOutlier);
+    });
+
+    test('a sustained departure ends the pause', () {
+      final decision = decide(
+        fixNorth(60, seconds: 120, speed: 0, speedAccuracy: 3),
+        stop: StopContext(
+          stillEpisodeActive: false,
+          site: centre,
+          stopRecognized: false,
+          outsideRunCount: 3,
+          outsideRunStartedAt: t0.add(const Duration(seconds: 60)),
+        ),
+      );
+      expect(decision.acceptedForGeometry, isTrue);
+    });
+  });
+
   test('a stop centre known only roughly widens the radius', () {
     const rough = StopSiteAnchor(
       latitude: originLatitude,

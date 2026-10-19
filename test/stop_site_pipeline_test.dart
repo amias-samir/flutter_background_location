@@ -20,8 +20,7 @@ const _stopReasons = <String>{
 void main() {
   final t0 = DateTime.utc(2026, 10, 19, 3);
 
-  test('a pocket stop without still evidence is held after two minutes',
-      () async {
+  test('a pocket stop is held from its first quiet fix and recorded', () async {
     final run = await StopReplay.start(t0, config: const TrackingConfig());
     final arrival = syntheticWalk(
       trackId: run.trackId,
@@ -52,16 +51,20 @@ void main() {
     final inStop = points
         .where((point) => point.nativeEventId!.startsWith('pocket-stop-'))
         .toList();
-    final dwellCurrent = stopStart.add(StopSitePolicy.dwellMinimumDuration).add(
-          const Duration(seconds: 30),
-        );
+    // Within the quiet window of the last walking reading a fix can still
+    // count as the arrival; after it, no stop jitter enters the route.
+    final quietFrom = arrival.activities.last.recordedAt!.add(
+      StopSitePolicy.quietWindow,
+    );
     expect(
       inStop
-          .where((point) => point.capturedAt.isAfter(dwellCurrent))
+          .where((point) => point.capturedAt.isAfter(quietFrom))
           .where((point) => point.accepted),
       isEmpty,
-      reason: 'two minutes in, the stay is a stop',
+      reason: 'no stop jitter enters the route',
     );
+    expect(
+        inStop.where((point) => point.accepted).length, lessThanOrEqualTo(1));
     expect(
       inStop
           .where((point) => !point.accepted)
@@ -86,9 +89,49 @@ void main() {
 
     final track = (await run.harness.repository.getTrack(run.trackId))!;
     expect(track.segmentCount, 1);
-    // Two 150 m walks; the first two minutes of the stop are recorded before
-    // it is recognised.
-    expect(track.totalDistanceMeters, inInclusiveRange(285, 360));
+    // Two 150 m walks and the chord between where they end and start.
+    expect(track.totalDistanceMeters, inInclusiveRange(285, 325));
+
+    final stops = await run.harness.repository.listTrackStops(run.trackId);
+    expect(stops, hasLength(1));
+    final record = stops.single;
+    expect(record.kind, TrackStopKind.dwell);
+    expect(record.isOpen, isFalse);
+    expect(
+      record.startedAt.difference(stopStart).abs(),
+      lessThanOrEqualTo(const Duration(seconds: 10)),
+      reason: 'the stay starts where the walk in ended',
+    );
+    expect(record.endedAt, departing[firstAccepted].capturedAt);
+    expect(record.departurePointId, departing[firstAccepted].id);
+    // The arrival is the last route point before the first held fix.
+    final firstHeld = points.firstWhere((point) => !point.accepted);
+    final arrivalPoint = points.lastWhere(
+      (point) => point.accepted && point.sequence < firstHeld.sequence,
+    );
+    expect(record.arrivalPointId, arrivalPoint.id);
+    expect(
+      (record.duration - stopLength).inSeconds,
+      inInclusiveRange(0, 60),
+      reason: 'the stay lasts until the walk away leaves the radius',
+    );
+    expect(
+      TrackGeodesy.sphericalHaversineMeters(
+        syntheticOrigin.latitude,
+        syntheticOrigin.longitude,
+        record.latitude,
+        record.longitude,
+      ),
+      lessThan(10),
+      reason: 'the record sits on the place',
+    );
+    expect(
+      record.evidenceCount,
+      points
+          .where((point) => !point.accepted)
+          .where((point) => !point.capturedAt.isBefore(record.startedAt))
+          .length,
+    );
     final quality = await run.harness.repository.trackQualitySummary(
       owner: syntheticOwner,
       trackId: run.trackId,
@@ -186,11 +229,13 @@ void main() {
       trackId: run.trackId,
     );
     final points = await run.replay(stroll);
-    expect(
-      points.where((point) => !point.accepted),
-      isEmpty,
-      reason: 'pauses shorter than two minutes are not stops',
-    );
+    // Walking moves; only quiet fixes during a pause are held, and pauses
+    // shorter than two minutes are not stops.
+    for (final point in points.where((point) => !point.accepted)) {
+      expect(point.rejectionReason, FixQualityIssue.stationaryHold);
+      expect(point.activityRawType, 'unknown');
+    }
+    expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
     final pathLength = metersFromSyntheticOrigin(points.last);
     final track = (await run.harness.repository.getTrack(run.trackId))!;
     expect(
@@ -328,6 +373,8 @@ void main() {
     await emitAndWait(harness, first, trackId, before);
     final last = await harness.repository.findLastRawPoint(trackId);
     expect(last?.rejectionReason, isIn(_stopReasons));
+    final openBefore = await harness.repository.findOpenTrackStop(trackId);
+    expect(openBefore, isNotNull);
 
     final second = FakeTrackerAdapter();
     await second.start(trackId: trackId, config: const TrackingConfig());
@@ -369,6 +416,168 @@ void main() {
           .where((point) => point.accepted),
       isEmpty,
     );
+    // The stored stop carries on: same record, same centre, longer stay.
+    final openAfter = await harness.repository.findOpenTrackStop(trackId);
+    expect(openAfter?.id, openBefore!.id);
+    expect(openAfter!.latitude, openBefore.latitude);
+    expect(openAfter.longitude, openBefore.longitude);
+    expect(openAfter.startedAt, openBefore.startedAt);
+    expect(openAfter.evidenceCount, openBefore.evidenceCount + 12);
+    expect(openAfter.lastSeenAt, jitter.locations.last.capturedAt);
+    expect(await harness.repository.listTrackStops(trackId), hasLength(1));
+  });
+
+  test('a pause shorter than two minutes holds its jitter and is no stop',
+      () async {
+    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    final arrival = syntheticWalk(
+      trackId: run.trackId,
+      from: -60,
+      to: 0,
+      startedAt: t0,
+      eventPrefix: 'arrive',
+    );
+    final pauseStart =
+        arrival.locations.last.capturedAt.add(const Duration(seconds: 5));
+    final pause = SyntheticTrackingRoute.pocketStop(
+      duration: const Duration(seconds: 70),
+      startedAt: pauseStart,
+      seed: 9,
+      eventPrefix: 'pause',
+      trackId: run.trackId,
+    );
+    final walkOn = pauseStart.add(const Duration(seconds: 75));
+    final onward = syntheticWalk(
+      trackId: run.trackId,
+      from: 0,
+      to: 60,
+      startedAt: walkOn,
+      eventPrefix: 'onward',
+    );
+    final points =
+        await run.replay(arrival.followedBy(pause).followedBy(onward));
+
+    expect(
+      points
+          .where((point) => point.nativeEventId!.startsWith('pause-'))
+          .where((point) => point.accepted),
+      isEmpty,
+    );
+    final onwardPoints = points
+        .where((point) => point.nativeEventId!.startsWith('onward-'))
+        .toList();
+    expect(
+      onwardPoints.every((point) => point.accepted),
+      isTrue,
+      reason: 'the walk on continues at its first moving fix',
+    );
+    expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
+  });
+
+  group('a stay the provider fell silent in', () {
+    Future<(StopReplay, List<TrackPoint>)> replay({
+      required double resumeFrom,
+    }) async {
+      final run = await StopReplay.start(t0, config: const TrackingConfig());
+      final arrival = syntheticWalk(
+        trackId: run.trackId,
+        from: -60,
+        to: 0,
+        startedAt: t0,
+        eventPrefix: 'arrive',
+      );
+      final pauseStart =
+          arrival.locations.last.capturedAt.add(const Duration(seconds: 5));
+      final pause = SyntheticTrackingRoute.pocketStop(
+        duration: const Duration(seconds: 70),
+        startedAt: pauseStart,
+        seed: 9,
+        eventPrefix: 'pause',
+        trackId: run.trackId,
+      );
+      // No fixes for six minutes, then walking on.
+      final onward = syntheticWalk(
+        trackId: run.trackId,
+        from: resumeFrom,
+        to: resumeFrom + 60,
+        startedAt: pauseStart.add(const Duration(minutes: 7)),
+        eventPrefix: 'onward',
+      );
+      final points =
+          await run.replay(arrival.followedBy(pause).followedBy(onward));
+      return (run, points);
+    }
+
+    test('is recorded when the walk resumes at the place', () async {
+      final (run, points) = await replay(resumeFrom: 0);
+      final held = points
+          .where((point) => point.nativeEventId!.startsWith('pause-'))
+          .toList();
+      expect(held.where((point) => point.accepted), isEmpty);
+      final departure = points.firstWhere(
+        (point) => point.nativeEventId!.startsWith('onward-'),
+      );
+      expect(departure.accepted, isTrue);
+
+      final stop =
+          (await run.harness.repository.listTrackStops(run.trackId)).single;
+      expect(stop.isOpen, isFalse);
+      expect(stop.kind, TrackStopKind.dwell);
+      expect(stop.endedAt, departure.capturedAt);
+      expect(stop.departurePointId, departure.id);
+      expect(stop.lastSeenAt, held.last.capturedAt);
+      expect(stop.evidenceCount, held.length);
+      expect(stop.firstSequence, held.first.sequence);
+      expect(stop.lastSequence, held.last.sequence);
+      expect(stop.duration, greaterThan(const Duration(minutes: 7)));
+      expect(stop.duration, lessThan(const Duration(minutes: 8)));
+    });
+
+    test('is no stop when the walk resumes elsewhere', () async {
+      // Where the device was during the silence is unknown.
+      final (run, _) = await replay(resumeFrom: 200);
+      expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
+    });
+  });
+
+  test('pausing the route ends a current stop at its last fix', () async {
+    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    final stop = SyntheticTrackingRoute.pocketStop(
+      duration: const Duration(minutes: 5),
+      startedAt: t0,
+      trackId: run.trackId,
+    );
+    final points = await run.replay(stop);
+    final open = await run.harness.repository.findOpenTrackStop(run.trackId);
+    expect(open, isNotNull, reason: 'five minutes in, the stay is a stop');
+
+    await run.client.pauseCurrentTrack(reason: 'synthetic_pause');
+    expect(await run.harness.repository.findOpenTrackStop(run.trackId), isNull);
+    final closed =
+        (await run.harness.repository.listTrackStops(run.trackId)).single;
+    expect(closed.endedAt, points.last.capturedAt);
+    expect(closed.departurePointId, isNull);
+  });
+
+  test('stops are listed per route and per Trip through the controller',
+      () async {
+    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    final stop = SyntheticTrackingRoute.pocketStop(
+      duration: const Duration(minutes: 4),
+      startedAt: t0,
+      trackId: run.trackId,
+    );
+    await run.replay(stop);
+    final controller = run.client as TrackingStopController;
+    final trackStops = await controller.listTrackStops(run.trackId);
+    expect(trackStops, hasLength(1));
+    final tripId = (await (run.client as MultiDayTripController)
+            .listTripPage(const TripQuery(owner: syntheticOwner, limit: 5)))
+        .items
+        .single
+        .id;
+    final tripStops = await controller.listTripStops(tripId);
+    expect(tripStops.map((stop) => stop.id), <String>[trackStops.single.id]);
   });
 
   group('cleaned view, stop-aware cleaning version 2', () {

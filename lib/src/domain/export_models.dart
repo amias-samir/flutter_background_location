@@ -12,6 +12,7 @@ final class TrackExportOptions {
     this.allowIncompleteTrackSnapshot = false,
     this.includeGeoJsonPointFeatures = false,
     this.includeDiagnosticProperties = false,
+    this.includeStops = true,
     this.geometry = const TrackGeometrySelection.raw(),
     this.geometryContinuity = RouteGeometryContinuity.preserveEvidenceSegments,
   });
@@ -29,6 +30,12 @@ final class TrackExportOptions {
   /// raw type, evidence state and age, native receipt delay, and quality
   /// policy version. Off by default, so default exports are unchanged.
   final bool includeDiagnosticProperties;
+
+  /// Writes the route's recorded stops: GeoJSON Point features with
+  /// `featureType: stop`, GPX waypoints and KML placemarks, each with its
+  /// start, end and duration. On by default; routes without stop records
+  /// export exactly as before.
+  final bool includeStops;
 
   /// Coordinates to export. Raw evidence is the default; derived geometry is
   /// selected only by its immutable run identifier.

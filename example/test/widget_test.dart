@@ -428,6 +428,152 @@ void main() {
     expect(geometryOf(zigzag).uncertainSegments, isNotEmpty);
     expect(geometryOf(walk).uncertainSegments, isEmpty);
   });
+
+  test('recorded stops are markers in both views, never gaps', () {
+    final track = _completedTrack();
+    // Fixes held at the stop are not route points: the route goes from the
+    // arrival at -10 m to the departure at 25 m.
+    const east = <double>[-90, -60, -30, -10, 25, 60, 90];
+    final source = _timedSegment(track, east, spacing: 300, accuracy: 5);
+    final arrival = source.points[3];
+    final departure = source.points[4];
+    final gap = TrackingContinuityGap(
+      id: 'gap-1',
+      trackId: track.id,
+      beforePointId: arrival.id,
+      afterPointId: departure.id,
+      beforeSegmentId: source.segment.id,
+      afterSegmentId: source.segment.id,
+      cause: TrackingGapCause.expectedStationarySuppression,
+      treatment: TrackingGapTreatment.retainCurrentSegment,
+      distanceTreatment: TrackingGapDistanceTreatment.measured,
+      continuityPolicyVersion: 3,
+      providerGap: const Duration(seconds: 300),
+      createdAt: DateTime.utc(2026),
+    );
+    final report = const RouteGeometryAssembler().assemble(
+      sourceParts: <RouteGeometrySourcePart>[
+        RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: source.segment,
+          points: source.points,
+        ),
+      ],
+      gaps: <TrackingContinuityGap>[gap],
+      continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    );
+    final stop = TrackStop(
+      id: 'stop-1',
+      trackId: track.id,
+      segmentId: source.segment.id,
+      kind: TrackStopKind.dwell,
+      latitude: 0.5,
+      longitude: 0.5,
+      centreSigmaMeters: 2,
+      radiusMeters: 25,
+      startedAt: arrival.capturedAt,
+      lastSeenAt: departure.capturedAt.subtract(const Duration(seconds: 10)),
+      endedAt: departure.capturedAt,
+      evidenceCount: 30,
+      qualityPolicyVersion: 3,
+      arrivalPointId: arrival.id,
+      departurePointId: departure.id,
+    );
+    const centre = maplibre.LatLng(0.5, 0.5);
+    final collapsed = <String, maplibre.LatLng>{
+      arrival.id: centre,
+      departure.id: centre,
+    };
+
+    final raw = RouteGeometry.fromReport(report, stops: <TrackStop>[stop]);
+    expect(raw.stopMarkers, hasLength(1));
+    expect(raw.stopMarkers.single.recorded, isTrue);
+    expect(raw.stopMarkers.single.coordinate, centre);
+    expect(raw.stopMarkers.single.duration, const Duration(minutes: 5));
+    expect(raw.gapMarkers, isEmpty, reason: 'a stop is not a gap');
+    expect(RouteGeometry.fromReport(report).gapMarkers, hasLength(1));
+
+    final cleaned = RouteGeometry.fromReport(
+      report,
+      cleaned: collapsed,
+      stops: <TrackStop>[stop],
+    );
+    expect(cleaned.stopMarkers, hasLength(1), reason: 'no second marker');
+    expect(cleaned.stopMarkers.single.recorded, isTrue);
+    // A route without stop records keeps the cleaned view's marker.
+    final older = RouteGeometry.fromReport(report, cleaned: collapsed);
+    expect(older.stopMarkers.single.recorded, isFalse);
+  });
+
+  test('a tapped stop says how long it lasted and when', () {
+    final closed = RouteStopMarker(
+      coordinate: const maplibre.LatLng(0.5, 0.5),
+      startedAt: DateTime(2026, 10, 19, 10, 5),
+      endedAt: DateTime(2026, 10, 19, 11, 17),
+      recorded: true,
+    );
+    expect(describeStop(closed), 'Stopped 1 h 12 min, 10:05–11:17');
+    final current = RouteStopMarker(
+      coordinate: const maplibre.LatLng(0.5, 0.5),
+      startedAt: DateTime(2026, 10, 19, 9, 58),
+      endedAt: DateTime(2026, 10, 19, 10, 1),
+      recorded: true,
+      current: true,
+    );
+    expect(describeStop(current), 'Stopped 3 min so far, since 09:58');
+  });
+
+  testWidgets('a Trip card shows its stops and the time stopped', (
+    tester,
+  ) async {
+    Trip trip(String id) => Trip(
+      id: id,
+      organizationId: 'example-organization',
+      userId: 'example-user',
+      routeId: id,
+      status: TripStatus.completed,
+      startedAt: DateTime.utc(2026),
+      endedAt: DateTime.utc(2026, 1, 1, 2),
+      legCount: 1,
+      acceptedPointCount: 20,
+      rejectedPointCount: 40,
+      measuredDistanceMeters: 1234,
+      lifecycleRevision: 2,
+      createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026, 1, 1, 2),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTripsSection(
+            trips: <RecordedTripSummary>[
+              RecordedTripSummary(
+                trip: trip('with_stops'),
+                segmentCount: 1,
+                gapCount: 0,
+                stopCount: 2,
+                stoppedFor: const Duration(minutes: 17),
+              ),
+              RecordedTripSummary(
+                trip: trip('without_stops'),
+                segmentCount: 1,
+                gapCount: 0,
+              ),
+            ],
+            hasMore: false,
+            onRefresh: null,
+            onLoadMore: null,
+            onViewMap: null,
+            onContinue: null,
+            onExport: null,
+            onDelete: null,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('2 stop(s) • 17 min'), findsOneWidget);
+    expect(find.textContaining('stop(s)'), findsOneWidget);
+  });
 }
 
 /// Points [spacing] seconds apart, [east] metres east of a synthetic origin.

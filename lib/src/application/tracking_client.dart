@@ -19,6 +19,7 @@ import '../domain/permission_state.dart';
 import '../domain/route_geometry.dart';
 import '../domain/stop_site.dart';
 import '../domain/track.dart';
+import '../domain/track_stop.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
 import '../domain/trip.dart';
@@ -363,10 +364,26 @@ class TrackingClient implements Tracking {
   MotionGate? _stopStateGate;
   String? _stopStateTrackId;
   _ActiveStopSite? _stopSite;
-  final DwellRun _dwellRun = DwellRun();
-  String? _dwellRunSegmentId;
   DateTime? _lastMovingEvidenceAt;
   bool _stopActivitySourceFailed = false;
+
+  // Whether this route has had any activity reading, and the newest Core
+  // Motion reading: iOS reports activity changes only, so its state lasts
+  // until the next change. Android's periodic readings carry the ongoing
+  // state, so its transitions count only while recent.
+  bool _stopActivityEvidenceSeen = false;
+  ActivitySnapshot? _latestChangeOnlyReading;
+
+  // Without activity evidence, a stay is recognised only from two minutes of
+  // confined accepted fixes, as before quiet fixes could be told apart.
+  final DwellRun _dwellRun = DwellRun();
+  String? _dwellRunSegmentId;
+
+  // Evidence class of the fix being processed, from its stop context.
+  _FixEvidence _currentFixEvidence = _FixEvidence.unknown;
+
+  // A stop record a fail-open left open, closed with the next fix.
+  bool _pendingStopRecordClose = false;
 
   // Native sampling profile last reported for a route, for health events.
   String? _nativeSamplingProfileTrackId;
@@ -2114,12 +2131,22 @@ class TrackingClient implements Tracking {
         : null;
     final previousRaw = await continuityStore?.findLastRawPoint(track.id);
     final policyEpoch = await _policyEpochFor(track.id);
+    final stopStore =
+        _store is TrackStopRepository ? _store as TrackStopRepository : null;
+    // A restart, a new gate or another route rebuilds the stop state, from
+    // the open stop record when there is one.
+    final openStop = stopStore != null &&
+            (!identical(_stopStateGate, _motionGate) ||
+                _stopStateTrackId != track.id)
+        ? await stopStore.findOpenTrackStop(track.id)
+        : null;
     final stopContext = _stopContextFor(
       track: track,
       policyEpoch: policyEpoch,
       sample: sample,
       anchor: previousInSegment,
       previousRaw: previousRaw,
+      openStop: openStop,
     );
     final decision = FixQualityPolicy(
       track.config,
@@ -2157,23 +2184,44 @@ class TrackingClient implements Tracking {
       rejectionReason: decision.rejectionReason,
       qualityPolicyVersion: decision.policyVersion,
     );
-    final appendResult = continuityStore == null
-        ? PointAppendResult(
-            point: await _store.appendPoint(request),
-            segmentId: segmentId,
-            duplicate: false,
+    final stopTransition = decision.policyVersion >= 3
+        ? _planStopTransition(
+            context: stopContext,
+            decision: decision,
+            sample: sample,
+            config: track.config,
+            recordStops: stopStore != null,
           )
-        : await continuityStore.appendPointWithContinuity(
+        : null;
+    final stopChange = stopTransition?.change;
+    final appendResult = stopStore != null && stopChange != null
+        ? await stopStore.appendPointWithStop(
             request,
             continuityDecision,
-          );
+            stopChange,
+          )
+        : continuityStore == null
+            ? PointAppendResult(
+                point: await _store.appendPoint(request),
+                segmentId: segmentId,
+                duplicate: false,
+              )
+            : await continuityStore.appendPointWithContinuity(
+                request,
+                continuityDecision,
+              );
     final point = appendResult.point;
+    if (stopChange is TrackStopClose && !stopChange.departure) {
+      _pendingStopRecordClose = false;
+    }
     _updateStopState(
       context: stopContext,
       stored: point,
       anchor: previousInSegment,
       trackId: track.id,
       config: track.config,
+      transition: stopTransition,
+      duplicate: appendResult.duplicate,
     );
     if (point.configurationEpochId != policyEpoch?.id) {
       // Another epoch covered this point; look it up again for the next fix.
@@ -2247,6 +2295,7 @@ class TrackingClient implements Tracking {
     required LocationSample sample,
     required TrackPoint? anchor,
     required TrackPoint? previousRaw,
+    required TrackStop? openStop,
   }) {
     final gate = _motionGate;
     final qualityPolicy = TrackingPolicyVersions.resolveQualityPolicy(
@@ -2265,6 +2314,8 @@ class TrackingClient implements Tracking {
         // Readings buffered for another route say nothing about this one.
         _pendingStopReadings.clear();
         _lastMovingEvidenceAt = null;
+        _stopActivityEvidenceSeen = false;
+        _latestChangeOnlyReading = null;
       }
       _stopStateGate = gate;
       _stopStateTrackId = track.id;
@@ -2274,6 +2325,7 @@ class TrackingClient implements Tracking {
           track: track,
           anchor: anchor,
           previousRaw: previousRaw,
+          openStop: openStop,
         );
       } else {
         _restoreStopState(
@@ -2307,9 +2359,10 @@ class TrackingClient implements Tracking {
 
     final segmentId = track.currentSegmentId;
     if (_stopActivitySourceFailed) {
-      // Without activity evidence a stop fails open, as native capture does.
+      // Without activity evidence a stay fails open, as native capture does.
       _stopActivitySourceFailed = false;
-      if (_stopSite != null) {
+      if (_stopSite case final site?) {
+        if (site.recordOpen) _pendingStopRecordClose = true;
         _clearStopSite();
         gate.endStillEpisode(capturedAt);
       }
@@ -2322,25 +2375,42 @@ class TrackingClient implements Tracking {
       _dwellRun.reset();
       _dwellRunSegmentId = segmentId;
     }
-    if (_stopSite == null &&
-        gate.stillEpisodeActive &&
-        anchor != null &&
-        segmentId != null) {
-      _stopSite = _ActiveStopSite(
-        trackId: track.id,
-        segmentId: segmentId,
-        anchor: StopSiteAnchor(
-          latitude: anchor.latitude,
-          longitude: anchor.longitude,
-          sigmaMeters: _stopSigmaOf(anchor, track.config),
-        ),
-        startedAt: gate.stillEpisodeStartedAt ?? capturedAt,
-      );
-      _stopOutsideRun = null;
+    final movingAt = _lastMovingEvidenceAt;
+    final evidence = _currentFixEvidence = _fixEvidence(sample, gate);
+    if (_stopSite == null && anchor != null && segmentId != null) {
+      if (gate.stillEpisodeActive || evidence == _FixEvidence.quiet) {
+        // A stay begins where the movement ended: the later of the last
+        // route point and the last moving evidence.
+        var startedAt = anchor.capturedAt;
+        final stillSince = gate.stillEpisodeStartedAt;
+        final endOfMovement = gate.stillEpisodeActive ? stillSince : movingAt;
+        if (endOfMovement != null && endOfMovement.isAfter(startedAt)) {
+          startedAt = endOfMovement;
+        }
+        if (startedAt.isAfter(capturedAt)) startedAt = capturedAt;
+        _stopSite = _ActiveStopSite(
+          trackId: track.id,
+          segmentId: segmentId,
+          anchor: StopSiteAnchor(
+            latitude: anchor.latitude,
+            longitude: anchor.longitude,
+            sigmaMeters: _stopSigmaOf(anchor, track.config),
+          ),
+          anchorFix: DwellFix(
+            latitude: anchor.latitude,
+            longitude: anchor.longitude,
+            sigmaMeters: _stopSigmaOf(anchor, track.config),
+            capturedAt: anchor.capturedAt,
+          ),
+          anchorPointId: anchor.id,
+          startedAt: startedAt,
+        );
+        _stopOutsideRun = null;
+      }
     }
     final site = _stopSite;
+    if (site != null && gate.stillEpisodeActive) site.stillSeen = true;
     final run = _stopOutsideRun?.trackId == track.id ? _stopOutsideRun : null;
-    final movingAt = _lastMovingEvidenceAt;
     return StopContext(
       stillEpisodeActive: gate.stillEpisodeActive,
       site: site?.anchor,
@@ -2352,7 +2422,167 @@ class TrackingClient implements Tracking {
           movingAt.isAfter(site.startedAt) &&
           capturedAt.difference(movingAt) <=
               StopSitePolicy.movingEvidenceWindow,
+      stopRecognized: site != null && site.isStop,
+      recentMovingReading: evidence == _FixEvidence.moving,
     );
+  }
+
+  /// Decides, before [sample] is stored, whether its stay becomes a stop and
+  /// which stop record change to write with it.
+  _StopTransition? _planStopTransition({
+    required StopContext? context,
+    required FixQualityDecision decision,
+    required LocationSample sample,
+    required TrackingConfig config,
+    required bool recordStops,
+  }) {
+    final site = _stopSite;
+    if (site == null || context?.site == null) {
+      return _pendingStopRecordClose && recordStops
+          ? const _StopTransition(change: TrackStopClose(departure: false))
+          : null;
+    }
+    if (decision.acceptedForGeometry) {
+      // A departure, or a moving fix ending a pause.
+      if (!recordStops) return const _StopTransition();
+      return _StopTransition(
+        change: site.recordOpen
+            ? const TrackStopClose(departure: true)
+            : _recordEndedStay(site, sample, config, decision.policyVersion),
+      );
+    }
+    if (site.recordOpen) {
+      return _StopTransition(
+        change: recordStops ? const TrackStopExtend() : null,
+      );
+    }
+    if (site.isStop && !recordStops) return null;
+    final stay = sample.capturedAt.difference(site.startedAt);
+    if (stay < StopSitePolicy.dwellMinimumDuration) return null;
+    if (site.promoted) {
+      // Recognised from accepted fixes alone: open its record around the
+      // centre it already holds.
+      return _StopTransition(
+        change: recordStops
+            ? _openStop(site, site.anchor, decision.policyVersion)
+            : null,
+      );
+    }
+    final members = <DwellFix>[
+      site.anchorFix,
+      ...site.insideFixes,
+      if (decision.rejectionReason == FixQualityIssue.stationaryHold)
+        DwellFix(
+          latitude: sample.latitude,
+          longitude: sample.longitude,
+          sigmaMeters: MotionPolicyV2.sigmaMeters(
+            horizontalAccuracy: sample.horizontalAccuracy,
+            hasSpeedAccuracy: sample.speedAccuracy != null,
+            hasVerticalAccuracy: sample.verticalAccuracy != null,
+            fallbackAccuracyMeters: config.maximumAcceptedAccuracyMeters,
+          ),
+          capturedAt: sample.capturedAt,
+        ),
+    ];
+    if (!site.stillSeen && !_isDwell(members, stay)) return null;
+    final centre = DwellRun.centreOf(members);
+    return _StopTransition(
+      promote: centre,
+      change:
+          recordStops ? _openStop(site, centre, decision.policyVersion) : null,
+    );
+  }
+
+  /// The stop a pause ending at [departure] was, if any: one that, the time
+  /// until [departure] included, lasted the dwell time without net progress.
+  /// The provider may send no fixes while the device stays put, so a stay's
+  /// length can be known only once it ends. Only a departure fix still at
+  /// the place shows the device stayed through such a silence.
+  static TrackStopRecord? _recordEndedStay(
+    _ActiveStopSite site,
+    LocationSample departure,
+    TrackingConfig config,
+    int policyVersion,
+  ) {
+    final lastHeldAt = site.lastHeldAt;
+    if (lastHeldAt == null) return null;
+    final stay = departure.capturedAt.difference(site.startedAt);
+    if (stay < StopSitePolicy.dwellMinimumDuration) return null;
+    final members = <DwellFix>[site.anchorFix, ...site.insideFixes];
+    if (!site.isStop && !_isDwell(members, stay)) return null;
+    final centre = site.promoted ? site.anchor : DwellRun.centreOf(members);
+    final distance = TrackGeodesy.sphericalHaversineMeters(
+      centre.latitude,
+      centre.longitude,
+      departure.latitude,
+      departure.longitude,
+    );
+    final radius = MotionPolicyV2.holdRadiusMeters(
+      anchorSigmaMeters: centre.sigmaMeters,
+      fixSigmaMeters: MotionPolicyV2.sigmaMeters(
+        horizontalAccuracy: departure.horizontalAccuracy,
+        hasSpeedAccuracy: departure.speedAccuracy != null,
+        hasVerticalAccuracy: departure.verticalAccuracy != null,
+        fallbackAccuracyMeters: config.maximumAcceptedAccuracyMeters,
+      ),
+    );
+    if (distance > radius) return null;
+    return TrackStopRecord(
+      kind: site.stillSeen ? TrackStopKind.still : TrackStopKind.dwell,
+      latitude: centre.latitude,
+      longitude: centre.longitude,
+      centreSigmaMeters: centre.sigmaMeters,
+      radiusMeters: MotionPolicyV2.holdRadiusMeters(
+        anchorSigmaMeters: centre.sigmaMeters,
+        fixSigmaMeters: centre.sigmaMeters,
+      ),
+      startedAt: site.startedAt,
+      lastSeenAt: lastHeldAt,
+      evidenceCount: site.heldCount,
+      qualityPolicyVersion: policyVersion,
+      firstSequence: site.firstHeldSequence,
+      lastSequence: site.lastHeldSequence,
+      arrivalPointId: site.anchorPointId,
+    );
+  }
+
+  static TrackStopOpen _openStop(
+    _ActiveStopSite site,
+    StopSiteAnchor centre,
+    int policyVersion,
+  ) =>
+      TrackStopOpen(
+        kind: site.stillSeen ? TrackStopKind.still : TrackStopKind.dwell,
+        latitude: centre.latitude,
+        longitude: centre.longitude,
+        centreSigmaMeters: centre.sigmaMeters,
+        radiusMeters: MotionPolicyV2.holdRadiusMeters(
+          anchorSigmaMeters: centre.sigmaMeters,
+          fixSigmaMeters: centre.sigmaMeters,
+        ),
+        startedAt: site.startedAt,
+        qualityPolicyVersion: policyVersion,
+        firstSequence: site.firstHeldSequence,
+        arrivalPointId: site.anchorPointId,
+        priorEvidenceCount: site.heldCount,
+      );
+
+  /// Whether [members], over a stay of [stay], made no net progress.
+  static bool _isDwell(List<DwellFix> members, Duration stay) {
+    if (members.length < 2) return false;
+    final span = members.last.capturedAt.difference(members.first.capturedAt);
+    if (span >= StopSitePolicy.dwellMinimumDuration) {
+      return DwellRun.progressSpeedMetersPerSecond(members) <=
+          StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond;
+    }
+    final net = TrackGeodesy.sphericalHaversineMeters(
+      members.first.latitude,
+      members.first.longitude,
+      members.last.latitude,
+      members.last.longitude,
+    );
+    return net / (stay.inMilliseconds / 1000) <=
+        StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond;
   }
 
   /// Applies an activity reading to [gate] and remembers the newest moving
@@ -2364,11 +2594,18 @@ class TrackingClient implements Tracking {
   ) {
     gate.add(reading, at);
     final recordedAt = reading.recordedAt;
-    if (recordedAt == null ||
-        !StopSitePolicy.isMovingEvidence(
-          reading,
-          movingConfidenceThreshold: gate.config.movingConfidenceThreshold,
-        )) {
+    if (recordedAt == null) return;
+    _stopActivityEvidenceSeen = true;
+    if (reading.source == MotionPolicyV2.coreMotionSource) {
+      final latest = _latestChangeOnlyReading?.recordedAt;
+      if (latest == null || recordedAt.isAfter(latest)) {
+        _latestChangeOnlyReading = reading;
+      }
+    }
+    if (!StopSitePolicy.isMovingEvidence(
+      reading,
+      movingConfidenceThreshold: gate.config.movingConfidenceThreshold,
+    )) {
       return;
     }
     final latest = _lastMovingEvidenceAt;
@@ -2377,20 +2614,138 @@ class TrackingClient implements Tracking {
     }
   }
 
+  /// Whether [sample] moves, is quiet, or carries no evidence either way.
+  ///
+  /// A fix moves with a measured Doppler speed, a moving reading in the last
+  /// [StopSitePolicy.quietWindow], or a current Core Motion moving state (iOS
+  /// reports changes only). A precise near-zero Doppler speed makes it quiet
+  /// whatever the readings. Otherwise it is quiet when activity evidence
+  /// exists for the route or its Doppler speed is precise, and its evidence
+  /// is unknown, as without Activity Recognition.
+  _FixEvidence _fixEvidence(LocationSample sample, MotionGate gate) {
+    final capturedAt = sample.capturedAt;
+    if (StopSitePolicy.showsMovement(
+      speed: sample.speed,
+      speedAccuracy: sample.speedAccuracy,
+    )) {
+      return _FixEvidence.moving;
+    }
+    // A precise near-zero Doppler speed outranks a reading from seconds ago:
+    // the device has just stopped.
+    if (StopSitePolicy.dopplerShowsStillness(
+      speed: sample.speed,
+      speedAccuracy: sample.speedAccuracy,
+    )) {
+      return _FixEvidence.quiet;
+    }
+    final movingAt = _lastMovingEvidenceAt;
+    if (movingAt != null &&
+        capturedAt.difference(movingAt) <= StopSitePolicy.quietWindow) {
+      return _FixEvidence.moving;
+    }
+    final changeOnly = _latestChangeOnlyReading;
+    if (changeOnly != null &&
+        StopSitePolicy.isMovingEvidence(
+          changeOnly,
+          movingConfidenceThreshold: gate.config.movingConfidenceThreshold,
+        )) {
+      return _FixEvidence.moving;
+    }
+    final speedAccuracy = sample.speedAccuracy;
+    final preciseDoppler = sample.speed != null &&
+        speedAccuracy != null &&
+        speedAccuracy >= 0 &&
+        speedAccuracy <= StopSitePolicy.movingDopplerMaximumSpeedAccuracy;
+    return _stopActivityEvidenceSeen || preciseDoppler
+        ? _FixEvidence.quiet
+        : _FixEvidence.unknown;
+  }
+
   void _clearStopSite() {
     _stopSite = null;
     _stopOutsideRun = null;
     _dwellRun.reset();
   }
 
-  /// Restores a quality-policy-3 stop that stored evidence proves was current,
-  /// after a restart or a new [MotionGate]. The stop centre is not stored, so
-  /// the restored stop is centred on [anchor], the last accepted point.
+  /// Without activity evidence, two minutes of confined accepted fixes with no
+  /// net progress make a stop; its fixes until then stay in the route.
+  void _trackFallbackDwell(
+    TrackPoint stored,
+    String trackId,
+    TrackingConfig config,
+  ) {
+    if (_currentFixEvidence != _FixEvidence.unknown) {
+      _dwellRun.reset();
+      return;
+    }
+    _dwellRun.add(
+      DwellFix(
+        latitude: stored.latitude,
+        longitude: stored.longitude,
+        sigmaMeters: _stopSigmaOf(stored, config),
+        capturedAt: stored.capturedAt,
+      ),
+    );
+    final dwell = _dwellRun.dwellAnchor();
+    if (dwell == null) return;
+    final first = _dwellRun.fixes.first;
+    _dwellRun.reset();
+    _stopSite = _ActiveStopSite(
+      trackId: trackId,
+      segmentId: stored.segmentId,
+      anchor: dwell,
+      anchorFix: DwellFix(
+        latitude: dwell.latitude,
+        longitude: dwell.longitude,
+        sigmaMeters: dwell.sigmaMeters,
+        capturedAt: first.capturedAt,
+      ),
+      anchorPointId: stored.id,
+      startedAt: first.capturedAt,
+    )..promoted = true;
+    _stopOutsideRun = null;
+  }
+
+  /// Restores a quality-policy-3 stay that stored evidence proves was current,
+  /// after a restart or a new [MotionGate].
+  ///
+  /// An open stop record restores the stop with its own centre. Otherwise a
+  /// newest stored fix that was held restores a pause around [anchor], the
+  /// last accepted point.
   void _restoreStopSite({
     required Track track,
     required TrackPoint? anchor,
     required TrackPoint? previousRaw,
+    required TrackStop? openStop,
   }) {
+    if (openStop != null && openStop.segmentId == track.currentSegmentId) {
+      final centre = DwellFix(
+        latitude: openStop.latitude,
+        longitude: openStop.longitude,
+        sigmaMeters: openStop.centreSigmaMeters,
+        capturedAt: openStop.startedAt,
+      );
+      _stopSite = _ActiveStopSite(
+        trackId: track.id,
+        segmentId: openStop.segmentId,
+        anchor: StopSiteAnchor(
+          latitude: openStop.latitude,
+          longitude: openStop.longitude,
+          sigmaMeters: openStop.centreSigmaMeters,
+        ),
+        anchorFix: centre,
+        anchorPointId: openStop.arrivalPointId,
+        startedAt: openStop.startedAt,
+      )
+        ..stillSeen = openStop.kind == TrackStopKind.still
+        ..promoted = true
+        ..recordOpen = true
+        ..firstHeldSequence = openStop.firstSequence
+        ..lastHeldSequence = openStop.lastSequence
+        ..lastHeldAt = openStop.lastSeenAt
+        ..heldCount = openStop.evidenceCount;
+      return;
+    }
     final raw = previousRaw;
     if (raw == null ||
         anchor == null ||
@@ -2409,8 +2764,19 @@ class TrackingClient implements Tracking {
         longitude: anchor.longitude,
         sigmaMeters: _stopSigmaOf(anchor, track.config),
       ),
+      anchorFix: DwellFix(
+        latitude: anchor.latitude,
+        longitude: anchor.longitude,
+        sigmaMeters: _stopSigmaOf(anchor, track.config),
+        capturedAt: anchor.capturedAt,
+      ),
+      anchorPointId: anchor.id,
       startedAt: raw.capturedAt,
-    );
+    )
+      ..firstHeldSequence = raw.sequence
+      ..lastHeldSequence = raw.sequence
+      ..lastHeldAt = raw.capturedAt
+      ..heldCount = 1;
     if (raw.rejectionReason == FixQualityIssue.stationaryOutlier) {
       _stopOutsideRun = _StopOutsideRun(
         trackId: track.id,
@@ -2462,14 +2828,20 @@ class TrackingClient implements Tracking {
     required TrackPoint? anchor,
     required String trackId,
     required TrackingConfig config,
+    required _StopTransition? transition,
+    required bool duplicate,
   }) {
     if (context == null) return;
     if ((stored.qualityPolicyVersion ?? 0) >= 3) {
+      // A replayed event was decided, and its stay updated, when it was
+      // first stored.
+      if (duplicate) return;
       _updateStopSite(
         context: context,
         stored: stored,
         trackId: trackId,
         config: config,
+        transition: transition,
       );
       return;
     }
@@ -2498,78 +2870,68 @@ class TrackingClient implements Tracking {
     }
   }
 
-  /// Quality policy 3: ends the stop on a departure, tracks the outside run,
-  /// and starts a dwell once accepted fixes stay confined long enough.
+  /// Quality policy 3: ends the stay on an accepted fix, records held
+  /// evidence, tracks the outside run, and promotes the stay to a stop as
+  /// [transition] planned.
   void _updateStopSite({
     required StopContext context,
     required TrackPoint stored,
     required String trackId,
     required TrackingConfig config,
+    required _StopTransition? transition,
   }) {
-    final site = context.site;
-    if (site != null) {
-      if (stored.accepted) {
-        // The accepted fix confirmed a departure.
-        _clearStopSite();
-        _motionGate?.endStillEpisode(stored.capturedAt);
-        return;
-      }
-      if (stored.rejectionReason == FixQualityIssue.stationaryOutlier) {
-        final run =
-            _stopOutsideRun?.trackId == trackId ? _stopOutsideRun : null;
-        _stopOutsideRun = _StopOutsideRun(
-          trackId: trackId,
-          startedAt: run?.startedAt ?? stored.capturedAt,
-          farthestMeters: math.max(
-            run?.farthestMeters ?? 0,
-            TrackGeodesy.sphericalHaversineMeters(
-              site.latitude,
-              site.longitude,
-              stored.latitude,
-              stored.longitude,
-            ),
+    final site = _stopSite;
+    if (site == null || context.site == null) {
+      if (stored.accepted) _trackFallbackDwell(stored, trackId, config);
+      return;
+    }
+    if (stored.accepted) {
+      // A departure, or a moving fix ending a pause.
+      _clearStopSite();
+      _motionGate?.endStillEpisode(stored.capturedAt);
+      return;
+    }
+    site
+      ..heldCount += 1
+      ..firstHeldSequence ??= stored.sequence
+      ..lastHeldSequence = stored.sequence
+      ..lastHeldAt = stored.capturedAt;
+    if (stored.rejectionReason == FixQualityIssue.stationaryHold) {
+      site.addInsideFix(
+        DwellFix(
+          latitude: stored.latitude,
+          longitude: stored.longitude,
+          sigmaMeters: _stopSigmaOf(stored, config),
+          capturedAt: stored.capturedAt,
+        ),
+      );
+      _stopOutsideRun = null;
+    } else if (stored.rejectionReason == FixQualityIssue.stationaryOutlier) {
+      final run = _stopOutsideRun?.trackId == trackId ? _stopOutsideRun : null;
+      _stopOutsideRun = _StopOutsideRun(
+        trackId: trackId,
+        startedAt: run?.startedAt ?? stored.capturedAt,
+        farthestMeters: math.max(
+          run?.farthestMeters ?? 0,
+          TrackGeodesy.sphericalHaversineMeters(
+            site.anchor.latitude,
+            site.anchor.longitude,
+            stored.latitude,
+            stored.longitude,
           ),
-          count: (run?.count ?? 0) + 1,
-        );
-      } else if (stored.rejectionReason == FixQualityIssue.stationaryHold) {
-        _stopOutsideRun = null;
-      }
-      return;
+        ),
+        count: (run?.count ?? 0) + 1,
+      );
     }
-    if (!stored.accepted) return;
-    // A dwell needs a confined run with no moving evidence in it.
-    final movingAt = _lastMovingEvidenceAt;
-    if (movingAt != null) {
-      if (!stored.capturedAt.isAfter(movingAt)) {
-        _dwellRun.reset();
-        return;
-      }
-      _dwellRun.dropThrough(movingAt);
+    final centre = transition?.promote;
+    if (centre != null) {
+      // The stay is a stop: hold around its robust centre from now on.
+      site
+        ..promoted = true
+        ..anchor = centre;
+      _stopOutsideRun = null;
     }
-    if (StopSitePolicy.dopplerShowsMovement(
-      speed: stored.speed,
-      speedAccuracy: stored.speedAccuracy,
-    )) {
-      _dwellRun.reset();
-      return;
-    }
-    _dwellRun.add(
-      DwellFix(
-        latitude: stored.latitude,
-        longitude: stored.longitude,
-        sigmaMeters: _stopSigmaOf(stored, config),
-        capturedAt: stored.capturedAt,
-      ),
-    );
-    final dwell = _dwellRun.dwellAnchor();
-    if (dwell == null) return;
-    _clearStopSite();
-    _stopSite = _ActiveStopSite(
-      trackId: trackId,
-      segmentId: stored.segmentId,
-      anchor: dwell,
-      startedAt: stored.capturedAt,
-    );
+    if (transition?.change is TrackStopOpen) site.recordOpen = true;
   }
 
   static bool _isStopHoldReason(String? reason) =>
@@ -3221,6 +3583,20 @@ class TrackingClient implements Tracking {
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
+  }) =>
+      _exportTrack(
+        trackId: trackId,
+        format: format,
+        options: options,
+        fileName: fileName,
+      );
+
+  Future<TrackExportResult> _exportTrack({
+    required String trackId,
+    required TrackExportFormat format,
+    required TrackExportOptions options,
+    String? fileName,
+    TrackBundle? bundle,
   }) async {
     await initialize();
     await _pointTail;
@@ -3229,6 +3605,7 @@ class TrackingClient implements Tracking {
       format: format,
       options: options,
       fileName: fileName,
+      bundle: bundle,
     );
   }
 
@@ -3497,7 +3874,8 @@ final class _OwnerBoundTrackingController
         TrackingDiagnosticsController,
         TrackingConfigurationController,
         TrackingGeometryController,
-        TrackingQualityController {
+        TrackingQualityController,
+        TrackingStopController {
   _OwnerBoundTrackingController(this._client, this._owner) {
     _sessionSubscription = _client.sessionStream.listen(
       (snapshot) {
@@ -4344,11 +4722,17 @@ final class _OwnerBoundTrackingController
     String? fileName,
   }) async {
     await _requireOwnedTrack(trackId);
-    return _client.exportTrack(
+    // Derived coordinates are owner-scoped: load them here, then write them
+    // with the same writer as a raw export.
+    final derived = options.geometry is DerivedTrackGeometry
+        ? await loadTrackGeometry(trackId, geometry: options.geometry)
+        : null;
+    return _client._exportTrack(
       trackId: trackId,
       format: format,
       options: options,
       fileName: fileName,
+      bundle: derived,
     );
   }
 
@@ -4366,6 +4750,24 @@ final class _OwnerBoundTrackingController
   Future<TrackBundle> loadTrackBundle(String trackId) async {
     await _requireOwnedTrack(trackId);
     return _client.loadTrackBundle(trackId);
+  }
+
+  @override
+  Future<List<TrackStop>> listTrackStops(String trackId) async {
+    await _requireOwnedTrack(trackId);
+    await _client.initialize();
+    final store = _client._store;
+    if (store is! TrackStopRepository) return const <TrackStop>[];
+    return (store as TrackStopRepository).listTrackStops(trackId);
+  }
+
+  @override
+  Future<List<TrackStop>> listTripStops(String tripId) async {
+    final bundle = await loadTripBundle(tripId);
+    final stops = <TrackStop>[
+      for (final leg in bundle.legs) ...await listTrackStops(leg.trackId),
+    ]..sort((a, b) => a.startedAt.compareTo(b.startedAt));
+    return List<TrackStop>.unmodifiable(stops);
   }
 
   @override
@@ -4565,19 +4967,71 @@ final class _StopOutsideRun {
   final int count;
 }
 
-/// The current quality-policy-3 stop of one route segment.
+/// The current quality-policy-3 stay of one route segment.
 final class _ActiveStopSite {
-  const _ActiveStopSite({
+  _ActiveStopSite({
     required this.trackId,
     required this.segmentId,
     required this.anchor,
+    required this.anchorFix,
     required this.startedAt,
+    this.anchorPointId,
   });
 
   final String trackId;
   final String segmentId;
-  final StopSiteAnchor anchor;
 
-  /// Evidence time the stop started; moving evidence counts only after it.
+  /// Centre the hold radius is measured from: the last route point while the
+  /// stay is a pause, the stop's robust centre once it is a stop.
+  StopSiteAnchor anchor;
+
+  /// The last route point before the stay, a member of its centre.
+  final DwellFix anchorFix;
+  final String? anchorPointId;
+
+  /// Evidence time the stay started; moving evidence counts only after it.
   final DateTime startedAt;
+
+  /// Whether a still episode occurred during the stay.
+  bool stillSeen = false;
+
+  /// Whether the stay lasted the dwell time without net progress.
+  bool promoted = false;
+
+  /// Whether a stop record is open for the stay.
+  bool recordOpen = false;
+
+  /// Sequence range and newest capture time of the fixes rejected during
+  /// the stay.
+  int? firstHeldSequence;
+  int? lastHeldSequence;
+  DateTime? lastHeldAt;
+
+  /// Fixes rejected during the stay.
+  int heldCount = 0;
+
+  /// Fixes held inside the radius, oldest dropped past the bound.
+  final List<DwellFix> insideFixes = <DwellFix>[];
+
+  /// Whether the stay is a stop: walking inside its radius is part of it.
+  bool get isStop => stillSeen || promoted;
+
+  void addInsideFix(DwellFix fix) {
+    insideFixes.add(fix);
+    if (insideFixes.length > StopSitePolicy.maximumDwellRunFixes) {
+      insideFixes.removeAt(0);
+    }
+  }
+}
+
+/// Whether a fix moves, is quiet, or carries no evidence either way.
+enum _FixEvidence { moving, quiet, unknown }
+
+/// What a fix does to its stay: promote it to a stop around [promote], and
+/// the stop record change to store with the fix.
+final class _StopTransition {
+  const _StopTransition({this.promote, this.change});
+
+  final StopSiteAnchor? promote;
+  final TrackStopChange? change;
 }

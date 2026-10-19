@@ -45,6 +45,8 @@ final class StopContext {
     this.site,
     this.outsideRunCount = 0,
     this.movingEvidenceCurrent = false,
+    this.stopRecognized = true,
+    this.recentMovingReading = false,
   });
 
   /// Whether a motion-policy-2 still episode is current for this fix.
@@ -67,6 +69,14 @@ final class StopContext {
   /// Quality policy 3: whether moving evidence is recent enough to confirm a
   /// departure on the second consecutive fix outside the hold radius.
   final bool movingEvidenceCurrent;
+
+  /// Quality policy 3: whether the stay at [site] is a stop. While it is not
+  /// yet one, a pause, a moving fix ends it at once.
+  final bool stopRecognized;
+
+  /// Quality policy 3: whether a moving reading arrived within
+  /// [StopSitePolicy.quietWindow] before this fix.
+  final bool recentMovingReading;
 }
 
 /// Versioned canonical decision for one raw native fix.
@@ -132,16 +142,21 @@ final class FixQualityPolicy {
     };
   }
 
-  /// Version 1 plus a stop that is a stay at a place, for adaptive capture.
+  /// Version 1 plus stays at a place, for adaptive capture.
   ///
-  /// While [StopContext.site] is current, a fix that version 1 would accept is
-  /// held when it lies inside the hold radius around the stop centre,
-  /// whatever the activity: walking inside a place is part of the stop. A fix
-  /// outside the radius is accepted as the departure when its Doppler speed
-  /// is clearly measured, when moving evidence is current and it is the
-  /// second consecutive outside fix, or when fixes stay outside for
+  /// While [StopContext.site] is current and its stay is a pause
+  /// ([StopContext.stopRecognized] false), a moving fix is accepted and ends
+  /// the pause; a quiet fix is held inside the hold radius and is an outlier
+  /// outside it unless it departs for good.
+  ///
+  /// Once the stay is a stop, a fix that version 1 would accept is held when
+  /// it lies inside the hold radius around the stop centre, whatever the
+  /// activity: walking inside a place is part of the stop. A fix outside the
+  /// radius is accepted as the departure when its Doppler speed is clearly
+  /// measured, when moving evidence is current and it is the second
+  /// consecutive outside fix, or when fixes stay outside for
   /// [MotionPolicyV2.sustainedOutsideDuration] while moving farther away;
-  /// otherwise it is an outlier. Every rejection during a stop carries
+  /// otherwise it is an outlier. Every rejection during a stay carries
   /// [TrackPointQualityFlag.duringStop].
   FixQualityDecision _evaluateVersion3({
     required LocationSample sample,
@@ -187,6 +202,15 @@ final class FixQualityPolicy {
         producedByAccessory: sample.isProducedByAccessory,
       ),
     );
+    if (!stop.stopRecognized &&
+        (stop.recentMovingReading ||
+            StopSitePolicy.showsMovement(
+              speed: sample.speed,
+              speedAccuracy: sample.speedAccuracy,
+            ))) {
+      // A pause ends at the first moving fix: the route continues at once.
+      return decision;
+    }
     if (distance <= radius) {
       return _held(
         decision,
@@ -200,7 +224,9 @@ final class FixQualityPolicy {
     )) {
       return decision;
     }
-    if (stop.movingEvidenceCurrent && stop.outsideRunCount >= 1) {
+    if (stop.stopRecognized &&
+        stop.movingEvidenceCurrent &&
+        stop.outsideRunCount >= 1) {
       return decision;
     }
     final runStartedAt = stop.outsideRunStartedAt ?? sample.capturedAt;

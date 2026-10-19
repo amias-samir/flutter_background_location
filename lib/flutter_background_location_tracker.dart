@@ -51,6 +51,7 @@ export 'src/domain/track_data_page.dart';
 export 'src/domain/track_point.dart';
 export 'src/domain/track_query.dart';
 export 'src/domain/track_segment.dart';
+export 'src/domain/track_stop.dart';
 export 'src/domain/tracker_status.dart';
 export 'src/domain/trip.dart';
 export 'src/domain/trip_query.dart';

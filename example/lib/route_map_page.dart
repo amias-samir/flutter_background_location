@@ -21,6 +21,11 @@ class _TrackMapPageState extends State<TrackMapPage> {
 
   Future<RouteGeometry> _load() async {
     final tracking = widget.tracking;
+    final stops = tracking is TrackingStopController
+        ? await (tracking as TrackingStopController).listTrackStops(
+            widget.track.id,
+          )
+        : const <TrackStop>[];
     if (tracking is TrackingGeometryController) {
       final geometry = tracking as TrackingGeometryController;
       final report = await geometry.assembleTrackRouteGeometry(
@@ -30,6 +35,7 @@ class _TrackMapPageState extends State<TrackMapPage> {
       return RouteGeometry.fromReport(
         report,
         cleaned: _cleaned ? await cleanedCoordinates(geometry, report) : null,
+        stops: stops,
       );
     }
     final bundle = await tracking.loadTrackBundle(widget.track.id);
@@ -44,6 +50,7 @@ class _TrackMapPageState extends State<TrackMapPage> {
         ),
         continuity: _continuity,
       ),
+      stops: stops,
     );
   }
 
@@ -99,6 +106,11 @@ class _TripMapPageState extends State<TripMapPage> {
               report,
             )
           : null,
+      stops: tracking is TrackingStopController
+          ? await (tracking as TrackingStopController).listTripStops(
+              widget.trip.id,
+            )
+          : const <TrackStop>[],
     );
   }
 
@@ -354,6 +366,13 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
   bool _routeDrawn = false;
 
   @override
+  void dispose() {
+    _controller?.onCircleTapped.remove(_onCircleTapped);
+    _controller?.onSymbolTapped.remove(_onSymbolTapped);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => maplibre.MapLibreMap(
     styleString: maplibre.MapLibreStyles.openfreemapLiberty,
     initialCameraPosition: maplibre.CameraPosition(
@@ -362,6 +381,8 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     ),
     onMapCreated: (controller) {
       _controller = controller;
+      controller.onCircleTapped.add(_onCircleTapped);
+      controller.onSymbolTapped.add(_onSymbolTapped);
       unawaited(_drawRoute());
     },
     onStyleLoadedCallback: () {
@@ -405,25 +426,30 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         strokeWidth: 2,
       );
     }
-    for (final stop in widget.route.stopMarkers) {
+    final stops = widget.route.stopMarkers;
+    for (var index = 0; index < stops.length; index += 1) {
+      final stop = stops[index];
+      final data = <String, dynamic>{_stopKey: index};
       await _drawCircle(
         controller,
         coordinate: stop.coordinate,
         color: '#1565C0',
         radius: 7,
         strokeWidth: 2,
+        data: data,
       );
       try {
         await controller.addSymbol(
           maplibre.SymbolOptions(
             geometry: stop.coordinate,
-            textField: _duration(stop.duration),
+            textField: stopDurationLabel(stop.duration),
             textSize: 12,
             textOffset: const Offset(0, 1.4),
             textColor: '#0D47A1',
             textHaloColor: '#FFFFFF',
             textHaloWidth: 1.5,
           ),
+          data,
         );
       } on Object {
         // A style without glyphs still shows the stop marker.
@@ -454,9 +480,21 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     );
   }
 
-  static String _duration(Duration duration) => duration.inMinutes >= 60
-      ? '${duration.inHours} h ${duration.inMinutes % 60} min'
-      : '${math.max(1, duration.inMinutes)} min';
+  static const _stopKey = 'stop';
+
+  void _onCircleTapped(maplibre.Circle circle) => _showStop(circle.data);
+
+  void _onSymbolTapped(maplibre.Symbol symbol) => _showStop(symbol.data);
+
+  void _showStop(Map<dynamic, dynamic>? data) {
+    final index = data?[_stopKey];
+    if (!mounted || index is! int) return;
+    final stops = widget.route.stopMarkers;
+    if (index >= stops.length) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(describeStop(stops[index]))));
+  }
 
   Future<void> _drawCircle(
     maplibre.MapLibreMapController controller, {
@@ -464,6 +502,7 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     required String color,
     required double radius,
     double strokeWidth = 3,
+    Map<String, dynamic>? data,
   }) async {
     await controller.addCircle(
       maplibre.CircleOptions(
@@ -473,8 +512,28 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         circleStrokeColor: '#FFFFFF',
         circleStrokeWidth: strokeWidth,
       ),
+      data,
     );
   }
+}
+
+/// How long a stop lasted, as drawn beside its marker.
+String stopDurationLabel(Duration duration) => duration.inMinutes >= 60
+    ? '${duration.inHours} h ${duration.inMinutes % 60} min'
+    : '${math.max(1, duration.inMinutes)} min';
+
+/// What a tap on a stop shows: how long it lasted and when, in local time.
+String describeStop(RouteStopMarker stop) {
+  String clock(DateTime value) {
+    final local = value.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  final length = stopDurationLabel(stop.duration);
+  return stop.current
+      ? 'Stopped $length so far, since ${clock(stop.startedAt)}'
+      : 'Stopped $length, ${clock(stop.startedAt)}–${clock(stop.endedAt)}';
 }
 
 class _RouteEndpointLegend extends StatelessWidget {
@@ -531,12 +590,40 @@ class _LegendItem extends StatelessWidget {
   );
 }
 
-/// A stop drawn as one marker: the cleaned centre and how long it lasted.
+/// A stop drawn as one marker: where it was and how long it lasted.
 class RouteStopMarker {
-  const RouteStopMarker({required this.coordinate, required this.duration});
+  const RouteStopMarker({
+    required this.coordinate,
+    required this.startedAt,
+    required this.endedAt,
+    this.recorded = false,
+    this.current = false,
+  });
+
+  /// A stop the route recorded.
+  RouteStopMarker.fromStop(TrackStop stop)
+    : this(
+        coordinate: maplibre.LatLng(stop.latitude, stop.longitude),
+        startedAt: stop.startedAt,
+        endedAt: stop.endedAt ?? stop.lastSeenAt,
+        recorded: true,
+        current: stop.isOpen,
+      );
 
   final maplibre.LatLng coordinate;
-  final Duration duration;
+  final DateTime startedAt;
+
+  /// When the stay ended, or its newest fix while it is [current].
+  final DateTime endedAt;
+
+  /// Whether the route recorded the stop, rather than the cleaned view
+  /// collapsing a stay of an older route.
+  final bool recorded;
+
+  /// Whether the stop is still in progress.
+  final bool current;
+
+  Duration get duration => endedAt.difference(startedAt);
 }
 
 class RouteGeometry {
@@ -560,7 +647,8 @@ class RouteGeometry {
   final List<maplibre.LatLng> points;
   final List<maplibre.LatLng> gapMarkers;
 
-  /// Stops of the cleaned view; empty for raw evidence.
+  /// The route's recorded stops, in both views. For tracks recorded before
+  /// stop records, the cleaned view adds the stays it collapsed.
   final List<RouteStopMarker> stopMarkers;
 
   /// Low-confidence stretches drawn over [segments].
@@ -587,18 +675,28 @@ class RouteGeometry {
       start.latitude != destination.latitude ||
       start.longitude != destination.longitude;
 
-  /// Builds map geometry from [report]. With [cleaned] positions, stops
-  /// collapse to markers and their gaps are not drawn as gaps.
+  /// Builds map geometry from [report]. Recorded [stops] are markers, not
+  /// gaps. With [cleaned] positions, stays of tracks without stop records
+  /// collapse to markers too, and their gaps are not drawn as gaps.
   factory RouteGeometry.fromReport(
     RouteGeometryReport report, {
     Iterable<TrackingContinuityGap>? gaps,
     Map<String, maplibre.LatLng>? cleaned,
+    Iterable<TrackStop> stops = const <TrackStop>[],
   }) {
     final all = <maplibre.LatLng>[];
     final pointCoordinates = <String, maplibre.LatLng>{};
     final segments = <List<maplibre.LatLng>>[];
     final uncertain = <List<maplibre.LatLng>>[];
-    final stops = <RouteStopMarker>[];
+    final stopMarkers = <RouteStopMarker>[
+      for (final stop in stops) RouteStopMarker.fromStop(stop),
+    ];
+    final recordedTracks = <String>{for (final stop in stops) stop.trackId};
+    // The route points either side of each recorded stop.
+    final recordedBoundaries = <String>{
+      for (final stop in stops)
+        ...<String?>[stop.arrivalPointId, stop.departurePointId].nonNulls,
+    };
     final stopPointIds = <String>{};
     var recorded = 0.0;
     double? cleanedDistance = cleaned == null ? null : 0.0;
@@ -620,7 +718,9 @@ class RouteGeometry {
       recorded += _pathMeters(raw);
       if (cleanedDistance != null) {
         cleanedDistance += _pathMeters(coordinates);
-        stops.addAll(_stopsOf(valid, coordinates, stopPointIds));
+        stopMarkers.addAll(
+          _stopsOf(valid, coordinates, stopPointIds, recordedTracks),
+        );
       }
       uncertain.addAll(_uncertainStretches(valid, coordinates, stopPointIds));
     }
@@ -628,6 +728,12 @@ class RouteGeometry {
     final representedBoundaries = <String>{};
     for (final gap in gaps ?? report.gaps) {
       if (!_isVisibleGap(gap)) continue;
+      // A recorded stop is a marker, not a gap.
+      if (gap.cause == TrackingGapCause.expectedStationarySuppression &&
+          (recordedBoundaries.contains(gap.beforePointId) ||
+              recordedBoundaries.contains(gap.afterPointId))) {
+        continue;
+      }
       // In the cleaned view a stop is a marker, not a gap, and so is a gap
       // that starts or ends at a stop.
       if (cleaned != null &&
@@ -659,7 +765,8 @@ class RouteGeometry {
       geometryPartCount: report.geometryPartCount,
       gapCount: report.gapCount,
       inferredConnectorCount: report.inferredConnectorCount,
-      stopMarkers: stops,
+      stopMarkers: stopMarkers
+        ..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
       uncertainSegments: uncertain,
       recordedDistanceMeters: recorded,
       cleanedDistanceMeters: cleanedDistance,
@@ -673,11 +780,13 @@ class RouteGeometry {
   /// Runs of consecutive points the cleaning collapsed onto one coordinate:
   /// three or more, or two whose stay, until the next point, lasted
   /// [minimumStopMarkerDuration]. A stay counts the time until the next point
-  /// because fixes held at a stop are not drawn.
+  /// because fixes held at a stop are not drawn. Tracks in [recordedTracks]
+  /// have stop records instead.
   static List<RouteStopMarker> _stopsOf(
     List<TrackPoint> points,
     List<maplibre.LatLng> coordinates,
     Set<String> stopPointIds,
+    Set<String> recordedTracks,
   ) {
     final stops = <RouteStopMarker>[];
     var first = 0;
@@ -690,9 +799,14 @@ class RouteGeometry {
           ? points[index].capturedAt
           : points[index - 1].capturedAt;
       final stay = leftAt.difference(points[first].capturedAt);
-      if (count >= 3 || (count == 2 && stay >= minimumStopMarkerDuration)) {
+      if (!recordedTracks.contains(points[first].trackId) &&
+          (count >= 3 || (count == 2 && stay >= minimumStopMarkerDuration))) {
         stops.add(
-          RouteStopMarker(coordinate: coordinates[first], duration: stay),
+          RouteStopMarker(
+            coordinate: coordinates[first],
+            startedAt: points[first].capturedAt,
+            endedAt: leftAt,
+          ),
         );
         for (var member = first; member < index; member += 1) {
           stopPointIds.add(points[member].id);

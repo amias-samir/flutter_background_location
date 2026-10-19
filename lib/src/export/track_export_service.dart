@@ -18,6 +18,7 @@ import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../storage/track_repository.dart';
 import 'export_diagnostics.dart';
+import 'export_stops.dart';
 
 abstract interface class ExportFileWriter {
   Future<String> write({
@@ -160,16 +161,23 @@ final class TrackExportService {
   final TrackRepository repository;
   final ExportFileWriter fileWriter;
 
+  /// Writes [trackId] as [format].
+  ///
+  /// With [bundle], renders that already loaded bundle instead of reading the
+  /// raw route, such as derived coordinates an owner-scoped caller loaded for
+  /// a derived [TrackExportOptions.geometry].
   Future<TrackExportResult> exportTrack({
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
+    TrackBundle? bundle,
   }) async {
     final artifact = await renderTrack(
       trackId: trackId,
       format: format,
       options: options,
+      bundle: bundle,
     );
     final exportName = resolveExportFileName(
       format: format,
@@ -197,18 +205,27 @@ final class TrackExportService {
     );
   }
 
+  /// Renders [trackId] as [format]; see [exportTrack] for [bundle].
   Future<TrackExportArtifact> renderTrack({
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
+    TrackBundle? bundle,
   }) async {
-    if (options.geometry is DerivedTrackGeometry) {
+    if (options.geometry is DerivedTrackGeometry &&
+        options.includeRejectedPoints) {
+      throw const TrackingStorageException(
+        code: 'derived_geometry_rejected_points_unsupported',
+        message: 'Derived exports cannot include rejected raw points.',
+      );
+    }
+    if (options.geometry is DerivedTrackGeometry && bundle == null) {
       throw const TrackingStorageException(
         code: 'derived_geometry_requires_v2_export',
         message: 'Use owner-scoped exportTrackV2 for derived geometry.',
       );
     }
-    final bundle = await repository.loadTrackBundle(trackId);
+    bundle ??= await repository.loadTrackBundle(trackId);
     if (bundle.track.status != TrackStatus.completed &&
         !options.allowIncompleteTrackSnapshot) {
       throw StateError('Only completed tracks can be exported.');
@@ -322,6 +339,13 @@ final class TrackExportService {
         },
         'geometry': null,
       });
+    }
+    if (options.includeStops) {
+      for (final stop in bundle.stops) {
+        features.add(
+          stopGeoJsonFeature(stop, (time) => _formatTime(time, options)),
+        );
+      }
     }
     if (options.includeGeoJsonPointFeatures) {
       for (final points in selectedSegmentPoints) {
@@ -455,6 +479,38 @@ final class TrackExportService {
               });
             });
           }
+          if (options.includeStops) {
+            for (final stop in bundle.stops) {
+              final fields =
+                  stopExportFields(stop, (time) => _formatTime(time, options));
+              builder.element('Placemark', nest: () {
+                builder.element('name', nest: 'Stop');
+                builder.element('description', nest: stopDescription(stop));
+                builder.element('TimeSpan', nest: () {
+                  builder.element('begin', nest: fields['startedAt']);
+                  if (fields['endedAt'] case final endedAt?) {
+                    builder.element('end', nest: endedAt);
+                  }
+                });
+                builder.element('ExtendedData', nest: () {
+                  for (final MapEntry(:key, :value) in fields.entries) {
+                    builder.element(
+                      'Data',
+                      attributes: <String, String>{'name': key},
+                      nest: () => builder.element('value', nest: '$value'),
+                    );
+                  }
+                });
+                builder.element('Point', nest: () {
+                  builder.element(
+                    'coordinates',
+                    nest: '${_coordinate(stop.longitude)},'
+                        '${_coordinate(stop.latitude)}',
+                  );
+                });
+              });
+            }
+          }
         });
       },
     );
@@ -503,6 +559,32 @@ final class TrackExportService {
           );
           builder.element('desc', nest: report.continuity.name);
         });
+        if (options.includeStops) {
+          // GPX 1.1 orders waypoints before tracks.
+          for (final stop in bundle.stops) {
+            final fields =
+                stopExportFields(stop, (time) => _formatTime(time, options));
+            builder.element(
+              'wpt',
+              attributes: <String, String>{
+                'lat': _coordinate(stop.latitude),
+                'lon': _coordinate(stop.longitude),
+              },
+              nest: () {
+                builder.element('time', nest: fields['startedAt']);
+                builder.element('name', nest: 'Stop');
+                builder.element('desc', nest: stopDescription(stop));
+                builder.element('type', nest: 'stop');
+                builder.element('extensions', nest: () {
+                  for (final MapEntry(:key, :value) in fields.entries) {
+                    if (key == 'featureType') continue;
+                    builder.element('fbl:$key', nest: '$value');
+                  }
+                });
+              },
+            );
+          }
+        }
         builder.element('trk', nest: () {
           builder.element('name', nest: _trackName(bundle.track));
           if (report.inferredConnectors.isNotEmpty) {

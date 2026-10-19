@@ -43,4 +43,65 @@ void main() {
     expect(actions.canExport, isTrue);
     expect(actions.canDelete, isTrue);
   });
+
+  test('stop records are additive', () async {
+    final stop = TrackStop(
+      id: 'stop',
+      trackId: 'track',
+      segmentId: 'segment',
+      kind: TrackStopKind.dwell,
+      latitude: 0.5,
+      longitude: 0.5,
+      centreSigmaMeters: 2,
+      radiusMeters: 25,
+      startedAt: DateTime.utc(2026),
+      lastSeenAt: DateTime.utc(2026, 1, 1, 0, 9),
+      endedAt: DateTime.utc(2026, 1, 1, 0, 10),
+      evidenceCount: 40,
+      qualityPolicyVersion: 3,
+    );
+    expect(stop.isOpen, isFalse);
+    expect(stop.duration, const Duration(minutes: 10));
+    expect(TrackStopKind.still, 'still');
+
+    // Existing bundles and export options compile unchanged.
+    final bundle = TrackBundle(
+      track: Track(
+        id: 'track',
+        userId: 'user',
+        organizationId: 'org',
+        routeId: 'route',
+        status: TrackStatus.completed,
+        startedAt: DateTime.utc(2026),
+        segmentCount: 0,
+        nextSequence: 1,
+        acceptedPointCount: 0,
+        rejectedPointCount: 0,
+        totalDistanceMeters: 0,
+        config: const TrackingConfig(),
+      ),
+      segments: const <TrackSegmentWithPoints>[],
+    );
+    expect(bundle.stops, isEmpty);
+    expect(const TrackExportOptions().includeStops, isTrue);
+    expect(const TrackExportOptions(includeStops: false).includeStops, isFalse);
+
+    final TrackingStopController controller = _HostStops(<TrackStop>[stop]);
+    expect(await controller.listTripStops('trip'), <TrackStop>[stop]);
+    expect(advanced.TrackStopRepository, isNotNull);
+  });
+}
+
+/// A host implementation of the optional stop capability.
+final class _HostStops implements TrackingStopController {
+  _HostStops(this._stops);
+
+  final List<TrackStop> _stops;
+
+  @override
+  Future<List<TrackStop>> listTrackStops(String trackId) async =>
+      _stops.where((stop) => stop.trackId == trackId).toList();
+
+  @override
+  Future<List<TrackStop>> listTripStops(String tripId) async => _stops;
 }

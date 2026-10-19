@@ -10,6 +10,7 @@ import '../domain/trip.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
+import '../domain/track_stop.dart';
 import '../storage/track_repository.dart';
 import '../storage/trip_repository.dart';
 import 'track_export_service.dart';
@@ -68,6 +69,7 @@ final class TripExportService {
     final tripBundle = await _trips.loadTripBundleForOwner(owner, tripId);
     final sourceParts = <RouteGeometrySourcePart>[];
     final combinedSegments = <TrackSegmentWithPoints>[];
+    final combinedStops = <TrackStop>[];
     final allGaps = <TrackingContinuityGap>[];
     Track? firstTrack;
     var materializedPoints = 0;
@@ -82,6 +84,7 @@ final class TripExportService {
       }
       firstTrack ??= track;
       final trackBundle = await repository.loadTrackBundle(track.id);
+      combinedStops.addAll(trackBundle.stops);
       final legacyIds = repository is LegacyGapEvidenceRepository
           ? await (repository as LegacyGapEvidenceRepository)
               .safeLegacyAutomaticAfterSegmentIds(track.id)
@@ -155,6 +158,7 @@ final class TripExportService {
     final bundle = TrackBundle(
       track: syntheticTrack,
       segments: combinedSegments,
+      stops: combinedStops..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
     );
     final trackArtifact = TrackExportService(
       repository: repository,
