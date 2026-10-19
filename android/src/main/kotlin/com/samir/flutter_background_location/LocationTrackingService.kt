@@ -68,6 +68,8 @@ class LocationTrackingService : Service() {
     private val stationaryDisplacementWindow = StationaryDisplacementWindow()
     private var stillSince: Long? = null
     private var movingEvidence = 0
+    // Motion policy 2 state machine; null when motion policy 1 applies.
+    private var stationaryPolicy: StationaryPolicyV2? = null
     private var lastNotificationUpdateAt = 0L
     private var journalPrepareInProgress = false
     private var journalPrepareGeneration = 0
@@ -104,6 +106,8 @@ class LocationTrackingService : Service() {
         override fun run() {
             if (!captureStarted) return
             stateStore.markServiceHeartbeat(captureActive = true)
+            // Entry can come due while neither fixes nor readings arrive.
+            stationaryPolicy?.let { applyStationaryPolicy(it.evaluate(System.currentTimeMillis())) }
             stateStore.emitCurrentStatus()
             mainHandler.postDelayed(this, SERVICE_HEARTBEAT_INTERVAL_MS)
         }
@@ -134,11 +138,14 @@ class LocationTrackingService : Service() {
             mainHandler.post {
                 if (!captureStarted) return@post
                 TrackingEventBus.emitMotionEvidence(evidence)
-                if (evidence["state"] == "moving") {
+                val policy = stationaryPolicy
+                if (policy != null && evidence["state"] == "moving") {
+                    applyStationaryPolicy(policy.onMovingEvidence(System.currentTimeMillis()))
+                } else if (evidence["state"] == "moving") {
                     stillSince = null
                     stationaryDisplacementWindow.reset()
                     mainHandler.removeCallbacks(stationaryTransition)
-                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_LEGACY_POLICY)
                 } else if (evidence["state"] == "stationary") {
                     tryEnterStationaryProfile()
                 }
@@ -418,6 +425,7 @@ class LocationTrackingService : Service() {
         if (!captureStarted) {
             startCapture()
         } else {
+            replaceStationaryPolicy()
             motionSensorFusion.start(configuration)
             requestLocationUpdates(currentProfile)
         }
@@ -489,6 +497,7 @@ class LocationTrackingService : Service() {
         lastLocationObservedAt = null
         stationaryReferenceLocation = null
         stationaryDisplacementWindow.reset()
+        stationaryPolicy = newStationaryPolicy()
 
         // This commit precedes every provider subscription. Request/profile
         // replacements below deliberately keep the same durable generation.
@@ -538,6 +547,7 @@ class LocationTrackingService : Service() {
         lastLocationObservedAt = null
         stationaryReferenceLocation = null
         stationaryDisplacementWindow.reset()
+        stationaryPolicy = null
         stationaryExitProbeCoordinator.cancel()
         stationaryExitProbeCancellation?.cancel()
         stationaryExitProbeCancellation = null
@@ -693,6 +703,9 @@ class LocationTrackingService : Service() {
                 )
                 latestActivity = event
                 TrackingEventBus.emitActivity(event)
+                stationaryPolicy?.let {
+                    applyStationaryPolicy(it.onActivityUnavailable(System.currentTimeMillis()))
+                }
                 if (currentActivityPendingIntent == registeredPendingIntent) {
                     currentActivityPendingIntent = null
                     runCatching { stateStore.clearActivityRecognitionGeneration() }
@@ -860,6 +873,13 @@ class LocationTrackingService : Service() {
             stateStore.emitCurrentStatus()
         }
 
+        val policy = stationaryPolicy
+        if (policy != null) {
+            handleStationaryPolicyFix(policy, location)
+            updateNotification(force = false, pointTimestamp = timestamp)
+            return
+        }
+
         val observedAt = System.currentTimeMillis()
         if (!isMotionEvidenceEligible(location)) {
             updateNotification(force = false, pointTimestamp = timestamp)
@@ -876,7 +896,7 @@ class LocationTrackingService : Service() {
                     reference.accuracy.coerceAtLeast(0f) - location.accuracy.coerceAtLeast(0f)
                 if (certainDisplacement >= configuration.stationaryProbeDisplacementMeters) {
                 movingEvidence = MOVING_EVIDENCE_REQUIRED
-                switchProfile(TrackingStateStore.PROFILE_MOVING)
+                switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_LEGACY_POLICY)
                 }
             }
         } else if (hasHighConfidenceStillActivity()) {
@@ -953,6 +973,23 @@ class LocationTrackingService : Service() {
         TrackingEventBus.emitActivity(event)
 
         val type = event["type"] as String
+        val policy = stationaryPolicy
+        if (policy != null) {
+            val confidentStill =
+                type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold
+            if (confidentStill) {
+                motionSensorFusion.requestAmbiguityProbe(stationaryCandidate = true)
+            } else if (type !in MOVING_ACTIVITY_TYPES) {
+                motionSensorFusion.requestAmbiguityProbe()
+            }
+            applyStationaryPolicy(
+                policy.onReading(
+                    StationaryPolicyV2.Reading(type, confidence, timestamp, source),
+                    now,
+                ),
+            )
+            return
+        }
         if (!fresh) {
             stillSince = null
             stationaryDisplacementWindow.reset()
@@ -962,7 +999,7 @@ class LocationTrackingService : Service() {
             if (configuration.staleActivityFallback == "keepMovingProfile" ||
                 configuration.captureIntent != "adaptive"
             ) {
-                switchProfile(TrackingStateStore.PROFILE_MOVING)
+                switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_LEGACY_POLICY)
             }
             return
         }
@@ -975,7 +1012,7 @@ class LocationTrackingService : Service() {
                     stillSince = null
                     stationaryDisplacementWindow.reset()
                     mainHandler.removeCallbacks(stationaryTransition)
-                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_LEGACY_POLICY)
                     return
                 }
                 movingEvidence = 0
@@ -1001,7 +1038,7 @@ class LocationTrackingService : Service() {
                 movingEvidence += 1
                 if (movingEvidence >= configuration.movingConfirmationCount) {
                     movingEvidence = 0
-                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_LEGACY_POLICY)
                 }
             }
 
@@ -1014,7 +1051,7 @@ class LocationTrackingService : Service() {
                 if (configuration.unknownMotionFallback == "keepMovingProfile" ||
                     configuration.captureIntent != "adaptive"
                 ) {
-                    switchProfile(TrackingStateStore.PROFILE_MOVING)
+                    switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_LEGACY_POLICY)
                 }
             }
         }
@@ -1032,7 +1069,80 @@ class LocationTrackingService : Service() {
         }.getOrDefault(emptyMap())
     }
 
-    private fun switchProfile(profile: String) {
+    private fun newStationaryPolicy(): StationaryPolicyV2? =
+        if (configuration.usesStationaryPolicyV2) {
+            StationaryPolicyV2(
+                stationaryConfidenceThreshold = configuration.stationaryConfidenceThreshold,
+                movingConfidenceThreshold = configuration.movingConfidenceThreshold,
+                movingConfirmationCount = configuration.movingConfirmationCount,
+                confirmationMs = configuration.stationaryTimeoutMs,
+                maximumAcceptedAccuracyMeters = configuration.maximumAcceptedAccuracyMeters,
+            )
+        } else {
+            null
+        }
+
+    /**
+     * Installs the state machine for a configuration applied mid-capture. Its
+     * evidence starts over, so a stationary route fails open to moving.
+     */
+    private fun replaceStationaryPolicy() {
+        stationaryPolicy = newStationaryPolicy()
+        if (currentProfile == TrackingStateStore.PROFILE_STATIONARY) {
+            switchProfile(TrackingStateStore.PROFILE_MOVING, PROFILE_REASON_CONFIGURATION_UPDATE)
+        }
+    }
+
+    private fun handleStationaryPolicyFix(policy: StationaryPolicyV2, location: Location) {
+        val mocked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            location.isMock
+        } else {
+            @Suppress("DEPRECATION")
+            location.isFromMockProvider
+        }
+        val hasSpeedAccuracy = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            location.hasSpeedAccuracy()
+        val hasVerticalAccuracy = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            location.hasVerticalAccuracy()
+        if (location.hasAccuracy() && !mocked &&
+            location.accuracy.toDouble() <= configuration.maximumAcceptedAccuracyMeters
+        ) {
+            lastLocation = Location(location)
+            lastLocationObservedAt = System.currentTimeMillis()
+        }
+        applyStationaryPolicy(
+            policy.onFix(
+                StationaryPolicyV2.Fix(
+                    latitude = location.latitude,
+                    longitude = location.longitude,
+                    accuracyMeters = location.accuracy.toDouble().takeIf { location.hasAccuracy() },
+                    speed = location.speed.toDouble().takeIf { location.hasSpeed() },
+                    speedAccuracy = if (hasSpeedAccuracy) {
+                        location.speedAccuracyMetersPerSecond.toDouble()
+                    } else {
+                        null
+                    },
+                    hasVerticalAccuracy = hasVerticalAccuracy,
+                    mocked = mocked,
+                    // The fix's own time, so batched deliveries keep their spacing.
+                    observedAtMs = location.time,
+                ),
+            ),
+        )
+    }
+
+    private fun applyStationaryPolicy(profile: StationaryPolicyV2.Profile) {
+        val target = if (profile == StationaryPolicyV2.Profile.STATIONARY) {
+            TrackingStateStore.PROFILE_STATIONARY
+        } else {
+            TrackingStateStore.PROFILE_MOVING
+        }
+        if (captureStarted && target != currentProfile) {
+            switchProfile(target, stationaryPolicy?.lastTransitionReason)
+        }
+    }
+
+    private fun switchProfile(profile: String, reason: String?) {
         if (!captureStarted || profile == currentProfile) return
         val previousProfile = currentProfile
         currentProfile = profile
@@ -1041,13 +1151,21 @@ class LocationTrackingService : Service() {
         if (profile == TrackingStateStore.PROFILE_STATIONARY) {
             stationaryReferenceLocation = lastLocation?.let(::Location)
             stationaryDisplacementWindow.reset()
-            stateStore.markState(TrackingStateStore.STATE_STATIONARY, profile)
+            stateStore.markState(
+                TrackingStateStore.STATE_STATIONARY,
+                profile,
+                transitionReason = reason,
+            )
         } else {
             stationaryReferenceLocation = null
             stillSince = null
             stationaryDisplacementWindow.reset()
             mainHandler.removeCallbacks(stationaryTransition)
-            stateStore.markState(TrackingStateStore.STATE_TRACKING, profile)
+            stateStore.markState(
+                TrackingStateStore.STATE_TRACKING,
+                profile,
+                transitionReason = reason,
+            )
         }
         stateStore.emitCurrentStatus()
         requestLocationUpdates(profile)
@@ -1554,6 +1672,10 @@ class LocationTrackingService : Service() {
     }
 
     private fun tryEnterStationaryProfile() {
+        stationaryPolicy?.let {
+            applyStationaryPolicy(it.evaluate(System.currentTimeMillis()))
+            return
+        }
         val beganAt = stillSince ?: return
         if (!captureStarted || currentProfile != TrackingStateStore.PROFILE_MOVING) return
         if (configuration.captureIntent != "adaptive") return
@@ -1576,7 +1698,7 @@ class LocationTrackingService : Service() {
         ) {
             return
         }
-        switchProfile(TrackingStateStore.PROFILE_STATIONARY)
+        switchProfile(TrackingStateStore.PROFILE_STATIONARY, PROFILE_REASON_LEGACY_POLICY)
     }
 
     private fun recordNotificationActionIfNeeded(
@@ -1640,6 +1762,10 @@ class LocationTrackingService : Service() {
         private const val ACTION_QUICKBOOT_POWEROFF = "android.intent.action.QUICKBOOT_POWEROFF"
         private const val CAPTURE_ORIGIN_PROVIDER_STREAM = "providerStream"
         private const val CAPTURE_ORIGIN_EXIT_PROBE = "exitProbe"
+
+        // Profile changes outside motion policy 2, reported in status.
+        private const val PROFILE_REASON_LEGACY_POLICY = "legacy_policy"
+        private const val PROFILE_REASON_CONFIGURATION_UPDATE = "configuration_update"
         private const val CAPTURE_REASON_NEW_TRACK = "new_track"
         private const val CAPTURE_REASON_RESUME = "resume"
         private const val CAPTURE_REASON_PROCESS_RECOVERY = "process_recovery"

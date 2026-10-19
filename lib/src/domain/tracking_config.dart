@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'tracking_configuration_epoch.dart';
 import 'tracking_continuity.dart';
 import 'tracking_error.dart';
 
@@ -186,8 +187,13 @@ final class ResolvedTrackingAccuracy {
 
 /// Sampling, validation, and battery policy for a tracking session.
 final class TrackingConfig {
+  /// Creates a configuration whose unset sampling values come from
+  /// [accuracy]'s preset.
+  ///
+  /// New configurations use the current motion policy; see
+  /// [motionPolicyVersion].
   const TrackingConfig({
-    this.accuracy = TrackingAccuracy.high,
+    TrackingAccuracy accuracy = TrackingAccuracy.high,
     TrackingAccuracy? locationAccuracy,
     TrackingAccuracy? stationaryLocationAccuracy,
     int? movingDistanceFilterMeters,
@@ -195,34 +201,117 @@ final class TrackingConfig {
     int? stationaryDistanceFilterMeters,
     Duration? stationaryInterval,
     double? maximumAcceptedAccuracyMeters,
-    this.maximumPlausibleSpeedMetersPerSecond = 70,
-    this.stationaryConfirmationDuration = const Duration(seconds: 90),
-    this.stationaryProbeDisplacementMeters = 30,
-    this.stationaryConfidenceThreshold = 75,
-    this.movingConfidenceThreshold = 60,
-    this.movingConfirmationCount = 1,
-    this.activityRecognitionInterval = const Duration(seconds: 5),
-    this.captureIntent = RouteCaptureIntent.adaptive,
-    this.activityFreshnessThreshold = const Duration(seconds: 30),
-    this.staleActivityFallback = StaleActivityFallback.keepMovingProfile,
-    this.motionFusionMode = MotionFusionMode.platformActivityOnly,
-    this.unknownMotionFallback = UnknownMotionFallback.keepMovingProfile,
-    this.motionEvidenceFreshness = const Duration(seconds: 30),
-    this.sensorProbeDuration = const Duration(seconds: 4),
-    this.sensorProbeCooldown = const Duration(seconds: 20),
-    this.sensorProbeMaximumDurationPerHour = const Duration(minutes: 3),
-    this.mockLocationPolicy = MockLocationPolicy.flag,
-    this.batchPointCount = 25,
-    this.batchMaxAge = const Duration(minutes: 2),
+    double maximumPlausibleSpeedMetersPerSecond = 70,
+    Duration stationaryConfirmationDuration = const Duration(seconds: 90),
+    double stationaryProbeDisplacementMeters = 30,
+    int stationaryConfidenceThreshold = 75,
+    int movingConfidenceThreshold = 60,
+    int movingConfirmationCount = 1,
+    Duration activityRecognitionInterval = const Duration(seconds: 5),
+    RouteCaptureIntent captureIntent = RouteCaptureIntent.adaptive,
+    Duration activityFreshnessThreshold = const Duration(seconds: 30),
+    StaleActivityFallback staleActivityFallback =
+        StaleActivityFallback.keepMovingProfile,
+    MotionFusionMode motionFusionMode = MotionFusionMode.platformActivityOnly,
+    UnknownMotionFallback unknownMotionFallback =
+        UnknownMotionFallback.keepMovingProfile,
+    Duration motionEvidenceFreshness = const Duration(seconds: 30),
+    Duration sensorProbeDuration = const Duration(seconds: 4),
+    Duration sensorProbeCooldown = const Duration(seconds: 20),
+    Duration sensorProbeMaximumDurationPerHour = const Duration(minutes: 3),
+    MockLocationPolicy mockLocationPolicy = MockLocationPolicy.flag,
+    int batchPointCount = 25,
+    Duration batchMaxAge = const Duration(minutes: 2),
     Duration? largeGapThreshold,
     Duration? maximumProviderFixAge,
-    this.callbackHealthWarningThreshold = const Duration(minutes: 2),
+    Duration callbackHealthWarningThreshold = const Duration(minutes: 2),
     Duration? acceptedGeometryGapThreshold,
-    this.continuityPolicy = TrackingContinuityPolicy.conservative,
+    TrackingContinuityPolicy continuityPolicy =
+        TrackingContinuityPolicy.conservative,
     Duration? firstFixTimeout,
-    this.androidNotificationTitle = 'Location tracking active',
-    this.androidNotificationText = 'Recording your route',
-    this.iosTerminationRecoveryMode = IosTerminationRecoveryMode.interrupted,
+    String androidNotificationTitle = 'Location tracking active',
+    String androidNotificationText = 'Recording your route',
+    IosTerminationRecoveryMode iosTerminationRecoveryMode =
+        IosTerminationRecoveryMode.interrupted,
+  }) : this._resolve(
+          accuracy: accuracy,
+          locationAccuracy: locationAccuracy,
+          stationaryLocationAccuracy: stationaryLocationAccuracy,
+          movingDistanceFilterMeters: movingDistanceFilterMeters,
+          movingInterval: movingInterval,
+          stationaryDistanceFilterMeters: stationaryDistanceFilterMeters,
+          stationaryInterval: stationaryInterval,
+          maximumAcceptedAccuracyMeters: maximumAcceptedAccuracyMeters,
+          maximumPlausibleSpeedMetersPerSecond:
+              maximumPlausibleSpeedMetersPerSecond,
+          stationaryConfirmationDuration: stationaryConfirmationDuration,
+          stationaryProbeDisplacementMeters: stationaryProbeDisplacementMeters,
+          stationaryConfidenceThreshold: stationaryConfidenceThreshold,
+          movingConfidenceThreshold: movingConfidenceThreshold,
+          movingConfirmationCount: movingConfirmationCount,
+          activityRecognitionInterval: activityRecognitionInterval,
+          captureIntent: captureIntent,
+          activityFreshnessThreshold: activityFreshnessThreshold,
+          staleActivityFallback: staleActivityFallback,
+          motionFusionMode: motionFusionMode,
+          unknownMotionFallback: unknownMotionFallback,
+          motionEvidenceFreshness: motionEvidenceFreshness,
+          sensorProbeDuration: sensorProbeDuration,
+          sensorProbeCooldown: sensorProbeCooldown,
+          sensorProbeMaximumDurationPerHour: sensorProbeMaximumDurationPerHour,
+          mockLocationPolicy: mockLocationPolicy,
+          batchPointCount: batchPointCount,
+          batchMaxAge: batchMaxAge,
+          largeGapThreshold: largeGapThreshold,
+          maximumProviderFixAge: maximumProviderFixAge,
+          callbackHealthWarningThreshold: callbackHealthWarningThreshold,
+          acceptedGeometryGapThreshold: acceptedGeometryGapThreshold,
+          continuityPolicy: continuityPolicy,
+          firstFixTimeout: firstFixTimeout,
+          androidNotificationTitle: androidNotificationTitle,
+          androidNotificationText: androidNotificationText,
+          iosTerminationRecoveryMode: iosTerminationRecoveryMode,
+          motionPolicyVersion: TrackingPolicyVersions.motionPolicy,
+        );
+
+  const TrackingConfig._resolve({
+    required this.accuracy,
+    required TrackingAccuracy? locationAccuracy,
+    required TrackingAccuracy? stationaryLocationAccuracy,
+    required int? movingDistanceFilterMeters,
+    required Duration? movingInterval,
+    required int? stationaryDistanceFilterMeters,
+    required Duration? stationaryInterval,
+    required double? maximumAcceptedAccuracyMeters,
+    required this.maximumPlausibleSpeedMetersPerSecond,
+    required this.stationaryConfirmationDuration,
+    required this.stationaryProbeDisplacementMeters,
+    required this.stationaryConfidenceThreshold,
+    required this.movingConfidenceThreshold,
+    required this.movingConfirmationCount,
+    required this.activityRecognitionInterval,
+    required this.captureIntent,
+    required this.activityFreshnessThreshold,
+    required this.staleActivityFallback,
+    required this.motionFusionMode,
+    required this.unknownMotionFallback,
+    required this.motionEvidenceFreshness,
+    required this.sensorProbeDuration,
+    required this.sensorProbeCooldown,
+    required this.sensorProbeMaximumDurationPerHour,
+    required this.mockLocationPolicy,
+    required this.batchPointCount,
+    required this.batchMaxAge,
+    required Duration? largeGapThreshold,
+    required Duration? maximumProviderFixAge,
+    required this.callbackHealthWarningThreshold,
+    required Duration? acceptedGeometryGapThreshold,
+    required this.continuityPolicy,
+    required Duration? firstFixTimeout,
+    required this.androidNotificationTitle,
+    required this.androidNotificationText,
+    required this.iosTerminationRecoveryMode,
+    required this.motionPolicyVersion,
   })  : firstFixTimeout = firstFixTimeout ??
             (accuracy == TrackingAccuracy.low
                 ? const Duration(minutes: 2)
@@ -443,6 +532,16 @@ final class TrackingConfig {
   /// iOS recovery behavior after operating-system process termination.
   final IosTerminationRecoveryMode iosTerminationRecoveryMode;
 
+  /// Version of the moving/stationary state machine native code applies.
+  ///
+  /// The package sets this; hosts don't. New configurations, including maps
+  /// decoded by [TrackingConfig.fromMap] without the key, use
+  /// [TrackingPolicyVersions.motionPolicy]. A configuration the package
+  /// persisted before the key existed keeps
+  /// [TrackingPolicyVersions.legacyMotionPolicy], so a route that was
+  /// recording across an upgrade is never reinterpreted.
+  final int motionPolicyVersion;
+
   ResolvedTrackingAccuracy get resolvedAccuracy => ResolvedTrackingAccuracy(
         movingInterval: movingInterval,
         distanceFilterMeters: movingDistanceFilterMeters,
@@ -490,7 +589,7 @@ final class TrackingConfig {
     String? androidNotificationText,
     IosTerminationRecoveryMode? iosTerminationRecoveryMode,
   }) =>
-      TrackingConfig(
+      TrackingConfig._resolve(
         accuracy: accuracy ?? this.accuracy,
         locationAccuracy: locationAccuracy ?? this.locationAccuracy,
         stationaryLocationAccuracy:
@@ -535,6 +634,7 @@ final class TrackingConfig {
         mockLocationPolicy: mockLocationPolicy ?? this.mockLocationPolicy,
         batchPointCount: batchPointCount ?? this.batchPointCount,
         batchMaxAge: batchMaxAge ?? this.batchMaxAge,
+        largeGapThreshold: null,
         maximumProviderFixAge:
             maximumProviderFixAge ?? this.maximumProviderFixAge,
         callbackHealthWarningThreshold: callbackHealthWarningThreshold ??
@@ -550,6 +650,7 @@ final class TrackingConfig {
             androidNotificationText ?? this.androidNotificationText,
         iosTerminationRecoveryMode:
             iosTerminationRecoveryMode ?? this.iosTerminationRecoveryMode,
+        motionPolicyVersion: motionPolicyVersion,
       );
 
   /// This configuration with [accuracy]'s preset values; everything else is
@@ -715,6 +816,7 @@ final class TrackingConfig {
         if (iosTerminationRecoveryMode !=
             IosTerminationRecoveryMode.interrupted)
           'iosTerminationRecoveryMode': iosTerminationRecoveryMode.name,
+        'motionPolicyVersion': motionPolicyVersion,
       };
 
   String toJson() => jsonEncode(toMap());
@@ -731,7 +833,7 @@ final class TrackingConfig {
       map['accuracy'] ?? map['trackingAccuracy'],
     );
 
-    return TrackingConfig(
+    return TrackingConfig._resolve(
       accuracy: accuracy,
       locationAccuracy: map.containsKey('desiredAccuracy')
           ? TrackingAccuracy.parse(
@@ -829,6 +931,12 @@ final class TrackingConfig {
       iosTerminationRecoveryMode: IosTerminationRecoveryMode.values.firstWhere(
         (mode) => mode.name == map['iosTerminationRecoveryMode'],
         orElse: () => IosTerminationRecoveryMode.interrupted,
+      ),
+      // Like every other key, a missing version resolves like the
+      // constructor. Configurations the package persisted before the key
+      // existed are marked legacy where they are decoded from storage.
+      motionPolicyVersion: TrackingPolicyVersions.resolveMotionPolicy(
+        integer('motionPolicyVersion') ?? TrackingPolicyVersions.motionPolicy,
       ),
     );
   }

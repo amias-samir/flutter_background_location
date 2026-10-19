@@ -7,6 +7,7 @@ library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'flutter_background_location_tracker.dart';
 import 'package:path/path.dart' as path_util;
@@ -134,6 +135,685 @@ final class SyntheticTrackingRoute {
     );
   }
 
+  /// A long indoor stop with the error pattern of a 2026-10-18 field test.
+  ///
+  /// GNSS fixes wander several metres around the stop while reporting two to
+  /// four metres of accuracy, about one fix in seven is a fused fix reporting
+  /// 13 to 19 metres without Doppler, and the provider delivers a fix only
+  /// after five metres of apparent movement. Periodic still readings arrive
+  /// every five seconds with unknown, tilting, low-confidence and one spurious
+  /// in-vehicle dip. Seeded; [origin] is a synthetic coordinate.
+  factory SyntheticTrackingRoute.indoorStop({
+    Duration duration = const Duration(minutes: 30),
+    DateTime? startedAt,
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 1,
+    String eventPrefix = 'indoor-stop',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    final noise = _GaussMarkovNoise(random, sigmaMeters: 4.5, tauSeconds: 30);
+    final activities = <ActivitySnapshot>[];
+    final locations = <LocationSample>[];
+    ActivitySnapshot? latest;
+    (double, double)? delivered;
+    final spuriousVehicleAt = duration.inSeconds ~/ 4 ~/ 5 * 5;
+    for (var second = 0; second <= duration.inSeconds; second += 1) {
+      final (east, north) = noise.next();
+      if (second % 5 != 0) continue;
+      final at = start.add(Duration(seconds: second));
+      final roll = random.nextDouble();
+      latest = second == spuriousVehicleAt
+          ? _periodic(TrackingActivityType.inVehicle, 71, at, 'inVehicle')
+          : roll < 0.12
+              ? _periodic(TrackingActivityType.unknown, 40, at, 'unknown')
+              : roll < 0.16
+                  ? _periodic(TrackingActivityType.unknown, 100, at, 'tilting')
+                  : roll < 0.24
+                      ? _periodic(
+                          TrackingActivityType.stationary,
+                          36 + random.nextInt(18),
+                          at,
+                          'still',
+                        )
+                      : _periodic(
+                          TrackingActivityType.stationary,
+                          96 + random.nextInt(5),
+                          at,
+                          'still',
+                        );
+      activities.add(latest);
+      final last = delivered;
+      if (last != null &&
+          math.sqrt(
+                  math.pow(east - last.$1, 2) + math.pow(north - last.$2, 2)) <
+              5) {
+        continue;
+      }
+      delivered = (east, north);
+      final fused = random.nextDouble() < 0.15;
+      locations.add(
+        _syntheticFix(
+          origin: origin,
+          east: east,
+          north: north,
+          at: at,
+          accuracy: fused
+              ? 13 + random.nextDouble() * 6
+              : 2 + random.nextDouble() * 2,
+          speed: fused ? null : 0,
+          speedAccuracy: fused ? null : 2 + random.nextDouble() * 3,
+          verticalAccuracy: fused ? null : 3,
+          activity: latest,
+          eventId: '$eventPrefix-${locations.length}',
+          trackId: trackId,
+        ),
+      );
+    }
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// The end of a long stop, as a 2026-10-18 field test recorded it.
+  ///
+  /// After [silence] without any fix, while Activity Recognition stays paused
+  /// on its last still reading, comes a coarse network fix and then about a
+  /// minute of GNSS re-acquisition fixes 35 to 100 metres off that report 8 to
+  /// 14 metres of accuracy and an inconclusive Doppler speed, converging back
+  /// to the stop. With [depart], the route then leaves at motorbike speed
+  /// with a clearly measured Doppler speed. Seeded and synthetic.
+  factory SyntheticTrackingRoute.reacquisitionBurst({
+    DateTime? startedAt,
+    Duration silence = const Duration(minutes: 90),
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 2,
+    bool depart = true,
+    String eventPrefix = 'reacquisition',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    final burstAt = start.add(silence);
+    final activities = <ActivitySnapshot>[
+      _periodic(TrackingActivityType.stationary, 100, start, 'still'),
+    ];
+    final locations = <LocationSample>[];
+    void fix(
+      Duration offset,
+      double east,
+      double north, {
+      required double accuracy,
+      double? speed,
+      double? speedAccuracy,
+      double? verticalAccuracy = 3,
+    }) {
+      final at = burstAt.add(offset);
+      final activity = activities.lastWhere(
+        (reading) => !reading.recordedAt!.isAfter(at),
+      );
+      locations.add(
+        _syntheticFix(
+          origin: origin,
+          east: east,
+          north: north,
+          at: at,
+          accuracy: accuracy,
+          speed: speed,
+          speedAccuracy: speedAccuracy,
+          verticalAccuracy: verticalAccuracy,
+          activity: activity,
+          eventId: '$eventPrefix-${locations.length}',
+          trackId: trackId,
+        ),
+      );
+    }
+
+    fix(
+      Duration.zero,
+      -120,
+      -158,
+      accuracy: 373,
+      speed: 0,
+      speedAccuracy: 8.5,
+      verticalAccuracy: null,
+    );
+    var bearing = random.nextDouble() * 2 * math.pi;
+    for (var step = 1; step <= 12; step += 1) {
+      if (step == 8) {
+        activities.add(
+          _periodic(
+            TrackingActivityType.unknown,
+            100,
+            burstAt.add(const Duration(seconds: 38)),
+            'tilting',
+          ),
+        );
+      }
+      bearing += (random.nextDouble() - 0.5) * 1.2;
+      final range = 35 + random.nextDouble() * 65;
+      fix(
+        Duration(seconds: step * 5),
+        range * math.sin(bearing),
+        range * math.cos(bearing),
+        accuracy: 8 + random.nextDouble() * 6,
+        speed: 0,
+        speedAccuracy: 3 + random.nextDouble() * 11,
+      );
+    }
+    for (var step = 0; step < 12; step += 1) {
+      final offset = Duration(seconds: 70 + step * 8);
+      if (step % 2 == 0) {
+        activities.add(
+          _periodic(
+            TrackingActivityType.unknown,
+            40,
+            burstAt.add(offset - const Duration(seconds: 2)),
+            'unknown',
+          ),
+        );
+      }
+      final range = 2 + random.nextDouble() * 21;
+      final angle = random.nextDouble() * 2 * math.pi;
+      fix(
+        offset,
+        range * math.sin(angle),
+        range * math.cos(angle),
+        accuracy: 4 + random.nextDouble() * 7,
+        speed: 0,
+        speedAccuracy: 2 + random.nextDouble() * 2,
+      );
+    }
+    if (depart) {
+      final departAt = const Duration(seconds: 214);
+      activities.add(
+        _periodic(
+          TrackingActivityType.unknown,
+          100,
+          burstAt.add(departAt - const Duration(seconds: 1)),
+          'tilting',
+        ),
+      );
+      for (var step = 0; step < 24; step += 1) {
+        final offset = departAt + Duration(seconds: step * 5);
+        if (step == 4 || step == 5) {
+          activities.add(
+            _periodic(
+              TrackingActivityType.inVehicle,
+              96,
+              burstAt.add(offset - const Duration(seconds: 1)),
+              'inVehicle',
+            ),
+          );
+        }
+        final distance = 30.0 * (step + 1);
+        fix(
+          offset,
+          distance,
+          distance * 0.25,
+          accuracy: step == 0 ? 13 : 2,
+          speed: 3.4 + math.min(step, 4) * 0.7,
+          speedAccuracy: 1.2,
+        );
+      }
+    }
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// A slow ride through a lane where the positions stop following the
+  /// vehicle, as a 2026-10-18 field test recorded it.
+  ///
+  /// For about three minutes the fixes stay within 16 metres of the lane
+  /// entrance with 4 to 14 metres of accuracy and an inconclusive Doppler
+  /// speed; activity is unknown with walking and in-vehicle transitions, and a
+  /// final fix catches up 96 metres away. There is no confident still
+  /// evidence, so this is not a stop. Seeded and synthetic.
+  factory SyntheticTrackingRoute.slowLaneRide({
+    DateTime? startedAt,
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 3,
+    String eventPrefix = 'lane',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    final activities = <ActivitySnapshot>[];
+    final locations = <LocationSample>[];
+    for (var step = 0; step < 14; step += 1) {
+      final at = start.add(Duration(seconds: step * 14));
+      final reading = step == 6
+          ? ActivitySnapshot(
+              type: TrackingActivityType.walking,
+              confidence: 100,
+              recordedAt: at.subtract(const Duration(seconds: 1)),
+              source: 'android_activity_transition',
+              rawType: 'walking',
+            )
+          : step == 12
+              ? ActivitySnapshot(
+                  type: TrackingActivityType.inVehicle,
+                  confidence: 100,
+                  recordedAt: at.subtract(const Duration(seconds: 1)),
+                  source: 'android_activity_transition',
+                  rawType: 'inVehicle',
+                )
+              : _periodic(
+                  TrackingActivityType.unknown,
+                  40,
+                  at.subtract(const Duration(seconds: 1)),
+                  'unknown',
+                );
+      activities.add(reading);
+      final range = random.nextDouble() * 16;
+      final angle = random.nextDouble() * 2 * math.pi;
+      locations.add(
+        _syntheticFix(
+          origin: origin,
+          east: range * math.sin(angle),
+          north: range * math.cos(angle),
+          at: at,
+          accuracy: 4 + random.nextDouble() * 10,
+          speed: random.nextDouble() * 1.5,
+          speedAccuracy: 1.5 + random.nextDouble() * 12.5,
+          verticalAccuracy: 3,
+          activity: reading,
+          eventId: '$eventPrefix-${locations.length}',
+          trackId: trackId,
+        ),
+      );
+    }
+    locations.add(
+      _syntheticFix(
+        origin: origin,
+        east: -55,
+        north: 79,
+        at: start.add(const Duration(seconds: 13 * 14 + 16)),
+        accuracy: 6.2,
+        speed: 0.8,
+        speedAccuracy: 8.6,
+        verticalAccuracy: 3,
+        activity: activities.last,
+        eventId: '$eventPrefix-${locations.length}',
+        trackId: trackId,
+      ),
+    );
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// A stop with the phone in a pocket, as a 2026-10-19 field test recorded
+  /// it at a temple and at home.
+  ///
+  /// The owner stands, sits or shifts about while outdoor-grade fixes report
+  /// two to five metres of accuracy and wander several metres, delivered after
+  /// five metres of apparent movement, with a precise Doppler speed near
+  /// zero. Activity Recognition never reports confident still: readings are
+  /// unknown, tilting or low-confidence still. Seeded and synthetic.
+  factory SyntheticTrackingRoute.pocketStop({
+    Duration duration = const Duration(minutes: 10),
+    DateTime? startedAt,
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 4,
+    String eventPrefix = 'pocket-stop',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    final noise = _GaussMarkovNoise(random, sigmaMeters: 5, tauSeconds: 30);
+    final activities = <ActivitySnapshot>[];
+    final locations = <LocationSample>[];
+    (double, double)? delivered;
+    for (var second = 0; second <= duration.inSeconds; second += 1) {
+      final (east, north) = noise.next();
+      if (second % 5 != 0) continue;
+      final at = start.add(Duration(seconds: second));
+      final roll = random.nextDouble();
+      final reading = roll < 0.7
+          ? _periodic(TrackingActivityType.unknown, 40, at, 'unknown')
+          : roll < 0.9
+              ? _periodic(TrackingActivityType.unknown, 100, at, 'tilting')
+              : _periodic(
+                  TrackingActivityType.stationary,
+                  40 + random.nextInt(21),
+                  at,
+                  'still',
+                );
+      activities.add(reading);
+      final last = delivered;
+      if (last != null &&
+          math.sqrt(
+                  math.pow(east - last.$1, 2) + math.pow(north - last.$2, 2)) <
+              5) {
+        continue;
+      }
+      delivered = (east, north);
+      locations.add(
+        _syntheticFix(
+          origin: origin,
+          east: east,
+          north: north,
+          at: at,
+          accuracy: 2.5 + random.nextDouble() * 2.5,
+          speed: random.nextDouble() * 0.3,
+          speedAccuracy: 0.12 + random.nextDouble() * 0.28,
+          verticalAccuracy: 3,
+          activity: reading,
+          eventId: '$eventPrefix-${locations.length}',
+          trackId: trackId,
+        ),
+      );
+    }
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// Walking about inside one place, such as between rooms or around a
+  /// temple courtyard: a loop of about eight metres at 0.8 m/s with on-foot
+  /// readings and a precise walking Doppler speed, delivered every five metres.
+  /// Part of a stop, not a journey. Seeded and synthetic.
+  factory SyntheticTrackingRoute.placeWander({
+    Duration duration = const Duration(minutes: 3),
+    DateTime? startedAt,
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 5,
+    String eventPrefix = 'place-wander',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    const loopRadius = 8.0;
+    const speed = 0.8;
+    final activities = <ActivitySnapshot>[];
+    final locations = <LocationSample>[];
+    (double, double)? delivered;
+    for (var second = 0; second <= duration.inSeconds; second += 1) {
+      final angle = speed * second / loopRadius;
+      final east = loopRadius * math.sin(angle) + (random.nextDouble() - 0.5);
+      final north = loopRadius * math.cos(angle) + (random.nextDouble() - 0.5);
+      final at = start.add(Duration(seconds: second));
+      if (second % 5 == 0) {
+        activities.add(
+          _periodic(
+            TrackingActivityType.walking,
+            85 + random.nextInt(13),
+            at,
+            'onFoot',
+          ),
+        );
+      }
+      final last = delivered;
+      if (last != null &&
+          math.sqrt(
+                  math.pow(east - last.$1, 2) + math.pow(north - last.$2, 2)) <
+              5) {
+        continue;
+      }
+      delivered = (east, north);
+      locations.add(
+        _syntheticFix(
+          origin: origin,
+          east: east,
+          north: north,
+          at: at,
+          accuracy: 3 + random.nextDouble() * 3,
+          speed: speed + (random.nextDouble() - 0.5) * 0.3,
+          speedAccuracy: 0.2 + random.nextDouble() * 0.1,
+          verticalAccuracy: 3,
+          activity: activities.last,
+          eventId: '$eventPrefix-${locations.length}',
+          trackId: trackId,
+        ),
+      );
+    }
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// A motorbike stop at the roadside, as a 2026-10-19 field test recorded
+  /// it.
+  ///
+  /// The bike arrives at 6 m/s with in-vehicle readings and stops for [stop]
+  /// with the phone in a jacket pocket: activity is unknown, fixes report
+  /// 1.7 to 4 metres of accuracy yet scatter about 8 metres per axis, so
+  /// consecutive fixes land 10 to 25 metres apart, the provider reports
+  /// exactly zero speed with a speed accuracy of 0.8 to 2.4 m/s, and fixes
+  /// thin out the longer the stop lasts. With [depart], the bike leaves east
+  /// at 6 m/s. Seeded and synthetic.
+  factory SyntheticTrackingRoute.roadsideStop({
+    Duration stop = const Duration(minutes: 6),
+    DateTime? startedAt,
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 6,
+    bool depart = true,
+    String eventPrefix = 'roadside',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    final activities = <ActivitySnapshot>[];
+    final locations = <LocationSample>[];
+    void fix(
+      DateTime at,
+      double east,
+      double north, {
+      required double accuracy,
+      required double speed,
+      required double speedAccuracy,
+      required ActivitySnapshot activity,
+    }) =>
+        locations.add(
+          _syntheticFix(
+            origin: origin,
+            east: east,
+            north: north,
+            at: at,
+            accuracy: accuracy,
+            speed: speed,
+            speedAccuracy: speedAccuracy,
+            verticalAccuracy: 2,
+            activity: activity,
+            eventId: '$eventPrefix-${locations.length}',
+            trackId: trackId,
+          ),
+        );
+
+    // Arrival at 6 m/s, braking over the last ten seconds.
+    const arrival = <(int, double, double)>[
+      (0, -180, 6),
+      (5, -150, 6),
+      (10, -120, 6),
+      (15, -90, 6),
+      (20, -60, 6),
+      (25, -30, 5.5),
+      (30, -12, 3),
+      (35, -3, 1.2),
+    ];
+    for (final (second, east, speed) in arrival) {
+      final at = start.add(Duration(seconds: second));
+      final reading = _periodic(
+        TrackingActivityType.inVehicle,
+        96,
+        at.subtract(const Duration(seconds: 1)),
+        'inVehicle',
+      );
+      activities.add(reading);
+      fix(
+        at,
+        east,
+        0,
+        accuracy: 1.8,
+        speed: speed,
+        speedAccuracy: 1.2,
+        activity: reading,
+      );
+    }
+
+    // The stop: unknown readings every five seconds, scattered fixes with an
+    // exactly zero speed that arrive less often as the stop goes on.
+    final stopAt = start.add(const Duration(seconds: 40));
+    for (var second = 0; second < stop.inSeconds; second += 5) {
+      activities.add(
+        _periodic(
+          TrackingActivityType.unknown,
+          40,
+          stopAt.add(Duration(seconds: second)),
+          'unknown',
+        ),
+      );
+    }
+    double gaussian() {
+      final u1 = math.max(random.nextDouble(), 1e-12);
+      return math.sqrt(-2 * math.log(u1)) *
+          math.cos(2 * math.pi * random.nextDouble());
+    }
+
+    var offset = 5;
+    while (offset < stop.inSeconds) {
+      final at = stopAt.add(Duration(seconds: offset));
+      fix(
+        at,
+        8 * gaussian(),
+        8 * gaussian(),
+        accuracy: 1.7 + random.nextDouble() * 2.3,
+        speed: 0,
+        speedAccuracy: 0.8 + random.nextDouble() * 1.6,
+        activity: activities.lastWhere(
+          (reading) => !reading.recordedAt!.isAfter(at),
+        ),
+      );
+      offset +=
+          offset < 120 ? 10 + random.nextInt(11) : 60 + random.nextInt(61);
+    }
+
+    if (depart) {
+      final departAt = stopAt.add(stop);
+      for (var step = 0; step < 12; step += 1) {
+        final at = departAt.add(Duration(seconds: step * 5));
+        final reading = _periodic(
+          TrackingActivityType.inVehicle,
+          96,
+          at.subtract(const Duration(seconds: 1)),
+          'inVehicle',
+        );
+        activities.add(reading);
+        fix(
+          at,
+          30.0 * (step + 1),
+          0,
+          accuracy: 1.9,
+          speed: 6,
+          speedAccuracy: 1.2,
+          activity: reading,
+        );
+      }
+    }
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// A slow walk east with short pauses, which must keep its distance.
+  ///
+  /// [legs] walks of 20 to 40 metres at 1 m/s with on-foot readings and a
+  /// precise walking Doppler speed, each followed by a pause of 30 to 90
+  /// seconds with unknown readings and at most one jitter fix. Seeded and
+  /// synthetic; the true path runs along the origin's latitude, so its length
+  /// is the final fix's east offset.
+  factory SyntheticTrackingRoute.slowStrollWithPauses({
+    int legs = 6,
+    DateTime? startedAt,
+    ({double latitude, double longitude}) origin = syntheticOrigin,
+    int seed = 7,
+    String eventPrefix = 'stroll',
+    String? trackId,
+  }) {
+    final start = (startedAt ?? DateTime.utc(2026)).toUtc();
+    final random = math.Random(seed);
+    final activities = <ActivitySnapshot>[];
+    final locations = <LocationSample>[];
+    var at = start;
+    var east = 0.0;
+    void fix({
+      required double accuracy,
+      required double speed,
+      required double speedAccuracy,
+      double north = 0,
+    }) =>
+        locations.add(
+          _syntheticFix(
+            origin: origin,
+            east: east,
+            north: north,
+            at: at,
+            accuracy: accuracy,
+            speed: speed,
+            speedAccuracy: speedAccuracy,
+            verticalAccuracy: 3,
+            activity: activities.lastWhere(
+              (reading) => !reading.recordedAt!.isAfter(at),
+            ),
+            eventId: '$eventPrefix-${locations.length}',
+            trackId: trackId,
+          ),
+        );
+
+    activities.add(
+      _periodic(TrackingActivityType.walking, 92, at, 'onFoot'),
+    );
+    fix(accuracy: 4, speed: 1, speedAccuracy: 0.25);
+    for (var leg = 0; leg < legs; leg += 1) {
+      final length = 20 + random.nextInt(21);
+      for (var walked = 5; walked <= length; walked += 5) {
+        at = at.add(const Duration(seconds: 5));
+        east += 5;
+        activities.add(
+          _periodic(
+            TrackingActivityType.walking,
+            85 + random.nextInt(13),
+            at.subtract(const Duration(milliseconds: 500)),
+            'onFoot',
+          ),
+        );
+        fix(
+          accuracy: 3 + random.nextDouble() * 3,
+          speed: 1 + (random.nextDouble() - 0.5) * 0.2,
+          speedAccuracy: 0.2 + random.nextDouble() * 0.1,
+        );
+      }
+      final pause = 30 + random.nextInt(61);
+      for (var second = 5; second < pause; second += 5) {
+        activities.add(
+          _periodic(
+            TrackingActivityType.unknown,
+            40,
+            at.add(Duration(seconds: second)),
+            'unknown',
+          ),
+        );
+      }
+      if (random.nextBool()) {
+        at = at.add(Duration(seconds: pause ~/ 2));
+        fix(
+          accuracy: 4,
+          speed: 0.1,
+          speedAccuracy: 0.2,
+          north: (random.nextDouble() - 0.5) * 4,
+        );
+        at = at.add(Duration(seconds: pause - pause ~/ 2));
+      } else {
+        at = at.add(Duration(seconds: pause));
+      }
+    }
+    return SyntheticTrackingRoute(locations, activities);
+  }
+
+  /// Synthetic origin of the field-test replicas, far from any real trace.
+  static const ({double latitude, double longitude}) syntheticOrigin = (
+    latitude: 0.5,
+    longitude: 0.5,
+  );
+
+  /// This route followed by [next].
+  SyntheticTrackingRoute followedBy(SyntheticTrackingRoute next) =>
+      SyntheticTrackingRoute(
+        <LocationSample>[...locations, ...next.locations],
+        <ActivitySnapshot>[...activities, ...next.activities],
+      );
+
   void emitTo(FakeTrackerAdapter adapter) {
     for (final activity in activities) {
       adapter.emitActivity(activity);
@@ -141,6 +821,110 @@ final class SyntheticTrackingRoute {
     for (final location in locations) {
       adapter.emitLocation(location);
     }
+  }
+
+  /// Emits activities and locations interleaved by evidence time, the order
+  /// a live device produces them.
+  void emitChronologicallyTo(FakeTrackerAdapter adapter) {
+    final pending = List<ActivitySnapshot>.of(activities)
+      ..sort((a, b) => (a.recordedAt ?? DateTime.utc(0))
+          .compareTo(b.recordedAt ?? DateTime.utc(0)));
+    var next = 0;
+    for (final location in locations) {
+      while (next < pending.length &&
+          !(pending[next].recordedAt ?? DateTime.utc(0))
+              .isAfter(location.capturedAt)) {
+        adapter.emitActivity(pending[next]);
+        next += 1;
+      }
+      adapter.emitLocation(location);
+    }
+    for (; next < pending.length; next += 1) {
+      adapter.emitActivity(pending[next]);
+    }
+  }
+
+  static ActivitySnapshot _periodic(
+    TrackingActivityType type,
+    int confidence,
+    DateTime at,
+    String rawType,
+  ) =>
+      ActivitySnapshot(
+        type: type,
+        confidence: confidence,
+        recordedAt: at,
+        source: 'android_activity_recognition',
+        rawType: rawType,
+      );
+
+  static LocationSample _syntheticFix({
+    required ({double latitude, double longitude}) origin,
+    required double east,
+    required double north,
+    required DateTime at,
+    required double accuracy,
+    required double? speed,
+    required double? speedAccuracy,
+    required double? verticalAccuracy,
+    required ActivitySnapshot activity,
+    required String eventId,
+    required String? trackId,
+  }) {
+    const metersPerDegree = 111195.07973436875;
+    final latitude = origin.latitude + north / metersPerDegree;
+    final longitude = origin.longitude +
+        east / (metersPerDegree * math.cos(origin.latitude * math.pi / 180));
+    return LocationSample(
+      latitude: latitude,
+      longitude: longitude,
+      capturedAt: at,
+      horizontalAccuracy: accuracy,
+      verticalAccuracy: verticalAccuracy,
+      speed: speed,
+      speedAccuracy: speedAccuracy,
+      provider: 'fused',
+      eventId: eventId,
+      trackId: trackId,
+      capturedActivity: activity,
+      nativeReceivedAt: at.add(const Duration(milliseconds: 100)),
+      providerTimeDeltaMsAtReceipt: 100,
+      captureGenerationId: 'synthetic-generation',
+      nativeLifecycle: TrackerLifecycle.tracking,
+      mockDetectionAvailable: true,
+    );
+  }
+}
+
+/// Seeded first-order Gauss–Markov position error in metres, sampled at 1 Hz.
+///
+/// Phone errors are correlated for tens of seconds, which is why a still
+/// phone's positions drift instead of scattering independently.
+final class _GaussMarkovNoise {
+  _GaussMarkovNoise(
+    this._random, {
+    required double sigmaMeters,
+    required double tauSeconds,
+  })  : _sigma = sigmaMeters,
+        _rho = math.exp(-1 / tauSeconds);
+
+  final math.Random _random;
+  final double _sigma;
+  final double _rho;
+  double _east = 0;
+  double _north = 0;
+
+  (double, double) next() {
+    final innovation = _sigma * math.sqrt(1 - _rho * _rho);
+    _east = _rho * _east + innovation * _gaussian();
+    _north = _rho * _north + innovation * _gaussian();
+    return (_east, _north);
+  }
+
+  double _gaussian() {
+    final u1 = math.max(_random.nextDouble(), 1e-12);
+    final u2 = _random.nextDouble();
+    return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2);
   }
 }
 

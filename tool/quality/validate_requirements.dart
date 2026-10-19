@@ -74,6 +74,22 @@ const _compatibilitySources = <String, List<_VersionSource>>{
       r'\bcontinuityPolicy\s*=\s*(\d+);',
     ),
   ],
+  'motion_policy': [
+    _VersionSource(
+      'lib/src/domain/tracking_configuration_epoch.dart',
+      r'\bmotionPolicy\s*=\s*(\d+);',
+    ),
+    _VersionSource(
+      'android/src/main/kotlin/com/samir/flutter_background_location/'
+          'StationaryPolicyV2.kt',
+      r'MOTION_POLICY_VERSION\s*=\s*(\d+)',
+    ),
+    _VersionSource(
+      'ios/flutter_background_location_tracker/Sources/'
+          'flutter_background_location_tracker/StationaryPolicyV2.swift',
+      r'static let motionPolicyVersion = (\d+)',
+    ),
+  ],
 };
 
 /// Package sources that raise error codes. Every literal code they raise must
@@ -328,7 +344,7 @@ void _validatePrivacyManifest(String root, List<String> errors) {
 
 Iterable<String> _noCodes(String source) => const <String>[];
 
-const _configKeyCoveragePath = 'test/fixtures/config_key_coverage_v1.json';
+const _configKeyCoveragePath = 'test/fixtures/config_key_coverage_v2.json';
 const _nativeConfigurationSources = <String, String>{
   'android': 'android/src/main/kotlin/com/samir/flutter_background_location/'
       'TrackingConfiguration.kt',

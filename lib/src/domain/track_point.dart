@@ -14,6 +14,10 @@ abstract final class TrackPointQualityFlag {
   static const int invalidCoordinate = 1 << 4;
   static const int largeGap = 1 << 5;
   static const int nativeTrackMismatch = 1 << 6;
+
+  /// Quality policy 3: rejected while a stop was current. Such rejections are
+  /// expected stop evidence, not a quality gap in the route.
+  static const int duringStop = 1 << 7;
 }
 
 final class TrackPoint {

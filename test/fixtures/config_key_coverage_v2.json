@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "note": "Every TrackingConfig.toMap() key and whether each native configuration parser reads it. The Dart suite checks the key set; the ledger validator checks the native parsers.",
   "keys": {
     "accuracy": {
@@ -161,6 +161,10 @@
       "android": "ignored",
       "ios": "parsed",
       "reason": "iOS-only relaunch behavior."
+    },
+    "motionPolicyVersion": {
+      "android": "parsed",
+      "ios": "parsed"
     }
   },
   "nativeOnlyKeys": {

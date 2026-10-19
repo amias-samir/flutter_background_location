@@ -1,4 +1,6 @@
 import 'location_sample.dart';
+import 'motion_policy.dart';
+import 'stop_site.dart';
 import 'track_point.dart';
 import 'tracking_config.dart';
 import 'tracking_configuration_epoch.dart';
@@ -20,6 +22,51 @@ abstract final class FixQualityIssue {
   static const mockDetected = 'mock_detected';
   static const mockUnavailable = 'mock_evidence_unavailable';
   static const providerUnavailable = 'provider_evidence_unavailable';
+
+  /// Quality policies 2 and 3: inside the hold radius of the stop anchor while
+  /// a stop is current. Also the rejection reason.
+  static const stationaryHold = 'stationary_hold';
+
+  /// Quality policies 2 and 3: outside the hold radius while a stop is
+  /// current, with no confirmed departure yet. Also the rejection reason.
+  static const stationaryOutlier = 'stationary_outlier';
+}
+
+/// Stop-hold state for one fix under quality policies 2 and 3.
+///
+/// The tracking client derives it from its motion state; the policy stays
+/// pure. Under quality policy 1, and for capture intents other than adaptive,
+/// it is ignored.
+final class StopContext {
+  const StopContext({
+    required this.stillEpisodeActive,
+    this.outsideRunStartedAt,
+    this.outsideRunFarthestMeters = 0,
+    this.site,
+    this.outsideRunCount = 0,
+    this.movingEvidenceCurrent = false,
+  });
+
+  /// Whether a motion-policy-2 still episode is current for this fix.
+  final bool stillEpisodeActive;
+
+  /// Capture time of the first fix of the current run outside the hold
+  /// radius, if one is in progress.
+  final DateTime? outsideRunStartedAt;
+
+  /// Largest anchor distance among the fixes of that run, in metres.
+  final double outsideRunFarthestMeters;
+
+  /// Quality policy 3: centre of the current stop, or null when no stop is
+  /// current. Quality policy 2 anchors on the previous accepted point instead.
+  final StopSiteAnchor? site;
+
+  /// Quality policy 3: number of fixes in the current outside run.
+  final int outsideRunCount;
+
+  /// Quality policy 3: whether moving evidence is recent enough to confirm a
+  /// departure on the second consecutive fix outside the hold radius.
+  final bool movingEvidenceCurrent;
 }
 
 /// Versioned canonical decision for one raw native fix.
@@ -56,22 +103,209 @@ final class FixQualityPolicy {
   /// by [TrackingPolicyVersions.resolveQualityPolicy].
   final int version;
 
+  /// Evaluates [sample] against [previous], the last accepted point of the
+  /// current segment.
+  ///
+  /// [stop] carries the stop-hold state used by quality policy 2.
   FixQualityDecision evaluate({
     required LocationSample sample,
     required TrackPoint? previous,
     required DateTime now,
+    StopContext? stop,
   }) {
     final applied = TrackingPolicyVersions.resolveQualityPolicy(version);
     return switch (applied) {
       1 => _evaluateVersion1(sample: sample, previous: previous, now: now),
+      2 => _evaluateVersion2(
+          sample: sample,
+          previous: previous,
+          now: now,
+          stop: stop,
+        ),
+      3 => _evaluateVersion3(
+          sample: sample,
+          previous: previous,
+          now: now,
+          stop: stop,
+        ),
       _ => throw StateError('Quality policy $applied has no evaluator.'),
     };
   }
+
+  /// Version 1 plus a stop that is a stay at a place, for adaptive capture.
+  ///
+  /// While [StopContext.site] is current, a fix that version 1 would accept is
+  /// held when it lies inside the hold radius around the stop centre,
+  /// whatever the activity: walking inside a place is part of the stop. A fix
+  /// outside the radius is accepted as the departure when its Doppler speed
+  /// is clearly measured, when moving evidence is current and it is the
+  /// second consecutive outside fix, or when fixes stay outside for
+  /// [MotionPolicyV2.sustainedOutsideDuration] while moving farther away;
+  /// otherwise it is an outlier. Every rejection during a stop carries
+  /// [TrackPointQualityFlag.duringStop].
+  FixQualityDecision _evaluateVersion3({
+    required LocationSample sample,
+    required TrackPoint? previous,
+    required DateTime now,
+    required StopContext? stop,
+  }) {
+    final decision = _evaluateVersion1(
+      sample: sample,
+      previous: previous,
+      now: now,
+      appliedVersion: 3,
+    );
+    final site = stop?.site;
+    if (stop == null ||
+        site == null ||
+        config.captureIntent != RouteCaptureIntent.adaptive) {
+      return decision;
+    }
+    if (!decision.acceptedForGeometry) {
+      return FixQualityDecision(
+        acceptedForGeometry: false,
+        acceptedForMotionEvidence: false,
+        issues: decision.issues,
+        policyVersion: decision.policyVersion,
+        qualityFlags: decision.qualityFlags | TrackPointQualityFlag.duringStop,
+        rejectionReason: decision.rejectionReason,
+      );
+    }
+    final distance = _distanceMeters(
+      site.latitude,
+      site.longitude,
+      sample.latitude,
+      sample.longitude,
+    );
+    final radius = MotionPolicyV2.holdRadiusMeters(
+      anchorSigmaMeters: site.sigmaMeters,
+      fixSigmaMeters: MotionPolicyV2.sigmaMeters(
+        horizontalAccuracy: sample.horizontalAccuracy,
+        hasSpeedAccuracy: sample.speedAccuracy != null,
+        hasVerticalAccuracy: sample.verticalAccuracy != null,
+        fallbackAccuracyMeters: config.maximumAcceptedAccuracyMeters,
+        producedByAccessory: sample.isProducedByAccessory,
+      ),
+    );
+    if (distance <= radius) {
+      return _held(
+        decision,
+        FixQualityIssue.stationaryHold,
+        flags: TrackPointQualityFlag.duringStop,
+      );
+    }
+    if (MotionPolicyV2.dopplerConfirmsDeparture(
+      speed: sample.speed,
+      speedAccuracy: sample.speedAccuracy,
+    )) {
+      return decision;
+    }
+    if (stop.movingEvidenceCurrent && stop.outsideRunCount >= 1) {
+      return decision;
+    }
+    final runStartedAt = stop.outsideRunStartedAt ?? sample.capturedAt;
+    final sustained = sample.capturedAt.difference(runStartedAt) >=
+            MotionPolicyV2.sustainedOutsideDuration &&
+        distance >= stop.outsideRunFarthestMeters &&
+        distance >= MotionPolicyV2.sustainedOutsideRadiusFactor * radius;
+    return sustained
+        ? decision
+        : _held(
+            decision,
+            FixQualityIssue.stationaryOutlier,
+            flags: TrackPointQualityFlag.duringStop,
+          );
+  }
+
+  /// Version 1 plus the canonical stop hold for adaptive capture.
+  ///
+  /// While a still episode is current, a fix that version 1 would accept is
+  /// held when it lies inside the hold radius around [previous], the stop
+  /// anchor, and rejected as an outlier when it lies outside without a
+  /// confirmed departure. A departure is confirmed by a clearly measured
+  /// Doppler speed, or by fixes that stay outside for
+  /// [MotionPolicyV2.sustainedOutsideDuration] while moving farther away.
+  /// Positive moving activity ends the episode before the fix is evaluated.
+  /// Held and outlier fixes stay stored as rejected evidence; the anchor to
+  /// departure chord counts as measured distance.
+  FixQualityDecision _evaluateVersion2({
+    required LocationSample sample,
+    required TrackPoint? previous,
+    required DateTime now,
+    required StopContext? stop,
+  }) {
+    final decision = _evaluateVersion1(
+      sample: sample,
+      previous: previous,
+      now: now,
+      appliedVersion: 2,
+    );
+    if (!decision.acceptedForGeometry ||
+        previous == null ||
+        stop == null ||
+        !stop.stillEpisodeActive ||
+        config.captureIntent != RouteCaptureIntent.adaptive) {
+      return decision;
+    }
+    final distance = _distanceMeters(
+      previous.latitude,
+      previous.longitude,
+      sample.latitude,
+      sample.longitude,
+    );
+    final radius = MotionPolicyV2.holdRadiusMeters(
+      anchorSigmaMeters: MotionPolicyV2.sigmaMeters(
+        horizontalAccuracy: previous.horizontalAccuracy,
+        hasSpeedAccuracy: previous.speedAccuracy != null,
+        hasVerticalAccuracy: previous.verticalAccuracy != null,
+        fallbackAccuracyMeters: config.maximumAcceptedAccuracyMeters,
+      ),
+      fixSigmaMeters: MotionPolicyV2.sigmaMeters(
+        horizontalAccuracy: sample.horizontalAccuracy,
+        hasSpeedAccuracy: sample.speedAccuracy != null,
+        hasVerticalAccuracy: sample.verticalAccuracy != null,
+        fallbackAccuracyMeters: config.maximumAcceptedAccuracyMeters,
+        producedByAccessory: sample.isProducedByAccessory,
+      ),
+    );
+    if (distance <= radius) {
+      return _held(decision, FixQualityIssue.stationaryHold);
+    }
+    if (MotionPolicyV2.dopplerConfirmsDeparture(
+      speed: sample.speed,
+      speedAccuracy: sample.speedAccuracy,
+    )) {
+      return decision;
+    }
+    final runStartedAt = stop.outsideRunStartedAt ?? sample.capturedAt;
+    final sustained = sample.capturedAt.difference(runStartedAt) >=
+            MotionPolicyV2.sustainedOutsideDuration &&
+        distance >= stop.outsideRunFarthestMeters &&
+        distance >= MotionPolicyV2.sustainedOutsideRadiusFactor * radius;
+    return sustained
+        ? decision
+        : _held(decision, FixQualityIssue.stationaryOutlier);
+  }
+
+  static FixQualityDecision _held(
+    FixQualityDecision decision,
+    String code, {
+    int flags = TrackPointQualityFlag.none,
+  }) =>
+      FixQualityDecision(
+        acceptedForGeometry: false,
+        acceptedForMotionEvidence: false,
+        issues: <String>[...decision.issues, code],
+        policyVersion: decision.policyVersion,
+        qualityFlags: decision.qualityFlags | flags,
+        rejectionReason: code,
+      );
 
   FixQualityDecision _evaluateVersion1({
     required LocationSample sample,
     required TrackPoint? previous,
     required DateTime now,
+    int appliedVersion = 1,
   }) {
     final issues = <String>[];
     var flags = TrackPointQualityFlag.none;
@@ -186,7 +420,7 @@ final class FixQualityPolicy {
       acceptedForGeometry: rejection == null,
       acceptedForMotionEvidence: rejection == null && motionEligible,
       issues: issues,
-      policyVersion: 1,
+      policyVersion: appliedVersion,
       qualityFlags: flags,
       rejectionReason: rejection,
     );

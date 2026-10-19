@@ -440,6 +440,7 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         "normalized_location_validity",
         "journal_nested_json_payload",
         "ios_probe_burst",
+        "stationary_policy_v2",
       ],
     ]
   }

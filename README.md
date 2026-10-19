@@ -330,6 +330,28 @@ classified as stationary. `adaptive` remains the battery-aware intent that may
 enter stationary sampling. Explicit `movingInterval` and
 `movingDistanceFilterMeters` values still win.
 
+Adaptive capture holds stops, and a stop is a stay at a place. Indoors, or
+in a pocket, a phone that isn't going anywhere still reports fixes that wander
+several metres while claiming good accuracy. Fixes near the stop are stored as
+rejected `stationary_hold` evidence. They add no distance and don't draw a
+scribble.
+
+- **What starts a stop:** activity evidence that the device is still, which
+  also lets the native stationary profile engage. Or two minutes within the
+  hold radius with no net progress and no moving evidence, as when the phone
+  sits in a pocket and Activity Recognition reports unknown or tilting.
+- **What keeps it:** unknown, tilting or low-confidence readings, activity
+  silence, and walking about inside the place, such as between rooms.
+- **What ends it:** a fix outside the hold radius with a measured Doppler
+  speed, a second outside fix while moving evidence is current, or fixes that
+  keep moving away for a minute.
+- **What counts as distance:** the stop-to-departure chord. Movement within a
+  site smaller than the hold radius (at least 25 m) is not measured. The first
+  two minutes of a stop without still evidence are recorded before it is
+  recognised; the cleaned view below collapses them too.
+- **Scope:** new routes with the adaptive intent only. Explicit travel intents
+  record every fix.
+
 Vehicle capture also uses a bounded urban-visibility acceptance envelope:
 `high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
 25 m. The provider still requests navigation-grade fixes. This avoids throwing
@@ -1085,6 +1107,32 @@ final mapBundle = await geometry.loadTrackGeometry(
 );
 ```
 
+For a cleaned map, use the stop-aware algorithm. Each stay of two minutes or
+more collapses to one point, and spikes elsewhere are projected away. It reads
+held fixes as stop evidence and also cleans routes recorded before the stop
+hold existed. Runs record the version they applied; derive again when
+`run.algorithmVersion` differs from
+`DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion`. Pass
+`TrackGeometrySelection.derived(run.id)` as `TrackExportOptions.geometry` to
+export a track's cleaned view:
+
+```dart
+final cleaned = await geometry.deriveGeometry(
+  trackId,
+  request: const DerivedGeometryRequest(
+    name: 'cleaned',
+    algorithm: DerivedGeometryAlgorithm.stopAwareRouteCleaning,
+  ),
+);
+final gpx = await tracking.exportTrack(
+  trackId: trackId,
+  format: TrackExportFormat.gpx,
+  options: TrackExportOptions(
+    geometry: TrackGeometrySelection.derived(cleaned.id),
+  ),
+);
+```
+
 Each run stores its algorithm, version, configuration, source snapshot,
 optional map-data provenance, and derivation time. Smoothing restarts at every
 pause/resume segment. Deleting a run deletes only derived rows; loading raw
@@ -1222,6 +1270,11 @@ const options = TrackExportOptions(
 - GPX writes one `<trkseg>` per stored segment, including one-fix segments.
 - Rejected points can be included as diagnostics but never enter route
   geometry when their coordinates are invalid or non-finite.
+- `TrackExportOptions.includeDiagnosticProperties` adds coordinate-free
+  per-fix evidence to GeoJSON point features and GPX `fbl:` extensions:
+  vertical accuracy, Doppler speed and heading with their accuracies,
+  provider, native sampling profile, activity source, raw type, evidence state
+  and age, receipt delay, and quality policy version. It is off by default.
 
 ### Converting route file formats
 

@@ -10,10 +10,13 @@ import 'package:flutter_background_location_tracker/src/storage/track_repository
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 final class RepositoryHarness {
-  RepositoryHarness({TrackingConfig? config})
+  /// Opens an in-memory database, or the file at [path] so that a test can
+  /// also open it directly, for example to pin an older policy version.
+  RepositoryHarness({TrackingConfig? config, this.path})
       : config = config ?? const TrackingConfig();
 
   final TrackingConfig config;
+  final String? path;
   DateTime now = DateTime.utc(2026, 7, 20, 8);
 
   late final SqliteTrackRepository repository;
@@ -21,11 +24,13 @@ final class RepositoryHarness {
 
   Future<void> initialize() async {
     sqfliteFfiInit();
+    final file = path;
     repository = SqliteTrackRepository(
-      path: inMemoryDatabasePath,
+      path: file ?? inMemoryDatabasePath,
       databaseFactoryOverride: databaseFactoryFfi,
       clock: () => now,
       idGenerator: () => 'generated-${_nextId++}',
+      singleInstance: file == null,
     );
     await repository.initialize();
   }

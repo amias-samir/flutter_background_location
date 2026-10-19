@@ -17,6 +17,7 @@ import '../domain/track_point.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../storage/track_repository.dart';
+import 'export_diagnostics.dart';
 
 abstract interface class ExportFileWriter {
   Future<String> write({
@@ -560,6 +561,12 @@ final class TrackExportService {
                             nest: point.activityConfidence.toString(),
                           );
                         }
+                        if (options.includeDiagnosticProperties) {
+                          for (final MapEntry(:key, :value)
+                              in diagnosticPointProperties(point).entries) {
+                            builder.element('fbl:$key', nest: '$value');
+                          }
+                        }
                       });
                     }
                   },
@@ -651,6 +658,8 @@ final class TrackExportService {
           'activityConfidence': point.activityConfidence,
           'motionState': point.motionState.name,
         },
+        if (options.includeDiagnosticProperties)
+          ...diagnosticPointProperties(point),
       };
 
   static void _kmlExtendedData(

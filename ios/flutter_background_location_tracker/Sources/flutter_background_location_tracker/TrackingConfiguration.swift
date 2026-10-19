@@ -33,6 +33,18 @@ struct TrackingConfiguration {
   let sensorProbeCooldownMs: Double
   let sensorProbeMaximumDurationPerHourMs: Double
   let terminationRecoveryMode: IOSTerminationRecoveryMode
+  /// Motion state machine version. A configuration without the key predates
+  /// motion policy 2 and keeps the legacy state machine, so a route that was
+  /// recording across an upgrade resumes with the policy it started with.
+  let motionPolicyVersion: Int
+
+  static let legacyMotionPolicyVersion = 1
+  static let currentMotionPolicyVersion = 2
+
+  /// Whether motion policy 2 decides the moving/stationary profile.
+  var usesStationaryPolicyV2: Bool {
+    motionPolicyVersion >= 2 && captureIntent == "adaptive"
+  }
 
   static let defaults = TrackingConfiguration(dictionary: [:])
 
@@ -152,6 +164,13 @@ struct TrackingConfiguration {
     terminationRecoveryMode = IOSTerminationRecoveryMode(
       rawValue: (dictionary["iosTerminationRecoveryMode"] as? String) ?? ""
     ) ?? .interrupted
+    let requestedMotionPolicy =
+      (dictionary["motionPolicyVersion"] as? NSNumber)?.intValue
+      ?? Self.legacyMotionPolicyVersion
+    motionPolicyVersion =
+      (Self.legacyMotionPolicyVersion...Self.currentMotionPolicyVersion)
+        .contains(requestedMotionPolicy)
+      ? requestedMotionPolicy : Self.currentMotionPolicyVersion
   }
 
   var dictionary: [String: Any] {
@@ -183,6 +202,7 @@ struct TrackingConfiguration {
       "sensorProbeCooldownMs": sensorProbeCooldownMs,
       "sensorProbeMaximumDurationPerHourMs": sensorProbeMaximumDurationPerHourMs,
       "iosTerminationRecoveryMode": terminationRecoveryMode.rawValue,
+      "motionPolicyVersion": motionPolicyVersion,
     ]
   }
 

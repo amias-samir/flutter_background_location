@@ -251,8 +251,12 @@ void main() {
       final clock = DeterministicTrackingClock(
         initialTime: DateTime.utc(2026, 8, 30, 12),
       );
+      // An explicit intent keeps quality policy 1 acceptance: under adaptive
+      // capture, quality policy 3 would hold this still device's fixes as a
+      // stop, which stop_site_pipeline_test.dart covers.
       final harness = RepositoryHarness(
         config: const TrackingConfig(
+          captureIntent: RouteCaptureIntent.walking,
           acceptedGeometryGapThreshold: Duration(minutes: 5),
           callbackHealthWarningThreshold: Duration(minutes: 2),
         ),
@@ -276,6 +280,7 @@ void main() {
           requestedTripId: 'synthetic_stationary_gap',
           routeId: 'synthetic_stationary_gap',
           config: TrackingConfig(
+            captureIntent: RouteCaptureIntent.walking,
             acceptedGeometryGapThreshold: Duration(minutes: 5),
             callbackHealthWarningThreshold: Duration(minutes: 2),
           ),

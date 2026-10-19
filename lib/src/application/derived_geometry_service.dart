@@ -6,8 +6,12 @@ import '../domain/track_data_page.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
+import 'stop_episode_detector.dart';
 import 'uncertainty_route_smoother.dart';
+import '../domain/motion_policy.dart';
+import '../domain/stop_site.dart';
 import '../domain/track_geodesy.dart';
+import '../domain/tracking_config.dart';
 
 /// Runs optional post-capture derivation without delaying raw point commits.
 final class DerivedGeometryService {
@@ -28,12 +32,15 @@ final class DerivedGeometryService {
         message: 'This repository does not support derived geometry.',
       );
     }
-    if (request.algorithm != 'exponential_moving_average' &&
-        request.algorithm != 'uncertainty_weighted_smoothing') {
+    if (request.algorithm !=
+            DerivedGeometryAlgorithm.exponentialMovingAverage &&
+        request.algorithm !=
+            DerivedGeometryAlgorithm.uncertaintyWeightedSmoothing &&
+        request.algorithm != DerivedGeometryAlgorithm.stopAwareRouteCleaning) {
       throw const TrackingConfigurationException(
         code: 'derived_algorithm_unsupported',
-        message: 'The built-in service supports exponential_moving_average '
-            'and uncertainty_weighted_smoothing.',
+        message: 'The built-in service supports exponential_moving_average, '
+            'uncertainty_weighted_smoothing and stop_aware_route_cleaning.',
       );
     }
     if (pageSize < 1 || pageSize > 1000) {
@@ -45,15 +52,52 @@ final class DerivedGeometryService {
       owner: owner,
       trackId: trackId,
     );
+    final cleaning =
+        request.algorithm == DerivedGeometryAlgorithm.stopAwareRouteCleaning;
+    final detector = cleaning
+        ? StopEpisodeDetector(
+            (await repository.getTrack(trackId))?.config ??
+                const TrackingConfig(),
+          )
+        : null;
     final run = await store.beginDerivedGeometryRun(
       owner: owner,
       trackId: trackId,
-      request: request.algorithm == 'uncertainty_weighted_smoothing'
+      request: request.algorithm ==
+              DerivedGeometryAlgorithm.uncertaintyWeightedSmoothing
           ? _withAppliedConfiguration(
               request,
               const UncertaintyWeightedRouteSmoother().classifier.configuration,
             )
-          : request,
+          : cleaning
+              ? _withAppliedConfiguration(
+                  request,
+                  <String, Object?>{
+                    ...const UncertaintyWeightedRouteSmoother()
+                        .classifier
+                        .configuration,
+                    'stopHoldRadiusFloorMeters':
+                        MotionPolicyV2.holdRadiusFloorMeters,
+                    'stopHoldChiSquare': MotionPolicyV2.holdChiSquare,
+                    'stopEpisodeMinimumSpanSeconds':
+                        MotionPolicyV2.stillEpisodeMinimumSpan.inSeconds,
+                    'stopDepartureSpeedMetersPerSecond':
+                        MotionPolicyV2.departureSpeedMetersPerSecond,
+                    'stopSustainedOutsideSeconds':
+                        MotionPolicyV2.sustainedOutsideDuration.inSeconds,
+                    'stopMovingEvidenceWindowSeconds':
+                        StopSitePolicy.movingEvidenceWindow.inSeconds,
+                    'stopDwellMinimumSeconds':
+                        StopSitePolicy.dwellMinimumDuration.inSeconds,
+                    'stopDwellMaximumTrendMetersPerSecond':
+                        StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond,
+                    'stopMaximumCollapseDistanceMeters':
+                        StopEpisodeDetector.maximumCollapseDistanceMeters,
+                  },
+                  algorithmVersion:
+                      DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion,
+                )
+              : request,
       sourceMaximumSequence: snapshot.upperSequence,
     );
     try {
@@ -67,7 +111,9 @@ final class DerivedGeometryService {
           snapshot: snapshot,
         );
         for (final segment in segments.items) {
-          if (request.algorithm == 'uncertainty_weighted_smoothing') {
+          if (request.algorithm ==
+                  DerivedGeometryAlgorithm.uncertaintyWeightedSmoothing ||
+              detector != null) {
             await _deriveUncertaintyWeightedSegment(
               stream: stream,
               store: store,
@@ -75,6 +121,7 @@ final class DerivedGeometryService {
               snapshot: snapshot,
               segmentId: segment.id,
               runId: run.id,
+              stops: detector,
             );
             continue;
           }
@@ -133,16 +180,17 @@ final class DerivedGeometryService {
     }
   }
 
-  /// [request] with the parameters the built-in algorithm applies, so the
-  /// run's provenance records them.
+  /// [request] with the parameters, and optionally the version, the built-in
+  /// algorithm applies, so the run's provenance records them.
   static DerivedGeometryRequest _withAppliedConfiguration(
     DerivedGeometryRequest request,
-    Map<String, Object?> applied,
-  ) =>
+    Map<String, Object?> applied, {
+    String? algorithmVersion,
+  }) =>
       DerivedGeometryRequest(
         name: request.name,
         algorithm: request.algorithm,
-        algorithmVersion: request.algorithmVersion,
+        algorithmVersion: algorithmVersion ?? request.algorithmVersion,
         smoothingFactor: request.smoothingFactor,
         mapDataSource: request.mapDataSource,
         mapDataVersion: request.mapDataVersion,
@@ -159,8 +207,12 @@ final class DerivedGeometryService {
     required TrackDataSnapshot snapshot,
     required String segmentId,
     required String runId,
+    StopEpisodeDetector? stops,
   }) async {
     final raw = <TrackPoint>[];
+    // Stop cleaning also reads the points a stop hold rejected: they are the
+    // evidence of the stop on routes recorded under quality policies 2 and 3.
+    final held = <TrackPoint>[];
     String? cursor;
     do {
       final page = await stream.listPointPage(
@@ -169,13 +221,38 @@ final class DerivedGeometryService {
         segmentId: segmentId,
         limit: pageSize,
         cursor: cursor,
-        acceptedOnly: true,
+        acceptedOnly: stops == null,
         snapshot: snapshot,
       );
-      raw.addAll(page.items);
+      for (final point in page.items) {
+        (point.accepted ? raw : held).add(point);
+      }
       cursor = page.nextCursor;
     } while (cursor != null);
     final smoothed = const UncertaintyWeightedRouteSmoother().smooth(raw);
+    if (stops != null) {
+      // Each stop collapses to its robust centre; a point too far from it
+      // keeps its raw position. The 1:1 mapping to source points is kept.
+      for (final stop in stops.detect(raw, heldEvidence: held)) {
+        for (var index = stop.firstIndex; index <= stop.lastIndex; index += 1) {
+          final point = raw[index];
+          final distance = TrackGeodesy.sphericalHaversineMeters(
+            stop.latitude,
+            stop.longitude,
+            point.latitude,
+            point.longitude,
+          );
+          if (distance > StopEpisodeDetector.maximumCollapseDistanceMeters) {
+            smoothed[index] = point;
+            continue;
+          }
+          smoothed[index] = point.withCoordinates(
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+          );
+        }
+      }
+    }
     for (var offset = 0; offset < smoothed.length; offset += pageSize) {
       final end = (offset + pageSize).clamp(0, smoothed.length);
       await store.appendDerivedGeometryPoints(

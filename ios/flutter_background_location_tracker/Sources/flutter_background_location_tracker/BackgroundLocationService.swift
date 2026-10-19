@@ -136,6 +136,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     static let nativeSessionStartedAt = "flutter_background_location.native_session_started_at"
     static let lastProviderCallbackAt = "flutter_background_location.last_provider_callback_at"
     static let lastProfileTransitionAt = "flutter_background_location.last_profile_transition_at"
+    static let lastProfileTransitionReason =
+      "flutter_background_location.last_profile_transition_reason"
     static let lastProbeRequestedAt = "flutter_background_location.last_probe_requested_at"
     static let lastProbeCompletedAt = "flutter_background_location.last_probe_completed_at"
     static let lastProbeOutcome = "flutter_background_location.last_probe_outcome"
@@ -150,6 +152,10 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var pendingPermissionResult: (([String: Any]) -> Void)?
   private var pendingPermissionWantsMotion = false
   private var stationaryTransitionWorkItem: DispatchWorkItem?
+  // Motion policy 2 state machine; nil while motion policy 1 applies.
+  private var stationaryPolicy: StationaryPolicyV2?
+  private var stationaryPolicyTick: DispatchWorkItem?
+  private static let stationaryPolicyTickInterval: TimeInterval = 5
 
   private var lifecycle: TrackingLifecycle = .idle
   private var profile: TrackingProfile = .idle
@@ -175,11 +181,15 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     DispatchQueue.main.async {
       guard let self, self.lifecycle == .tracking || self.lifecycle == .starting else { return }
       self.lastMotionEvidence = evidence
-      if evidence["state"] as? String == "moving" {
+      if evidence["state"] as? String == "moving", self.stationaryPolicy != nil {
+        if let next = self.stationaryPolicy?.onMovingEvidence(nowMs: Self.nowMs()) {
+          self.applyStationaryPolicy(next)
+        }
+      } else if evidence["state"] as? String == "moving" {
         self.stationaryTransitionWorkItem?.cancel()
         self.stationaryTransitionWorkItem = nil
         self.resetStationaryCandidate()
-        self.transition(to: .moving)
+        self.transition(to: .moving, reason: Self.profileReasonLegacyPolicy)
       } else if evidence["state"] as? String == "stationary" {
         self.finishStationaryTransitionIfQualified()
       }
@@ -199,6 +209,10 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var captureGeneration = IOSCaptureGenerationState()
   private var lastProviderCallbackAt: Date?
   private var lastProfileTransitionAt: Date?
+  private var lastProfileTransitionReason: String?
+
+  private static let profileReasonLegacyPolicy = "legacy_policy"
+  private static let profileReasonConfigurationUpdate = "configuration_update"
   private var lastProbeRequestedAt: Date?
   private var lastProbeCompletedAt: Date?
   private var lastProbeOutcome: String?
@@ -435,6 +449,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     lastReliableLocation = nil
     stationaryReferenceLocation = nil
     resetStationaryCandidate()
+    resetStationaryPolicy()
     if self.trackId != trackId {
       lastLocationEvent = nil
       lastActivityEvent = nil
@@ -551,7 +566,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   func update(configuration: TrackingConfiguration) -> [String: Any] {
+    // A new state machine starts its evidence over, so a stationary route
+    // governed by motion policy 2 fails open to moving.
+    let usedStationaryPolicy = stationaryPolicy != nil
     self.configuration = configuration
+    resetStationaryPolicy()
+    if (usedStationaryPolicy || configuration.usesStationaryPolicyV2)
+      && lifecycle == .tracking && profile == .stationary
+    {
+      transition(to: .moving, reason: Self.profileReasonConfigurationUpdate)
+    }
     if lifecycle == .tracking {
       locationManager.stopUpdatingLocation()
       locationManager.stopMonitoringSignificantLocationChanges()
@@ -616,6 +640,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
     if let lastProfileTransitionAt {
       state["lastProfileTransitionAt"] = epochMilliseconds(lastProfileTransitionAt)
+    }
+    if let lastProfileTransitionReason {
+      state["profileTransitionReason"] = lastProfileTransitionReason
     }
     if let lastProbeRequestedAt {
       state["lastProbeRequestedAt"] = epochMilliseconds(lastProbeRequestedAt)
@@ -916,6 +943,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     lastReliableLocation = nil
     stationaryReferenceLocation = nil
     resetStationaryCandidate()
+    resetStationaryPolicy()
   }
 
   private func startBackgroundActivitySessionIfNeeded() {
@@ -999,6 +1027,25 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     let confidence = event["confidence"] as? Int ?? 0
     let evidenceState = event["evidenceState"] as? String ?? "unavailable"
 
+    if ensureStationaryPolicy() {
+      if type == "stationary" && confidence >= configuration.stationaryConfidenceThreshold {
+        motionSensorFusion.requestAmbiguityProbe(stationaryCandidate: true)
+      } else if !StationaryPolicyV2.movingTypes.contains(type) {
+        motionSensorFusion.requestAmbiguityProbe()
+      }
+      let recordedAtMs = (event["timestamp"] as? NSNumber)?.doubleValue ?? Self.nowMs()
+      let reading = StationaryPolicyV2.Reading(
+        type: type,
+        confidence: confidence,
+        recordedAtMs: recordedAtMs,
+        source: event["source"] as? String ?? StationaryPolicyV2.coreMotionSource
+      )
+      if let next = stationaryPolicy?.onReading(reading, nowMs: Self.nowMs()) {
+        applyStationaryPolicy(next)
+      }
+      return
+    }
+
     guard evidenceState == "fresh" else {
       stationaryTransitionWorkItem?.cancel()
       stationaryTransitionWorkItem = nil
@@ -1008,7 +1055,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       if configuration.staleActivityFallback == "keepMovingProfile"
         || configuration.captureIntent != "adaptive"
       {
-        transition(to: .moving)
+        transition(to: .moving, reason: Self.profileReasonLegacyPolicy)
       }
       return
     }
@@ -1021,7 +1068,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
         stationaryTransitionWorkItem?.cancel()
         stationaryTransitionWorkItem = nil
         resetStationaryCandidate()
-        transition(to: .moving)
+        transition(to: .moving, reason: Self.profileReasonLegacyPolicy)
         return
       }
       movingEvidence = 0
@@ -1041,7 +1088,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       if configuration.unknownMotionFallback == "keepMovingProfile"
         || configuration.captureIntent != "adaptive"
       {
-        transition(to: .moving)
+        transition(to: .moving, reason: Self.profileReasonLegacyPolicy)
       }
       return
     }
@@ -1049,7 +1096,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     movingEvidence += 1
     if movingEvidence >= configuration.movingConfirmationCount {
       movingEvidence = 0
-      transition(to: .moving)
+      transition(to: .moving, reason: Self.profileReasonLegacyPolicy)
     }
   }
 
@@ -1078,6 +1125,10 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   private func finishStationaryTransitionIfQualified() {
+    if stationaryPolicy != nil {
+      evaluateStationaryPolicy()
+      return
+    }
     guard lifecycle == .tracking,
       configuration.captureIntent == "adaptive",
       lastActivityEvent?["type"] as? String == "stationary"
@@ -1099,11 +1150,95 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       emitStatus(message: "stationary_entry_rejected_gps_evidence")
       return
     }
-    transition(to: .stationary)
+    transition(to: .stationary, reason: Self.profileReasonLegacyPolicy)
   }
 
-  private func transition(to newProfile: TrackingProfile) {
+  /// Creates the motion-policy-2 state machine when the configuration uses it.
+  private func ensureStationaryPolicy() -> Bool {
+    guard configuration.usesStationaryPolicyV2 else { return false }
+    if stationaryPolicy == nil {
+      stationaryPolicy = StationaryPolicyV2(
+        stationaryConfidenceThreshold: configuration.stationaryConfidenceThreshold,
+        movingConfidenceThreshold: configuration.movingConfidenceThreshold,
+        movingConfirmationCount: configuration.movingConfirmationCount,
+        confirmationMs: configuration.stationaryTimeoutMs,
+        maximumAcceptedAccuracyMeters: configuration.maximumAcceptedAccuracyMeters
+      )
+    }
+    return true
+  }
+
+  private func handleStationaryPolicyFix(_ location: CLLocation) {
+    if isMotionEvidenceEligible(location) { lastReliableLocation = location }
+    var mocked = false
+    if #available(iOS 15.0, *) {
+      mocked = location.sourceInformation?.isSimulatedBySoftware == true
+    }
+    let fix = StationaryPolicyV2.Fix(
+      latitude: location.coordinate.latitude,
+      longitude: location.coordinate.longitude,
+      accuracyMeters: location.horizontalAccuracy > 0 ? location.horizontalAccuracy : nil,
+      speed: location.speed >= 0 ? location.speed : nil,
+      speedAccuracy: location.speedAccuracy >= 0 ? location.speedAccuracy : nil,
+      hasVerticalAccuracy: location.verticalAccuracy > 0,
+      mocked: mocked,
+      observedAtMs: location.timestamp.timeIntervalSince1970 * 1_000
+    )
+    if let next = stationaryPolicy?.onFix(fix) {
+      applyStationaryPolicy(next)
+    }
+  }
+
+  private func applyStationaryPolicy(_ next: StationaryPolicyV2.Profile) {
+    let target: TrackingProfile = next == .stationary ? .stationary : .moving
+    if profile == .moving || profile == .stationary {
+      transition(to: target, reason: stationaryPolicy?.lastTransitionReason)
+    }
+    scheduleStationaryPolicyTick()
+  }
+
+  /// Core Motion reports only changes and a still phone may deliver no fix, so
+  /// a pending entry or persistence check needs its own clock.
+  private func scheduleStationaryPolicyTick() {
+    guard stationaryPolicyTick == nil, lifecycle == .tracking,
+      stationaryPolicy?.needsEvaluation == true
+    else {
+      return
+    }
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.stationaryPolicyTick = nil
+      self.evaluateStationaryPolicy()
+    }
+    stationaryPolicyTick = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + Self.stationaryPolicyTickInterval,
+      execute: workItem
+    )
+  }
+
+  private func evaluateStationaryPolicy() {
+    guard lifecycle == .tracking,
+      let next = stationaryPolicy?.evaluate(nowMs: Self.nowMs())
+    else {
+      return
+    }
+    applyStationaryPolicy(next)
+  }
+
+  private func resetStationaryPolicy() {
+    stationaryPolicyTick?.cancel()
+    stationaryPolicyTick = nil
+    stationaryPolicy = nil
+  }
+
+  private static func nowMs() -> Double {
+    Date().timeIntervalSince1970 * 1_000
+  }
+
+  private func transition(to newProfile: TrackingProfile, reason: String?) {
     guard lifecycle == .tracking, profile != newProfile else { return }
+    lastProfileTransitionReason = reason
     stationaryReferenceLocation = newProfile == .stationary ? lastEmittedLocation : nil
     resetStationaryCandidate()
     profile = newProfile
@@ -1125,6 +1260,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     captureGeneration.rotate(at: date)
     lastProviderCallbackAt = nil
     lastProfileTransitionAt = date
+    lastProfileTransitionReason = nil
     lastProbeRequestedAt = nil
     lastProbeCompletedAt = nil
     lastProbeOutcome = nil
@@ -1606,6 +1742,10 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       forKey: PersistenceKey.lastProfileTransitionAt
     )
     userDefaults.set(
+      lastProfileTransitionReason,
+      forKey: PersistenceKey.lastProfileTransitionReason
+    )
+    userDefaults.set(
       lastProbeRequestedAt?.timeIntervalSince1970,
       forKey: PersistenceKey.lastProbeRequestedAt
     )
@@ -1627,6 +1767,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     )
     lastProviderCallbackAt = persistedDate(forKey: PersistenceKey.lastProviderCallbackAt)
     lastProfileTransitionAt = persistedDate(forKey: PersistenceKey.lastProfileTransitionAt)
+    lastProfileTransitionReason = userDefaults.string(
+      forKey: PersistenceKey.lastProfileTransitionReason
+    )
     lastProbeRequestedAt = persistedDate(forKey: PersistenceKey.lastProbeRequestedAt)
     lastProbeCompletedAt = persistedDate(forKey: PersistenceKey.lastProbeCompletedAt)
     lastProbeOutcome = userDefaults.string(forKey: PersistenceKey.lastProbeOutcome)
@@ -1672,6 +1815,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     userDefaults.removeObject(forKey: PersistenceKey.nativeSessionStartedAt)
     userDefaults.removeObject(forKey: PersistenceKey.lastProviderCallbackAt)
     userDefaults.removeObject(forKey: PersistenceKey.lastProfileTransitionAt)
+    userDefaults.removeObject(forKey: PersistenceKey.lastProfileTransitionReason)
     userDefaults.removeObject(forKey: PersistenceKey.lastProbeRequestedAt)
     userDefaults.removeObject(forKey: PersistenceKey.lastProbeCompletedAt)
     userDefaults.removeObject(forKey: PersistenceKey.lastProbeOutcome)
@@ -1719,9 +1863,13 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       let generation = sessionGeneration
       let fixKey = providerFixKey(location)
       guard rememberProviderFix(fixKey) else { continue }
-      recordStationaryCandidateEvidence(location)
-      if shouldExitStationary(for: location) {
-        transition(to: .moving)
+      if ensureStationaryPolicy() {
+        handleStationaryPolicyFix(location)
+      } else {
+        recordStationaryCandidateEvidence(location)
+        if shouldExitStationary(for: location) {
+          transition(to: .moving, reason: Self.profileReasonLegacyPolicy)
+        }
       }
       let inBurst = probeBurstEndsAt.map { now < $0 } ?? false
       if inBurst, location.horizontalAccuracy > 0,

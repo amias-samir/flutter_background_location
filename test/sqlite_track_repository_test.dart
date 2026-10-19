@@ -939,7 +939,7 @@ void main() {
     expect(epoch.activationSequence, 1);
     expect(epoch.resolvedConfig.toMap(), harness.config.toMap());
     expect(epoch.presetDefinitionVersion, 4);
-    expect(epoch.qualityPolicyVersion, 1);
+    expect(epoch.qualityPolicyVersion, TrackingPolicyVersions.qualityPolicy);
 
     await expectLater(
       harness.repository.getConfigurationEpoch(
@@ -1040,7 +1040,10 @@ void main() {
     await directory.delete(recursive: true);
 
     expect(rows, hasLength(1));
-    expect(rows.single['quality_policy_version'], 1);
+    expect(
+      rows.single['quality_policy_version'],
+      TrackingPolicyVersions.qualityPolicy,
+    );
   });
 
   test('deleteTrack removes the selected terminal track and child rows',

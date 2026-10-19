@@ -110,6 +110,7 @@ final class TrackingContinuityEvidence {
     this.acceptedGeometryGap,
     this.rawReceiptGap,
     this.runtimeConfigurationBoundary = false,
+    this.interveningFixesHeldAtStop = false,
   });
 
   /// Whether the current point passed the canonical geometry-quality policy.
@@ -170,6 +171,12 @@ final class TrackingContinuityEvidence {
   /// A runtime update restarts the native provider, so the capture generation
   /// changes even though the route never stopped.
   final bool runtimeConfigurationBoundary;
+
+  /// Whether the rejected raw fixes before this point were held by the
+  /// canonical stop hold (quality policy 2) rather than rejected for quality.
+  ///
+  /// Only routes recorded under quality policy 2 can set this.
+  final bool interveningFixesHeldAtStop;
 }
 
 /// Versioned topology decision for one accepted-geometry gap.
@@ -301,6 +308,21 @@ final class TrackingContinuityClassifier {
   /// restart, an explicit boundary, or a lost permission or service) explains
   /// the gap.
   TrackingContinuityDecision _classifyVersion3(
+    TrackingContinuityEvidence evidence,
+  ) {
+    final decision = _classifyVersion3Topology(evidence);
+    // Held fixes are a still device's stop, not a quality problem. The flag
+    // exists only on routes recorded under quality policy 2, so no older
+    // decision changes.
+    if (evidence.interveningFixesHeldAtStop &&
+        decision.cause == TrackingGapCause.acceptedFixRejectionRun &&
+        decision.treatment == TrackingGapTreatment.retainCurrentSegment) {
+      return _retain(TrackingGapCause.expectedStationarySuppression);
+    }
+    return decision;
+  }
+
+  TrackingContinuityDecision _classifyVersion3Topology(
     TrackingContinuityEvidence evidence,
   ) {
     if (evidence.currentAcceptedForGeometry &&

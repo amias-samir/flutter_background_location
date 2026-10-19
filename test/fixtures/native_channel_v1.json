@@ -151,7 +151,8 @@
           "continuityPolicy": "conservative",
           "firstFixTimeoutMs": 45000,
           "notificationTitle": "Location tracking active",
-          "notificationText": "Recording your route"
+          "notificationText": "Recording your route",
+          "motionPolicyVersion": 2
         }
       }
     },
@@ -200,7 +201,8 @@
           "continuityPolicy": "conservative",
           "firstFixTimeoutMs": 45000,
           "notificationTitle": "Location tracking active",
-          "notificationText": "Recording your route"
+          "notificationText": "Recording your route",
+          "motionPolicyVersion": 2
         }
       }
     },
@@ -250,7 +252,8 @@
           "continuityPolicy": "conservative",
           "firstFixTimeoutMs": 45000,
           "notificationTitle": "Location tracking active",
-          "notificationText": "Recording your route"
+          "notificationText": "Recording your route",
+          "motionPolicyVersion": 2
         }
       }
     },

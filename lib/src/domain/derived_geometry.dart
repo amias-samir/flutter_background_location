@@ -88,8 +88,32 @@ final class DerivedGeometryPoint {
   final bool matched;
 }
 
-/// Input to an offline derivation. The package ships an EMA implementation;
-/// hosts may persist results from another offline or network algorithm through
+/// Built-in derivation algorithms for [DerivedGeometryRequest.algorithm].
+abstract final class DerivedGeometryAlgorithm {
+  /// Exponential moving average of accepted positions.
+  static const exponentialMovingAverage = 'exponential_moving_average';
+
+  /// Projects isolated spikes back onto their neighbours.
+  static const uncertaintyWeightedSmoothing = 'uncertainty_weighted_smoothing';
+
+  /// The cleaned route view: each stop collapses to one point and spikes are
+  /// projected elsewhere. Works on routes recorded under any policy; the
+  /// canonical points are never changed.
+  static const stopAwareRouteCleaning = 'stop_aware_route_cleaning';
+
+  /// Version of [stopAwareRouteCleaning] that `DerivedGeometryService`
+  /// applies and records on its runs. Runs with an older version were
+  /// derived with older stop rules; derive again to apply this one.
+  ///
+  /// Version 2 treats a stop as a stay at a place: a still episode or two
+  /// minutes within the hold radius without net progress, with walking
+  /// inside the radius part of the stop.
+  static const stopAwareRouteCleaningVersion = '2';
+}
+
+/// Input to an offline derivation. The package ships EMA, spike smoothing and
+/// stop-aware cleaning ([DerivedGeometryAlgorithm]); hosts may persist results
+/// from another offline or network algorithm through
 /// [DerivedGeometryRepository].
 final class DerivedGeometryRequest {
   const DerivedGeometryRequest({

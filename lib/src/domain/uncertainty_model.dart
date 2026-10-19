@@ -93,11 +93,24 @@ abstract final class UncertaintyModel {
 
   /// Infers the origin from coordinate-free signals: GNSS fixes carry speed
   /// and vertical accuracies and a small radius; network fixes carry neither.
-  static FixOriginClass inferOrigin(LocationSample sample) {
-    if (sample.isProducedByAccessory == true) return FixOriginClass.accessory;
-    final hasSpeedAccuracy = sample.speedAccuracy != null;
-    final hasVerticalAccuracy = sample.verticalAccuracy != null;
-    final accuracy = sample.horizontalAccuracy;
+  static FixOriginClass inferOrigin(LocationSample sample) =>
+      inferOriginFromEvidence(
+        horizontalAccuracy: sample.horizontalAccuracy,
+        hasSpeedAccuracy: sample.speedAccuracy != null,
+        hasVerticalAccuracy: sample.verticalAccuracy != null,
+        producedByAccessory: sample.isProducedByAccessory,
+      );
+
+  /// [inferOrigin] for evidence that is not a [LocationSample], such as a
+  /// stored point.
+  static FixOriginClass inferOriginFromEvidence({
+    required double? horizontalAccuracy,
+    required bool hasSpeedAccuracy,
+    required bool hasVerticalAccuracy,
+    bool? producedByAccessory,
+  }) {
+    if (producedByAccessory == true) return FixOriginClass.accessory;
+    final accuracy = horizontalAccuracy;
     if (hasSpeedAccuracy &&
         hasVerticalAccuracy &&
         accuracy != null &&

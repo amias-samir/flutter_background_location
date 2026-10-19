@@ -1402,6 +1402,7 @@ class FlutterBackgroundLocationPlugin :
             "journal_nested_json_payload",
             "listen_replay_control",
             "status_fix_echo_control",
+            "stationary_policy_v2",
         ),
     )
 

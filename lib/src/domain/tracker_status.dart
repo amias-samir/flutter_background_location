@@ -56,6 +56,7 @@ final class TrackerStatus {
     this.motionState = MotionState.unknown,
     this.samplingProfile = SamplingProfile.moving,
     this.motionEvidence,
+    this.profileTransitionReason,
   });
 
   /// Current native capture lifecycle.
@@ -78,6 +79,12 @@ final class TrackerStatus {
 
   /// Latest bounded native motion-evidence decision, when supported.
   final MotionEvidenceSnapshot? motionEvidence;
+
+  /// Coordinate-free reason the native [samplingProfile] last changed, such
+  /// as `still_episode`, `entry_without_fixes`, `moving_readings`, `doppler`
+  /// or `sustained_displacement`, when the native side reports one. Older
+  /// natives send none.
+  final String? profileTransitionReason;
 
   /// Decodes a native status-channel payload.
   factory TrackerStatus.fromMap(Map<Object?, Object?> map) {
@@ -117,6 +124,10 @@ final class TrackerStatus {
               rawMotionEvidence.cast<Object?, Object?>(),
             )
           : null,
+      profileTransitionReason: switch (map['profileTransitionReason']) {
+        final String reason when reason.trim().isNotEmpty => reason.trim(),
+        _ => null,
+      },
     );
   }
 }

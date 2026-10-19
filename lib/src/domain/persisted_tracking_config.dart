@@ -1,0 +1,21 @@
+import 'dart:convert';
+
+import 'tracking_config.dart';
+import 'tracking_configuration_epoch.dart';
+
+/// Decodes a [TrackingConfig] that this package persisted.
+///
+/// [TrackingConfig.fromMap] resolves a missing key like the constructor, which
+/// is right for host-supplied maps. A stored configuration without
+/// `motionPolicyVersion` was written before the key existed, so it keeps
+/// [TrackingPolicyVersions.legacyMotionPolicy]: a route that was recording
+/// across a package upgrade resumes with the state machine it started with.
+TrackingConfig decodePersistedTrackingConfig(String json) {
+  final map = Map<String, Object?>.of(
+    (jsonDecode(json) as Map).cast<String, Object?>(),
+  )..putIfAbsent(
+      'motionPolicyVersion',
+      () => TrackingPolicyVersions.legacyMotionPolicy,
+    );
+  return TrackingConfig.fromMap(map);
+}

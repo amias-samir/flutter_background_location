@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   final fixture = (jsonDecode(
-    File('test/fixtures/config_key_coverage_v1.json').readAsStringSync(),
+    File('test/fixtures/config_key_coverage_v2.json').readAsStringSync(),
   ) as Map)
       .cast<String, Object?>();
   final keys = (fixture['keys']! as Map).cast<String, Object?>();

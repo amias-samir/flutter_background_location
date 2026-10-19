@@ -8,7 +8,9 @@ import 'package:uuid/uuid.dart';
 import '../domain/activity_snapshot.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
+import '../domain/fix_quality.dart';
 import '../domain/motion_evidence.dart';
+import '../domain/persisted_tracking_config.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
@@ -1263,7 +1265,7 @@ final class SqliteTrackRepository
       }
       final TrackingConfig resolved;
       try {
-        resolved = TrackingConfig.fromJson(configurationJson);
+        resolved = decodePersistedTrackingConfig(configurationJson);
         resolved.validate(context: 'Persisted TrackingConfig');
       } on Object {
         // Malformed or incomplete legacy configuration is unknown evidence.
@@ -2314,6 +2316,11 @@ final class SqliteTrackRepository
     return id;
   }
 
+  static const Set<String> _stopHoldReasons = <String>{
+    FixQualityIssue.stationaryHold,
+    FixQualityIssue.stationaryOutlier,
+  };
+
   Future<void> _persistQualityRun(
     Transaction transaction, {
     required String trackId,
@@ -2331,6 +2338,7 @@ final class SqliteTrackRepository
         'captured_at',
         'horizontal_accuracy',
         'rejection_reason',
+        'quality_flags',
       ],
       where: 'track_id = ? AND sequence > ? AND sequence < ? '
           'AND accepted = 0',
@@ -2356,9 +2364,37 @@ final class SqliteTrackRepository
             : (accuracy[accuracy.length ~/ 2 - 1] +
                     accuracy[accuracy.length ~/ 2]) /
                 2;
-    final visible = rows.length >= 3 ||
-        duration >= const Duration(seconds: 30) ||
-        (maximum != null && maximum > maximumAcceptedAccuracyMeters * 1.5);
+    // Fixes the stop hold kept out of a still device's geometry, and any other
+    // rejection while a quality-policy-3 stop was current, are expected stop
+    // evidence, not a quality gap; only the remaining rejections decide
+    // whether the run is visible.
+    final qualityRows = rows
+        .where(
+          (row) =>
+              !_stopHoldReasons.contains(row['rejection_reason']) &&
+              ((row['quality_flags'] as num?)?.toInt() ?? 0) &
+                      TrackPointQualityFlag.duringStop ==
+                  0,
+        )
+        .toList();
+    final qualityAccuracy = qualityRows
+        .map((row) => (row['horizontal_accuracy'] as num?)?.toDouble())
+        .whereType<double>()
+        .where((value) => value.isFinite && value >= 0);
+    final qualityMaximum =
+        qualityAccuracy.isEmpty ? null : qualityAccuracy.reduce(math.max);
+    final qualityDuration = qualityRows.isEmpty
+        ? Duration.zero
+        : DateTime.parse(qualityRows.last['captured_at']! as String)
+            .toUtc()
+            .difference(
+              DateTime.parse(qualityRows.first['captured_at']! as String)
+                  .toUtc(),
+            );
+    final visible = qualityRows.length >= 3 ||
+        qualityDuration >= const Duration(seconds: 30) ||
+        (qualityMaximum != null &&
+            qualityMaximum > maximumAcceptedAccuracyMeters * 1.5);
     final reasons = rows
         .map((row) => row['rejection_reason']?.toString())
         .whereType<String>()

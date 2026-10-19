@@ -8,8 +8,9 @@ compatibility:
   android_journal_payload_format: 2
   ios_journal_schema: 1
   preset_definition: 4
-  quality_policy: 1
+  quality_policy: 3
   continuity_policy: 3
+  motion_policy: 2
 change_classifications:
   additive: "Adds an API, payload key, schema object, test, or documentation without removing supported behavior."
   behavior_tightening: "Narrows unsafe behavior while keeping the public symbol available."
@@ -767,7 +768,7 @@ work_packages:
     release_gate: every serialized key states per platform whether it is parsed; native parsers read exactly the parsed and documented native-only keys
     required_before: any new TrackingConfig or TrackingOptimization key
     evidence:
-      - test/fixtures/config_key_coverage_v1.json
+      - test/fixtures/config_key_coverage_v2.json
       - test/config_key_coverage_test.dart
       - tool/quality/validate_requirements.dart
   - id: FIX-14
@@ -994,3 +995,118 @@ work_packages:
       - lib/src/application/tracking_client.dart
       - lib/src/storage/sqlite_track_repository.dart
       - test/native_location_stream_test.dart
+  - id: LBO-21
+    phase: LBO
+    title: Canonical stop hold for adaptive capture (quality policy 2)
+    release_gate: the 2026-10-18 re-test meets the stop criteria (phantom distance at most 25 m per stop-hour, at most 6 accepted fixes per stop-hour, no false departure during re-acquisition bursts, departures within 45 s on foot and 30 s by vehicle); routes recorded under quality policy 1 decide bit for bit as before
+    required_before: promoting the stop hold beyond the field re-test
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/fix_quality.dart
+      - lib/src/domain/motion_policy.dart
+      - lib/src/application/motion_gate.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/domain/tracking_continuity.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/fix_quality_v2_test.dart
+      - test/motion_gate_v2_test.dart
+      - test/stop_hold_pipeline_test.dart
+  - id: LBO-05A
+    phase: LBO
+    title: Native motion policy 2 on Android and iOS (reachable, stable stationary profile)
+    release_gate: native stationary residency at least 80 percent of each indoor stop on the field re-test; unknown, tilting, low-confidence and silent activity keep a still episode; one optimistic fix never ends a stop; Dart, Kotlin and Swift replay the shared fixture identically
+    required_before: deep stationary and GNSS-off stops
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/persisted_tracking_config.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/StationaryPolicyV2.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingConfiguration.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StationaryPolicyV2Test.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/StationaryPolicyV2.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - example/ios/RunnerTests/StationaryPolicyV2Tests.swift
+      - test/fixtures/cross_language/motion_policy_v2.json
+      - test/motion_policy_fixture_test.dart
+      - test/motion_policy_config_test.dart
+  - id: LBO-13A
+    phase: LBO
+    title: Stop-aware cleaned route view (derived, works on existing routes)
+    release_gate: each stop collapses to one point near its true position; moving parts are unchanged apart from spike projection; one derived point per accepted point; deterministic; raw evidence untouched
+    required_before: the Kalman RTS smoother
+    evidence:
+      - lib/src/application/stop_episode_detector.dart
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/domain/derived_geometry.dart
+      - example/lib/route_map_page.dart
+      - test/stop_hold_pipeline_test.dart
+  - id: LBO-00A
+    phase: LBO
+    title: Opt-in diagnostic exports and a coordinate-free stop analyzer
+    release_gate: default export bytes unchanged; diagnostic GeoJSON and GPX fields verified with independent parsers in both export writers; the analyzer report contains no coordinates
+    required_before: field qualification without device database access
+    evidence:
+      - lib/src/domain/export_models.dart
+      - lib/src/export/export_diagnostics.dart
+      - lib/src/export/track_export_service.dart
+      - lib/src/export/incremental_track_export.dart
+      - tool/quality/analyze_stop_jitter.dart
+      - test/diagnostic_export_test.dart
+      - test/analyze_stop_jitter_test.dart
+  - id: LBO-21B
+    phase: LBO
+    title: A stop is a stay at a place (quality policy 3)
+    release_gate: the mixed-route re-test meets the stop criteria (every stay of two minutes or more is one marker in the cleaned map with no gap or quality marker; canonical stops of ten minutes or more add at most 25 m and 6 accepted fixes per hour; walking legs within 10 percent and pauses under two minutes kept; departures within 45 s on foot and 30 s by vehicle); routes recorded under quality policies 1 and 2 decide bit for bit as before
+    required_before: promoting quality policy 3 beyond the field re-test
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/stop_site.dart
+      - lib/src/domain/fix_quality.dart
+      - lib/src/domain/track_point.dart
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/fix_quality_v3_test.dart
+      - test/stop_site_test.dart
+      - test/stop_site_pipeline_test.dart
+      - test/stop_hold_pipeline_test.dart
+  - id: LBO-13B
+    phase: LBO
+    title: Stop-aware route cleaning version 2 (stays at a place, from held evidence too)
+    release_gate: a stay of two minutes or more collapses to one point on routes recorded under any policy, from accepted and held fixes; slow walks with pauses under two minutes keep their path; older cleaning runs are derived again
+    required_before: cleaned-route export beyond the example app
+    evidence:
+      - lib/src/application/stop_episode_detector.dart
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/domain/derived_geometry.dart
+      - example/lib/route_map_page.dart
+      - example/test/widget_test.dart
+      - test/stop_site_pipeline_test.dart
+  - id: LBO-05B
+    phase: LBO
+    title: Native stationary anchor after an entry without fixes
+    release_gate: a lone re-acquisition outlier after a long silence never ends a still stop on either platform; health events show no switch to moving while the phone lies still on the field re-test
+    required_before: deep stationary and GNSS-off stops
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/StationaryPolicyV2.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/StationaryPolicyV2.swift
+      - android/src/test/kotlin/com/samir/flutter_background_location/StationaryPolicyV2Test.kt
+      - example/ios/RunnerTests/StationaryPolicyV2Tests.swift
+      - test/fixtures/cross_language/motion_policy_v2.json
+      - test/motion_policy_fixture_test.dart
+  - id: LBO-00B
+    phase: LBO
+    title: Native profile-switch reasons and stop-rule analyzer
+    release_gate: every native moving/stationary switch of a route is a coordinate-free health event with its reason on both platforms; the analyzer finds stops with the package's rule and its report contains no coordinates
+    required_before: field qualification of stationary residency
+    evidence:
+      - lib/src/domain/tracker_status.dart
+      - lib/src/application/tracking_client.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - tool/quality/analyze_stop_jitter.dart
+      - test/sampling_profile_diagnostics_test.dart
+      - test/analyze_stop_jitter_test.dart

@@ -1,5 +1,78 @@
 ## Unreleased
 
+- Adaptive capture now holds stops (motion policy 2 and quality policy 2). A
+  field test recorded about 1.1 km of phantom distance and a dense scribble
+  of fixes while a phone sat in a pocket indoors for three hours. Activity
+  Recognition had reported still most of the time, but the stationary
+  profile never engaged and every fix within the accuracy limit counted.
+  - The native state machine on Android and iOS keeps a still episode
+    through unknown, tilting and low-confidence readings, and through
+    Activity Recognition silence (Google pauses reports while a device stays
+    still). The episode ends only on positive moving evidence: an activity
+    transition, two consecutive moving readings, an in-vehicle reading of at
+    least 75, a measured Doppler speed, or sustained displacement. Entry
+    tests fixes against their own uncertainty instead of an all-pairs budget
+    two indoor fixes could never meet.
+  - While a still episode is current, fixes within an uncertainty-scaled
+    radius of the stop (at least 25 m) are stored as rejected
+    `stationary_hold` points, and outliers as `stationary_outlier`. Neither
+    adds distance, and the stop-to-departure chord still counts. Movement
+    within a site smaller than the radius is deliberately not measured.
+    Held runs are informational quality runs, and their gaps classify as
+    expected stationary suppression.
+  - This applies only to new routes with the adaptive capture intent.
+    Walking, cycling and vehicle intents are unchanged. Routes that were
+    recording before the upgrade resume under their recorded policies.
+    `TrackingConfig` carries the new `motionPolicyVersion` key, set by the
+    package (configurations persisted without it stay on version 1), and
+    native code advertises the `stationary_policy_v2` capability.
+- Adaptive capture now treats a stop as a stay at a place (quality policy 3,
+  the default for new adaptive routes). A second field test still drew
+  scribbles at a temple, at home and at a roadside motorbike stop: with the
+  phone in a pocket, Activity Recognition reported unknown, tilting or on foot
+  instead of still, so no stop started, and walking between rooms ended one.
+  - A stop also starts after two minutes within the hold radius with no net
+    progress (least-squares velocity less twice its standard error, at most
+    0.15 m/s) and no moving evidence. A slow walk with short pauses keeps
+    its distance.
+  - Walking inside the radius stays part of the stop. It ends when a fix
+    leaves the radius with a measured Doppler speed, with current moving
+    evidence on the second outside fix, or for good.
+  - Rejections during a stop, including poor-accuracy indoor fixes, carry the
+    new `TrackPointQualityFlag.duringStop` bit and no longer mark visible gaps.
+  - Routes recorded under quality policies 1 and 2 decide exactly as before.
+    The first two minutes of a stop without still evidence are recorded
+    before it is recognised; the cleaned view collapses them.
+- Native stationary capture no longer anchors a stop on the first fix after a
+  long silence. A still phone delivers no fix, so the stop is entered without
+  one, and the first fix afterwards is often a re-acquisition outlier tens of
+  metres off; two fixes must now agree first. Native status reports
+  `profileTransitionReason` (exposed as `TrackerStatus.profileTransitionReason`)
+  and each moving/stationary switch of a route is recorded as a coordinate-free
+  `sampling_profile_changed` health event.
+- Added `DerivedGeometryAlgorithm.stopAwareRouteCleaning`, a derived "cleaned"
+  route view. Each stop collapses to one point, and spikes elsewhere are
+  projected away. It works on routes recorded under any policy, including
+  existing ones; canonical points never change. The example map shows it by
+  default, with raw evidence one tap away, stop markers with durations, and
+  low-confidence zig-zag stretches drawn in a lighter colour. Its version 2
+  (`DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion`) applies the stay
+  rule above, reads held fixes as stop evidence, and also covers a stop's
+  first minutes and the arrival inside its radius; runs of version 1 should
+  be derived again. The example exports the cleaned view as GPX.
+- Added `TrackExportOptions.includeDiagnosticProperties` (off by default) for
+  field tests. GeoJSON point features and GPX `fbl:` extensions gain vertical
+  accuracy, Doppler speed and heading with their accuracies, provider,
+  native sampling profile, activity source, raw type, evidence state and
+  age, native receipt delay, and quality policy version. Default exports are
+  byte-for-byte unchanged. `tool/quality/analyze_stop_jitter.dart` turns
+  such an export into a coordinate-free stop report, finding stops with the
+  same stay rule.
+- Added seeded field-test replicas to the testing library:
+  `SyntheticTrackingRoute.indoorStop`, `reacquisitionBurst`, `slowLaneRide`,
+  `pocketStop`, `placeWander`, `roadsideStop` and `slowStrollWithPauses`,
+  plus `followedBy` and `emitChronologicallyTo`.
+
 - Native error envelopes on Android and iOS no longer attach the full native
   status map as details (it can hold the last fix coordinates and track
   identity) or echo platform exception text (which can hold file paths,

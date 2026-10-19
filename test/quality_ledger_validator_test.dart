@@ -234,7 +234,7 @@ let defaults = UserDefaults.standard
           'flutter_background_location/TrackingConfiguration.kt';
       const swift = 'ios/flutter_background_location_tracker/Sources/'
           'flutter_background_location_tracker/TrackingConfiguration.swift';
-      _write(root, 'test/fixtures/config_key_coverage_v1.json', '''
+      _write(root, 'test/fixtures/config_key_coverage_v2.json', '''
 {
   "keys": {
     "shared": {"android": "parsed", "ios": "parsed"},
@@ -358,6 +358,7 @@ compatibility:
   preset_definition: 4
   quality_policy: 1
   continuity_policy: 2
+  motion_policy: 2
 change_classifications:
   additive: "Adds behavior."
 work_packages:
@@ -402,6 +403,18 @@ codes:
   );
   _write(
     root,
+    'android/src/main/kotlin/com/samir/flutter_background_location/'
+        'StationaryPolicyV2.kt',
+    'const val MOTION_POLICY_VERSION = 2\n',
+  );
+  _write(
+    root,
+    'ios/flutter_background_location_tracker/Sources/'
+        'flutter_background_location_tracker/StationaryPolicyV2.swift',
+    'static let motionPolicyVersion = 2\n',
+  );
+  _write(
+    root,
     'ios/flutter_background_location_tracker/Sources/'
         'flutter_background_location_tracker/NativeLocationJournal.swift',
     'try execute("PRAGMA user_version = 1")\n',
@@ -411,6 +424,7 @@ abstract final class TrackingPolicyVersions {
   static const presetDefinition = 4;
   static const qualityPolicy = 1;
   static const continuityPolicy = 2;
+  static const motionPolicy = 2;
 }
 ''');
 }

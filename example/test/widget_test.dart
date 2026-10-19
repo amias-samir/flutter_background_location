@@ -6,6 +6,7 @@ import 'package:flutter_background_location_tracker_example/recorded_tracks_sect
 import 'package:flutter_background_location_tracker_example/recorded_trips_section.dart';
 import 'package:flutter_background_location_tracker_example/route_map_page.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
 void main() {
   TrackingExampleApp testApp() => TrackingExampleApp(
@@ -303,6 +304,168 @@ void main() {
     expect(geometry.gapMarkers, hasLength(1));
     expect(geometry.gapCount, 1);
   });
+
+  test(
+    'cleaned geometry turns a collapsed stop into a marker without gaps',
+    () {
+      final track = _completedTrack();
+      // East offsets in metres around a synthetic origin, one fix per 20 s.
+      const east = <double>[-90, -60, -30, 3, -4, 6, -2, 5, 30, 60, 90];
+      final source = _timedSegment(track, east, spacing: 20, accuracy: 5);
+      final stop = source.points.sublist(3, 8);
+      final gap = TrackingContinuityGap(
+        id: 'gap-1',
+        trackId: track.id,
+        beforePointId: stop[1].id,
+        afterPointId: stop[2].id,
+        beforeSegmentId: source.segment.id,
+        afterSegmentId: source.segment.id,
+        cause: TrackingGapCause.acceptedFixRejectionRun,
+        treatment: TrackingGapTreatment.retainCurrentSegment,
+        distanceTreatment: TrackingGapDistanceTreatment.measured,
+        continuityPolicyVersion: 3,
+        providerGap: const Duration(seconds: 70),
+        createdAt: DateTime.utc(2026),
+      );
+      final report = const RouteGeometryAssembler().assemble(
+        sourceParts: <RouteGeometrySourcePart>[
+          RouteGeometrySourcePart(
+            legNumber: 1,
+            segment: source.segment,
+            points: source.points,
+          ),
+        ],
+        gaps: <TrackingContinuityGap>[gap],
+        continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+      );
+      final centre = maplibre.LatLng(stop.first.latitude, 0.5);
+
+      final raw = RouteGeometry.fromReport(report);
+      final cleaned = RouteGeometry.fromReport(
+        report,
+        cleaned: <String, maplibre.LatLng>{
+          for (final point in stop) point.id: centre,
+        },
+      );
+
+      expect(raw.stopMarkers, isEmpty);
+      expect(raw.gapMarkers, hasLength(1));
+      expect(raw.cleanedDistanceMeters, isNull);
+      expect(cleaned.stopMarkers, hasLength(1));
+      expect(cleaned.stopMarkers.single.coordinate, centre);
+      // The stay lasts until the next point, the departure.
+      expect(cleaned.stopMarkers.single.duration, const Duration(seconds: 100));
+      expect(cleaned.gapMarkers, isEmpty, reason: 'a stop is not a gap');
+      expect(
+        cleaned.cleanedDistanceMeters!,
+        lessThan(cleaned.recordedDistanceMeters),
+      );
+    },
+  );
+
+  test('two collapsed points make a stop marker only for a long stay', () {
+    final track = _completedTrack();
+    RouteGeometry cleanedWith(int spacing) {
+      const east = <double>[-90, -60, 2, -3, 60, 90];
+      final source = _timedSegment(track, east, spacing: spacing, accuracy: 5);
+      final report = const RouteGeometryAssembler().assemble(
+        sourceParts: <RouteGeometrySourcePart>[
+          RouteGeometrySourcePart(
+            legNumber: 1,
+            segment: source.segment,
+            points: source.points,
+          ),
+        ],
+        continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+      );
+      final stop = source.points.sublist(2, 4);
+      final centre = maplibre.LatLng(stop.first.latitude, 0.5);
+      return RouteGeometry.fromReport(
+        report,
+        cleaned: <String, maplibre.LatLng>{
+          for (final point in stop) point.id: centre,
+        },
+      );
+    }
+
+    // Held fixes are not drawn: the stay lasts until the next point.
+    expect(cleanedWith(70).stopMarkers, hasLength(1));
+    expect(
+      cleanedWith(70).stopMarkers.single.duration,
+      const Duration(seconds: 140),
+    );
+    expect(cleanedWith(20).stopMarkers, isEmpty, reason: 'a 40 s pause');
+  });
+
+  test('a zig-zag inside its own uncertainty is drawn as uncertain', () {
+    final track = _completedTrack();
+    final zigzag = _timedSegment(
+      track,
+      const <double>[0, 9, -7, 8, -9, 6, -5],
+      spacing: 14,
+      accuracy: 8,
+    );
+    final walk = _timedSegment(
+      track,
+      const <double>[0, 12, 24, 36, 48, 60, 72],
+      spacing: 10,
+      accuracy: 5,
+    );
+    RouteGeometry geometryOf(TrackSegmentWithPoints source) =>
+        RouteGeometry.fromReport(
+          const RouteGeometryAssembler().assemble(
+            sourceParts: <RouteGeometrySourcePart>[
+              RouteGeometrySourcePart(
+                legNumber: 1,
+                segment: source.segment,
+                points: source.points,
+              ),
+            ],
+            continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+          ),
+        );
+
+    expect(geometryOf(zigzag).uncertainSegments, isNotEmpty);
+    expect(geometryOf(walk).uncertainSegments, isEmpty);
+  });
+}
+
+/// Points [spacing] seconds apart, [east] metres east of a synthetic origin.
+TrackSegmentWithPoints _timedSegment(
+  Track track,
+  List<double> east, {
+  required int spacing,
+  required double accuracy,
+}) {
+  const metersPerDegree = 111195.07973436875;
+  final base = _segment(track, 1, <(double, double)>[
+    for (final meters in east)
+      (0.5, 0.5 + meters / (metersPerDegree * 0.99996192)),
+  ]);
+  return TrackSegmentWithPoints(
+    segment: base.segment,
+    points: <TrackPoint>[
+      for (var index = 0; index < base.points.length; index += 1)
+        TrackPoint(
+          id: base.points[index].id,
+          trackId: track.id,
+          segmentId: base.segment.id,
+          sequence: index + 1,
+          latitude: base.points[index].latitude,
+          longitude: base.points[index].longitude,
+          capturedAt: track.startedAt.add(Duration(seconds: index * spacing)),
+          persistedAt: track.startedAt.add(Duration(seconds: index * spacing)),
+          activityType: TrackingActivityType.unknown,
+          activityConfidence: 40,
+          motionState: MotionState.moving,
+          isMocked: false,
+          mockDetectionAvailable: true,
+          accepted: true,
+          qualityFlags: 0,
+          horizontalAccuracy: accuracy,
+        ),
+    ],
+  );
 }
 
 Future<void> _scrollHome(WidgetTester tester, double distance) async {

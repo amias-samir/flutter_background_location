@@ -524,6 +524,95 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     });
   }
 
+  /// GeoJSON with every point, including rejected ones, and per-fix
+  /// diagnostics: accuracy, Doppler speed, native profile and activity age.
+  Future<void> _exportTripDiagnostics(String tripId) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => ExportNameDialog(
+        format: TrackExportFormat.geoJson,
+        initialFileName:
+            'diagnostics_${DateTime.now().toUtc().millisecondsSinceEpoch}',
+      ),
+    );
+    if (name == null) return;
+    await _run(() async {
+      final tracking = _tracking! as MultiDayTripController;
+      final result = await tracking.exportTrip(
+        tripId: tripId,
+        format: TrackExportFormat.geoJson,
+        fileName: name,
+        options: const TrackExportOptions(
+          includeGeoJsonPointFeatures: true,
+          includeRejectedPoints: true,
+          includeDiagnosticProperties: true,
+        ),
+      );
+      if (mounted) {
+        setState(
+          () => _message =
+              'Exported ${result.pointCount} diagnostic points to ${result.path}',
+        );
+      }
+    });
+  }
+
+  /// GPX of the cleaned route view, one file per recorded day. Combined Trip
+  /// export takes raw geometry only, so each day exports its own cleaning
+  /// run.
+  Future<void> _exportTripCleaned(Trip trip) async {
+    final tracking = _tracking;
+    if (tracking == null || tracking is! TrackingGeometryController) return;
+    final geometry = tracking as TrackingGeometryController;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => ExportNameDialog(
+        format: TrackExportFormat.gpx,
+        initialFileName:
+            'cleaned_${DateTime.now().toUtc().millisecondsSinceEpoch}',
+      ),
+    );
+    if (name == null) return;
+    await _run(() async {
+      final tripTracking = tracking as MultiDayTripController;
+      final bundle = await tripTracking.loadTripBundle(trip.id);
+      final exported = <String>[];
+      var points = 0;
+      for (final leg in bundle.legs) {
+        final track = await tracking.loadTrackBundle(leg.trackId);
+        var newest = 0;
+        for (final segment in track.segments) {
+          for (final point in segment.points) {
+            newest = point.sequence > newest ? point.sequence : newest;
+          }
+        }
+        final run = await currentCleaningRun(
+          geometry,
+          leg.trackId,
+          newestSequence: newest,
+        );
+        final result = await tracking.exportTrack(
+          trackId: leg.trackId,
+          format: TrackExportFormat.gpx,
+          fileName: bundle.legs.length == 1
+              ? name
+              : '${name}_day_${leg.legNumber}',
+          options: TrackExportOptions(
+            geometry: TrackGeometrySelection.derived(run.id),
+          ),
+        );
+        points += result.pointCount;
+        exported.add(result.path);
+      }
+      if (mounted) {
+        setState(
+          () => _message =
+              'Exported $points cleaned points to ${exported.join(', ')}',
+        );
+      }
+    });
+  }
+
   Future<void> _continueTrip(Trip trip) async {
     if (!await _ensureReady() || !mounted) return;
     var confirmed = true;
@@ -792,6 +881,11 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                           },
                     onContinue: _busy ? null : _continueTrip,
                     onExport: _busy ? null : _exportTrip,
+                    onExportDiagnostics: _busy ? null : _exportTripDiagnostics,
+                    onExportCleaned:
+                        _busy || tracking is! TrackingGeometryController
+                        ? null
+                        : _exportTripCleaned,
                     onDelete: _busy ? null : _deleteTrip,
                   )
                 else

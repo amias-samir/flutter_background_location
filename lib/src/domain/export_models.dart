@@ -11,6 +11,7 @@ final class TrackExportOptions {
     this.useUtcTimestamps = true,
     this.allowIncompleteTrackSnapshot = false,
     this.includeGeoJsonPointFeatures = false,
+    this.includeDiagnosticProperties = false,
     this.geometry = const TrackGeometrySelection.raw(),
     this.geometryContinuity = RouteGeometryContinuity.preserveEvidenceSegments,
   });
@@ -21,6 +22,13 @@ final class TrackExportOptions {
   final bool useUtcTimestamps;
   final bool allowIncompleteTrackSnapshot;
   final bool includeGeoJsonPointFeatures;
+
+  /// Adds coordinate-free diagnostic fields to GeoJSON point features and GPX
+  /// `fbl:` extensions: vertical accuracy, Doppler speed and heading with
+  /// their accuracies, provider, native sampling profile, activity source,
+  /// raw type, evidence state and age, native receipt delay, and quality
+  /// policy version. Off by default, so default exports are unchanged.
+  final bool includeDiagnosticProperties;
 
   /// Coordinates to export. Raw evidence is the default; derived geometry is
   /// selected only by its immutable run identifier.

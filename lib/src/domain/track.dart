@@ -1,3 +1,4 @@
+import 'persisted_tracking_config.dart';
 import 'tracking_config.dart';
 
 /// Durable lifecycle state of one recorded route.
@@ -167,7 +168,9 @@ final class Track {
       completionReason: row['completion_reason'] as String?,
       terminalReasonCode: row['terminal_reason_code'] as String?,
       sessionControlToken: row['session_control_token'] as String?,
-      config: TrackingConfig.fromJson(row['configuration_json']! as String),
+      config: decodePersistedTrackingConfig(
+        row['configuration_json']! as String,
+      ),
     );
   }
 }

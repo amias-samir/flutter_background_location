@@ -13,6 +13,8 @@
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
+		78F1C9E2FF73A6C9F4F5E1F6 /* motion_policy_v2.json in Resources */ = {isa = PBXBuildFile; fileRef = C740C9453BBAED7E346010B6 /* motion_policy_v2.json */; };
+		848CA84A45FF734FF416D14F /* StationaryPolicyV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A9F5C211C722765392F5F3 /* StationaryPolicyV2Tests.swift */; };
 		96566B29222A99D8BFFE87F1 /* NativeLocationJournalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DD29D8DF724297438A4000D /* NativeLocationJournalTests.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
@@ -70,9 +72,11 @@
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AAC6833B9E1B63D1529C88EE /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
+		B2A9F5C211C722765392F5F3 /* StationaryPolicyV2Tests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StationaryPolicyV2Tests.swift; sourceTree = "<group>"; };
 		BA3D885A5ABEE28F3EF8149F /* MotionEvidenceWindowsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MotionEvidenceWindowsTests.swift; sourceTree = "<group>"; };
 		BCA35804DE08761175DCAACE /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		C07349B2A4F325D040D8553A /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		C740C9453BBAED7E346010B6 /* motion_policy_v2.json */ = {isa = PBXFileReference; includeInIndex = 1; path = motion_policy_v2.json; sourceTree = "<group>"; };
 		FB9CF0A5045F39CF2CB5A981 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -103,6 +107,8 @@
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
 				7DD29D8DF724297438A4000D /* NativeLocationJournalTests.swift */,
 				BA3D885A5ABEE28F3EF8149F /* MotionEvidenceWindowsTests.swift */,
+				B2A9F5C211C722765392F5F3 /* StationaryPolicyV2Tests.swift */,
+				C740C9453BBAED7E346010B6 /* motion_policy_v2.json */,
 			);
 			path = RunnerTests;
 			sourceTree = "<group>";
@@ -273,6 +279,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				78F1C9E2FF73A6C9F4F5E1F6 /* motion_policy_v2.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -375,6 +382,7 @@
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
 				96566B29222A99D8BFFE87F1 /* NativeLocationJournalTests.swift in Sources */,
 				D6F3B9F01134B9F388582C1F /* MotionEvidenceWindowsTests.swift in Sources */,
+				848CA84A45FF734FF416D14F /* StationaryPolicyV2Tests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

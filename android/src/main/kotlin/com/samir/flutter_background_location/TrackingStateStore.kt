@@ -53,6 +53,11 @@ internal class TrackingStateStore(context: Context) {
     val lastProfileTransitionAt: Long?
         get() = preferences.getLong(KEY_LAST_PROFILE_TRANSITION_AT, 0L).takeIf { it > 0L }
 
+    /** Coordinate-free reason for the last moving/stationary profile change. */
+    val lastProfileTransitionReason: String?
+        get() = preferences.getString(KEY_LAST_PROFILE_TRANSITION_REASON, null)
+            ?.takeIf { it.isNotBlank() }
+
     val stationaryExitProbeRequestedAt: Long?
         get() = preferences.getLong(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT, 0L)
             .takeIf { it > 0L }
@@ -155,13 +160,21 @@ internal class TrackingStateStore(context: Context) {
         profile: String,
         message: String? = null,
         timestamp: Long = System.currentTimeMillis(),
+        transitionReason: String? = null,
     ) {
         val profileChanged = this.profile != profile
         preferences.edit()
             .putString(KEY_STATE, state)
             .putString(KEY_PROFILE, profile)
             .apply {
-                if (profileChanged) putLong(KEY_LAST_PROFILE_TRANSITION_AT, timestamp)
+                if (profileChanged) {
+                    putLong(KEY_LAST_PROFILE_TRANSITION_AT, timestamp)
+                    if (transitionReason == null) {
+                        remove(KEY_LAST_PROFILE_TRANSITION_REASON)
+                    } else {
+                        putString(KEY_LAST_PROFILE_TRANSITION_REASON, transitionReason)
+                    }
+                }
             }
             .apply {
                 if (message == null) remove(KEY_MESSAGE) else putString(KEY_MESSAGE, message)
@@ -185,6 +198,7 @@ internal class TrackingStateStore(context: Context) {
             .putLong(KEY_NATIVE_SESSION_STARTED_AT, evidence.startedAt)
             .putString(KEY_CAPTURE_START_REASON, evidence.startReason)
             .putLong(KEY_LAST_PROFILE_TRANSITION_AT, evidence.startedAt)
+            .remove(KEY_LAST_PROFILE_TRANSITION_REASON)
             .remove(KEY_LAST_PROVIDER_CALLBACK_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
@@ -513,6 +527,7 @@ internal class TrackingStateStore(context: Context) {
             "heartbeatCaptureActive" to heartbeatCaptureActive,
             "lastProviderCallbackAt" to lastProviderCallbackAt,
             "lastProfileTransitionAt" to lastProfileTransitionAt,
+            "profileTransitionReason" to lastProfileTransitionReason,
             "stationaryExitProbeRequestedAt" to stationaryExitProbeRequestedAt,
             "stationaryExitProbeCompletedAt" to stationaryExitProbeCompletedAt,
             "stationaryExitProbeOutcome" to stationaryExitProbeOutcome,
@@ -563,6 +578,7 @@ internal class TrackingStateStore(context: Context) {
             .remove(KEY_CAPTURE_START_REASON)
             .remove(KEY_LAST_PROVIDER_CALLBACK_AT)
             .remove(KEY_LAST_PROFILE_TRANSITION_AT)
+            .remove(KEY_LAST_PROFILE_TRANSITION_REASON)
             .remove(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_OUTCOME)
@@ -608,6 +624,7 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_CAPTURE_START_REASON = "capture_start_reason"
         private const val KEY_LAST_PROVIDER_CALLBACK_AT = "last_provider_callback_at"
         private const val KEY_LAST_PROFILE_TRANSITION_AT = "last_profile_transition_at"
+        private const val KEY_LAST_PROFILE_TRANSITION_REASON = "last_profile_transition_reason"
         private const val KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT =
             "stationary_exit_probe_requested_at"
         private const val KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT =

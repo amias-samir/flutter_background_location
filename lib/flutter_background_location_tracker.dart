@@ -45,6 +45,7 @@ export 'src/domain/native_tracking_protocol.dart';
 export 'src/domain/permission_state.dart';
 export 'src/domain/route_geometry.dart';
 export 'src/domain/route_geometry_processor.dart';
+export 'src/domain/stop_site.dart' show StopSiteAnchor;
 export 'src/domain/track.dart';
 export 'src/domain/track_data_page.dart';
 export 'src/domain/track_point.dart';

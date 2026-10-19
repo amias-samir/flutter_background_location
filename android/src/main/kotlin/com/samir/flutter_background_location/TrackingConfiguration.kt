@@ -24,6 +24,10 @@ internal data class TrackingConfiguration(
     val sensorProbeMaximumDurationPerHourMs: Long = 180_000L,
     val desiredAccuracy: String = "precised",
     val maximumAcceptedAccuracyMeters: Double = 20.0,
+    // A configuration without the key predates motion policy 2 and keeps the
+    // legacy state machine, so a route recording across an upgrade resumes
+    // with the policy it started with.
+    val motionPolicyVersion: Int = LEGACY_MOTION_POLICY_VERSION,
     val notificationChannelId: String = "active_location_tracking",
     val notificationChannelName: String = "Active location tracking",
     val notificationChannelDescription: String =
@@ -53,6 +57,7 @@ internal data class TrackingConfiguration(
         put(KEY_SENSOR_PROBE_MAXIMUM_PER_HOUR, sensorProbeMaximumDurationPerHourMs)
         put(KEY_DESIRED_ACCURACY, desiredAccuracy)
         put(KEY_MAXIMUM_ACCEPTED_ACCURACY, maximumAcceptedAccuracyMeters)
+        put(KEY_MOTION_POLICY_VERSION, motionPolicyVersion)
         put(KEY_NOTIFICATION_CHANNEL_ID, notificationChannelId)
         put(KEY_NOTIFICATION_CHANNEL_NAME, notificationChannelName)
         put(KEY_NOTIFICATION_CHANNEL_DESCRIPTION, notificationChannelDescription)
@@ -60,7 +65,16 @@ internal data class TrackingConfiguration(
         put(KEY_NOTIFICATION_TEXT, notificationText)
     }.toString()
 
+    /** Whether motion policy 2 decides the moving/stationary profile. */
+    val usesStationaryPolicyV2: Boolean
+        get() = motionPolicyVersion >= 2 && captureIntent == "adaptive"
+
     companion object {
+        const val LEGACY_MOTION_POLICY_VERSION = 1
+
+        /** Newest motion policy this build applies; newer values fall back to it. */
+        const val CURRENT_MOTION_POLICY_VERSION = 2
+
         private const val KEY_MOVING_INTERVAL = "movingIntervalMs"
         private const val KEY_MOVING_DISTANCE = "movingDistanceFilterMeters"
         private const val KEY_STATIONARY_INTERVAL = "stationaryIntervalMs"
@@ -84,6 +98,7 @@ internal data class TrackingConfiguration(
             "sensorProbeMaximumDurationPerHourMs"
         private const val KEY_DESIRED_ACCURACY = "desiredAccuracy"
         private const val KEY_MAXIMUM_ACCEPTED_ACCURACY = "maximumAcceptedAccuracyMeters"
+        private const val KEY_MOTION_POLICY_VERSION = "motionPolicyVersion"
         private const val KEY_NOTIFICATION_CHANNEL_ID = "notificationChannelId"
         private const val KEY_NOTIFICATION_CHANNEL_NAME = "notificationChannelName"
         private const val KEY_NOTIFICATION_CHANNEL_DESCRIPTION = "notificationChannelDescription"
@@ -160,6 +175,16 @@ internal data class TrackingConfiguration(
                     KEY_MAXIMUM_ACCEPTED_ACCURACY,
                     defaults.maximumAcceptedAccuracyMeters,
                 ).coerceAtLeast(1.0),
+                motionPolicyVersion = values.int(
+                    KEY_MOTION_POLICY_VERSION,
+                    LEGACY_MOTION_POLICY_VERSION,
+                ).let { version ->
+                    if (version in LEGACY_MOTION_POLICY_VERSION..CURRENT_MOTION_POLICY_VERSION) {
+                        version
+                    } else {
+                        CURRENT_MOTION_POLICY_VERSION
+                    }
+                },
                 notificationChannelId =
                     values.string(KEY_NOTIFICATION_CHANNEL_ID, defaults.notificationChannelId)
                         .ifBlank { defaults.notificationChannelId },

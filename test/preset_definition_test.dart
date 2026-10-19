@@ -19,6 +19,11 @@ void main() {
     }
   }
 
+  // The motion policy is versioned on its own (TrackingPolicyVersions), not by
+  // the preset definition, so the frozen preset record leaves it out.
+  Map<String, Object?> presetRecord(TrackingConfig config) =>
+      config.toMap()..remove('motionPolicyVersion');
+
   test('preset definition 4 resolves exactly as recorded', () {
     // Changing a preset value means a new preset-definition version, a new
     // configuration epoch for new routes, and a new fixture. Old routes are
@@ -32,7 +37,9 @@ void main() {
     expect(presets, hasLength(combinations().length));
     for (final (accuracy, intent) in combinations()) {
       expect(
-        TrackingConfig(accuracy: accuracy, captureIntent: intent).toMap(),
+        presetRecord(
+          TrackingConfig(accuracy: accuracy, captureIntent: intent),
+        ),
         presets['${accuracy.name}/${intent.name}'],
         reason: '${accuracy.name}/${intent.name}',
       );

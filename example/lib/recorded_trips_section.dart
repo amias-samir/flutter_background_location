@@ -23,6 +23,8 @@ enum RecordedTripAction {
   exportGeoJson,
   exportKml,
   exportGpx,
+  exportCleanedGpx,
+  exportDiagnostics,
   viewMap,
   continueTrip,
   delete,
@@ -39,6 +41,8 @@ class RecordedTripsSection extends StatelessWidget {
     required this.onContinue,
     required this.onExport,
     required this.onDelete,
+    this.onExportDiagnostics,
+    this.onExportCleaned,
   });
 
   final List<RecordedTripSummary> trips;
@@ -50,6 +54,13 @@ class RecordedTripsSection extends StatelessWidget {
   final Future<void> Function(String tripId, TrackExportFormat format)?
   onExport;
   final Future<void> Function(Trip trip)? onDelete;
+
+  /// Exports GeoJSON with point features, rejected points and per-fix
+  /// diagnostics, for explaining a field test.
+  final Future<void> Function(String tripId)? onExportDiagnostics;
+
+  /// Exports GPX of the cleaned route view, where each stop is one point.
+  final Future<void> Function(Trip trip)? onExportCleaned;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -216,6 +227,18 @@ class RecordedTripsSection extends StatelessWidget {
               canExport && onExport != null,
             ),
             _item(
+              RecordedTripAction.exportCleanedGpx,
+              Icons.auto_fix_high_outlined,
+              'Export cleaned GPX',
+              canExport && onExportCleaned != null,
+            ),
+            _item(
+              RecordedTripAction.exportDiagnostics,
+              Icons.troubleshoot_outlined,
+              'Export diagnostic GeoJSON',
+              canExport && onExportDiagnostics != null,
+            ),
+            _item(
               RecordedTripAction.viewMap,
               Icons.map_outlined,
               'View all days on map',
@@ -258,6 +281,10 @@ class RecordedTripsSection extends StatelessWidget {
         unawaited(onExport?.call(trip.id, TrackExportFormat.kml));
       case RecordedTripAction.exportGpx:
         unawaited(onExport?.call(trip.id, TrackExportFormat.gpx));
+      case RecordedTripAction.exportCleanedGpx:
+        unawaited(onExportCleaned?.call(trip));
+      case RecordedTripAction.exportDiagnostics:
+        unawaited(onExportDiagnostics?.call(trip.id));
       case RecordedTripAction.viewMap:
         unawaited(onViewMap?.call(trip));
       case RecordedTripAction.continueTrip:

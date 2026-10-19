@@ -89,4 +89,10 @@ abstract final class NativeTrackingCapabilities {
   /// Native status is a liveness tick on the fix path instead of an echo of
   /// every fix; Dart publishes status after each commit.
   static const statusFixEchoControl = 'status_fix_echo_control';
+
+  /// Native code applies motion policy 2 to adaptive capture: the stationary
+  /// profile survives unknown, tilting, low-confidence and missing activity
+  /// readings and ends only on positive moving evidence, Doppler speed or
+  /// sustained displacement.
+  static const stationaryPolicyV2 = 'stationary_policy_v2';
 }

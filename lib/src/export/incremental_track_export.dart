@@ -19,6 +19,7 @@ import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
 import 'track_export_service.dart';
+import 'export_diagnostics.dart';
 
 /// Internal descriptor used by the S1 incremental sink foundation.
 ///
@@ -923,6 +924,12 @@ final class _PagedTrackEncoder {
           ..write(
               '<fbl:activityConfidence>${point.activityConfidence}</fbl:activityConfidence>');
       }
+      if (options.includeDiagnosticProperties) {
+        for (final MapEntry(:key, :value)
+            in diagnosticPointProperties(point).entries) {
+          buffer.write('<fbl:$key>${_xmlText('$value')}</fbl:$key>');
+        }
+      }
       buffer.write('</extensions>');
     }
     buffer.write('</trkpt>');
@@ -1099,6 +1106,8 @@ Map<String, Object?> _pointProperties(
         'activityConfidence': point.activityConfidence,
         'motionState': point.motionState.name,
       },
+      if (options.includeDiagnosticProperties)
+        ...diagnosticPointProperties(point),
     };
 
 List<double> _geoJsonCoordinate(TrackPoint point) => <double>[
