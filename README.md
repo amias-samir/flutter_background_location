@@ -370,12 +370,44 @@ or `dwell`) and the number of fixes held. A stop ends at the departure fix,
 or at its last fix when the route pauses or completes during it.
 `TrackBundle.stops` carries a route's stops, and exports include them.
 
+A visit to one place is one stop. A phone with precise fixes holds a stop
+within the 25 m minimum radius, so walking between the buildings of a place,
+such as a temple's shrines, ends one stay and starts the next. Stays that
+follow each other within three minutes, centred within 75 m of the place, are
+listed and exported as a single stop; the stored records are unchanged.
+Rejected fixes that arrive while the device is at a recorded stop are stop
+evidence, not visible gaps, and `TrackingQualitySummary.stopEvidenceRunCount`
+counts the rejected-fix runs made only of stop evidence, so
+`qualityRunCount - stopEvidenceRunCount` is the number worth a look.
+
+Where the phone is carried changes what it records. The body blocks satellite
+signals: on a two-phone motorbike test, a phone in the rider's jacket pocket
+reported a median accuracy of 10 m and lost GNSS-quality fixes for about
+15 minutes after a long stop in a valley, while a phone in the passenger's
+bag reported 2 m throughout. The pocketed phone's route was 2.5 % shorter and
+showed 17 visible gaps, all where its fixes were rejected. For riding, prefer
+a bag, top box, tank bag or handlebar mount to a jacket or trouser pocket.
+
 Vehicle capture also uses a bounded urban-visibility acceptance envelope:
 `high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
 25 m. The provider still requests navigation-grade fixes. This avoids throwing
 away most tunnel, pocket, or urban-canyon callbacks solely because they exceed
 the walking-oriented 20/15 m limits. Pass an explicit
 `maximumAcceptedAccuracyMeters` to make the envelope stricter or looser.
+Adaptive capture applies the same envelope to a fix that is riding: its
+Doppler speed is at least 5 m/s, or at least 2 m/s with a fresh in-vehicle or
+on-bicycle reading (quality policy 4). Walking and standing keep the walking
+limit, and an explicit `maximumAcceptedAccuracyMeters` still wins.
+
+The High and Precised presets also capture turns (`turnCaptureDegrees`, 45°).
+At riding speed a fix every 5 seconds lies tens of metres from the last, so a
+junction or hairpin between them would be cut across. When a fix moving at
+least 3 m/s with a reliable course has turned 45° since the last recorded
+fix, it is recorded at once. On Android the moving high-accuracy profile then
+requests a fix every second, batched up to the moving interval where the
+device supports it, and records only the regular and turning ones; iOS
+already records every fix that moved the distance filter. Set
+`turnCaptureDegrees: 0` to turn it off.
 
 `MotionFusionMode.platformActivityOnly` is the compatibility default.
 `lowPowerSensorFusion` adds step/pedometer and significant-motion evidence.
@@ -1450,6 +1482,7 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 | `stationaryInterval` | 20 seconds | Requested interval while stationary |
 | `stationaryDistanceFilterMeters` | 20 m | Minimum stationary displacement |
 | `maximumAcceptedAccuracyMeters` | 20 m | Reject fixes with poorer reported accuracy |
+| `turnCaptureDegrees` | 45° (High, Precised), off (Medium, Low) | Record a fix between the regular ones when a moving route turns this far |
 | `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
 | `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
 | `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |

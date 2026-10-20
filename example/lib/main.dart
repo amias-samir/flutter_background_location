@@ -204,7 +204,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
           trip: trip,
           segmentCount: segmentCount,
           gapCount: bundle.gaps.length,
-          qualityEventCount: quality?.qualityRunCount ?? bundle.gaps.length,
+          // Stop holds are expected, not quality events.
+          qualityEventCount: quality == null
+              ? bundle.gaps.length
+              : quality.qualityRunCount - quality.stopEvidenceRunCount,
           visibleGapCount:
               quality?.visibleQualityRunCount ?? bundle.gaps.length,
           stopCount: stops.length,

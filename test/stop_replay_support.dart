@@ -154,12 +154,21 @@ Future<List<TrackPoint>> emitAndWait(
 }
 
 final class StopReplay {
-  StopReplay(this.harness, this.adapter, this.client, this.trackId);
+  StopReplay(
+    this.harness,
+    this.adapter,
+    this.client,
+    this.trackId, {
+    this.databasePath,
+  });
 
   final RepositoryHarness harness;
   final FakeTrackerAdapter adapter;
   final TrackingController client;
   final String trackId;
+
+  /// The route database file, when the route is pinned to a quality policy.
+  final String? databasePath;
 
   /// Starts a route; with [qualityPolicy], its epoch is pinned to that
   /// quality policy version, as for a route recorded by an older build.
@@ -222,7 +231,13 @@ final class StopReplay {
       }
       await client.dispose();
     });
-    return StopReplay(harness, adapter, client, started.leg.trackId);
+    return StopReplay(
+      harness,
+      adapter,
+      client,
+      started.leg.trackId,
+      databasePath: path,
+    );
   }
 
   /// Emits [route] as a live device would and returns every stored point.

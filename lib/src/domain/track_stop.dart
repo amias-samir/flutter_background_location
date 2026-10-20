@@ -18,6 +18,10 @@ abstract final class TrackStopKind {
 /// enter the route, its distance or default exports; the stop record is what
 /// remains of the stay. Coordinates are the robust centre of the held fixes,
 /// never a synthesized route point.
+///
+/// A visit to one place is one stop: stays that follow each other within
+/// three minutes, centred within 75 m, such as walks between a temple's
+/// shrines, are listed and exported as a single stop.
 final class TrackStop {
   const TrackStop({
     required this.id,

@@ -17,6 +17,7 @@ import '../domain/track_point.dart';
 import '../domain/track_query.dart';
 import '../domain/track_segment.dart';
 import '../domain/track_stop.dart';
+import '../domain/track_stop_places.dart';
 import '../domain/tracker_status.dart';
 import '../domain/trip.dart';
 import '../domain/trip_query.dart';
@@ -2255,6 +2256,24 @@ final class SqliteTrackRepository
         }
       }
 
+      final rows = await transaction.query(
+        'track_points',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      final point = TrackPoint.fromDatabase(rows.single);
+      // Before the quality run: poor fixes at the stop this change records
+      // are stop evidence.
+      final committedStop = stop == null
+          ? null
+          : await _applyStopChange(
+              transaction,
+              point: point,
+              change: stop,
+              now: now,
+            );
+
       // A rejected run needs a raw point after the previous accepted one;
       // without one the scan below would find nothing.
       if (request.accepted &&
@@ -2294,21 +2313,6 @@ final class SqliteTrackRepository
           request.trackId,
         ],
       );
-      final rows = await transaction.query(
-        'track_points',
-        where: 'id = ?',
-        whereArgs: <Object?>[id],
-        limit: 1,
-      );
-      final point = TrackPoint.fromDatabase(rows.single);
-      final committedStop = stop == null
-          ? null
-          : await _applyStopChange(
-              transaction,
-              point: point,
-              change: stop,
-              now: now,
-            );
       return PointAppendResult(
         point: point,
         segmentId: segmentId,
@@ -2492,6 +2496,8 @@ final class SqliteTrackRepository
     return rows.isEmpty ? null : _trackStopFromRow(rows.single);
   }
 
+  /// [trackId]'s stops as stays at places: records of one visit to a place
+  /// read as one stop ([TrackStopPlaces]).
   Future<List<TrackStop>> _trackStops(
     DatabaseExecutor executor,
     String trackId,
@@ -2502,7 +2508,9 @@ final class SqliteTrackRepository
       whereArgs: <Object?>[trackId],
       orderBy: 'started_at ASC, id ASC',
     );
-    return rows.map(_trackStopFromRow).toList(growable: false);
+    return List<TrackStop>.unmodifiable(
+      TrackStopPlaces.merge(rows.map(_trackStopFromRow)),
+    );
   }
 
   @override
@@ -2630,6 +2638,47 @@ final class SqliteTrackRepository
     FixQualityIssue.stationaryOutlier,
   };
 
+  /// Rejections that don't show travel ([_stopTravelSpeedMetersPerSecond]),
+  /// within [_stopArrivalAllowance] before a stop of [trackId] or during it.
+  Future<bool> _isAtRecordedStop(
+    Transaction transaction, {
+    required String trackId,
+    required List<Map<String, Object?>> rows,
+  }) async {
+    if (rows.any(
+      (row) =>
+          ((row['speed'] as num?)?.toDouble() ?? 0) >=
+          _stopTravelSpeedMetersPerSecond,
+    )) {
+      return false;
+    }
+    final firstAt =
+        DateTime.parse(rows.first['captured_at']! as String).toUtc();
+    final lastAt = DateTime.parse(rows.last['captured_at']! as String).toUtc();
+    final stops = await transaction.query(
+      'track_stops',
+      columns: <String>['started_at', 'last_seen_at', 'ended_at'],
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+    for (final stop in stops) {
+      final from = DateTime.parse(stop['started_at']! as String)
+          .toUtc()
+          .subtract(_stopArrivalAllowance);
+      final to = DateTime.parse(
+        (stop['ended_at'] ?? stop['last_seen_at'])! as String,
+      ).toUtc();
+      if (!lastAt.isBefore(from) && !firstAt.isAfter(to)) return true;
+    }
+    return false;
+  }
+
+  /// A rejected fix moving at least this fast was travelling, not at a stop.
+  static const _stopTravelSpeedMetersPerSecond = 3.0;
+
+  /// Poor fixes this long before a stop began arrived at its place.
+  static const _stopArrivalAllowance = Duration(minutes: 5);
+
   Future<void> _persistQualityRun(
     Transaction transaction, {
     required String trackId,
@@ -2646,6 +2695,7 @@ final class SqliteTrackRepository
         'sequence',
         'captured_at',
         'horizontal_accuracy',
+        'speed',
         'rejection_reason',
         'quality_flags',
       ],
@@ -2700,10 +2750,21 @@ final class SqliteTrackRepository
               DateTime.parse(qualityRows.first['captured_at']! as String)
                   .toUtc(),
             );
-    final visible = qualityRows.length >= 3 ||
+    var visible = qualityRows.length >= 3 ||
         qualityDuration >= const Duration(seconds: 30) ||
         (qualityMaximum != null &&
             qualityMaximum > maximumAcceptedAccuracyMeters * 1.5);
+    // Quality policy 3 and later: one dropped fix is not a hole in the
+    // route, and poor fixes while the device was at a place are stop
+    // evidence.
+    if (visible && policyVersion >= 3) {
+      visible = qualityRows.length >= 2 &&
+          !await _isAtRecordedStop(
+            transaction,
+            trackId: trackId,
+            rows: qualityRows,
+          );
+    }
     final reasons = rows
         .map((row) => row['rejection_reason']?.toString())
         .whereType<String>()
@@ -6679,6 +6740,24 @@ final class SqliteTrackRepository
       SELECT cause FROM track_continuity_gaps
       WHERE track_id IN ($placeholders)
       ''', trackIds);
+    // Runs with no rejection other than stop holds and rejections during a
+    // stay.
+    final stopEvidenceRows = await _db.rawQuery('''
+      SELECT COUNT(*) AS count FROM track_quality_runs r
+      WHERE r.track_id IN ($placeholders) AND NOT EXISTS (
+        SELECT 1 FROM track_points p
+        WHERE p.track_id = r.track_id
+          AND p.sequence BETWEEN r.first_raw_sequence AND r.last_raw_sequence
+          AND p.accepted = 0
+          AND COALESCE(p.rejection_reason, '') NOT IN (?, ?)
+          AND (COALESCE(p.quality_flags, 0) & ?) = 0
+      )
+      ''', <Object?>[
+      ...trackIds,
+      FixQualityIssue.stationaryHold,
+      FixQualityIssue.stationaryOutlier,
+      TrackPointQualityFlag.duringStop,
+    ]);
     final acceptedAccuracy = <double>[];
     final rejectedAccuracy = <double>[];
     var accepted = 0;
@@ -6721,6 +6800,8 @@ final class SqliteTrackRepository
       acceptedAccuracyP95Meters: _percentile(acceptedAccuracy, 0.95),
       rejectedAccuracyP50Meters: _percentile(rejectedAccuracy, 0.50),
       rejectedAccuracyP95Meters: _percentile(rejectedAccuracy, 0.95),
+      stopEvidenceRunCount:
+          (stopEvidenceRows.single['count'] as num?)?.toInt() ?? 0,
     );
   }
 

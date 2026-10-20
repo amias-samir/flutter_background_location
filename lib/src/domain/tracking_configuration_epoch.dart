@@ -4,7 +4,10 @@ import 'tracking_config.dart';
 /// Versions attached to each immutable policy epoch.
 abstract final class TrackingPolicyVersions {
   /// Version of the predefined [TrackingAccuracy] values.
-  static const int presetDefinition = 4;
+  ///
+  /// Version 5 adds turn capture at 45° to the High and Precised presets
+  /// ([TrackingConfig.turnCaptureDegrees]).
+  static const int presetDefinition = 5;
 
   /// Version of the point acceptance/rejection policy.
   ///
@@ -18,7 +21,11 @@ abstract final class TrackingPolicyVersions {
   /// evidence, walking inside the radius stays part of it, and it ends only
   /// when a fix leaves the radius with moving evidence, a Doppler speed or
   /// sustained displacement.
-  static const int qualityPolicy = 3;
+  ///
+  /// Version 4 is version 3, and a riding fix of an adaptive route is
+  /// accepted up to the vehicle accuracy envelope (see
+  /// `FixQualityPolicy.ridingSpeedMetersPerSecond`).
+  static const int qualityPolicy = 4;
 
   /// Version of accepted-gap classification and topology semantics.
   ///
@@ -58,7 +65,7 @@ abstract final class TrackingPolicyVersions {
   static const int legacyMotionPolicy = 1;
 
   /// Quality policy versions this build can evaluate, oldest first.
-  static const List<int> supportedQualityPolicies = <int>[1, 2, 3];
+  static const List<int> supportedQualityPolicies = <int>[1, 2, 3, 4];
 
   /// Continuity policy versions this build can evaluate, oldest first.
   static const List<int> supportedContinuityPolicies = <int>[2, 3];

@@ -187,6 +187,28 @@ final class ResolvedTrackingAccuracy {
 
 /// Sampling, validation, and battery policy for a tracking session.
 final class TrackingConfig {
+  /// The [maximumAcceptedAccuracyMeters] that [accuracy]'s preset resolves for
+  /// [captureIntent] when the host sets none. Quality policy 4 uses the
+  /// vehicle value while an adaptive route is riding.
+  static double defaultMaximumAcceptedAccuracyMeters(
+    TrackingAccuracy accuracy,
+    RouteCaptureIntent captureIntent,
+  ) =>
+      // Keep in step with the constructor's const resolution.
+      captureIntent == RouteCaptureIntent.vehicle
+          ? switch (accuracy) {
+              TrackingAccuracy.low => 100,
+              TrackingAccuracy.medium => 75,
+              TrackingAccuracy.precised => 25,
+              TrackingAccuracy.high => 35,
+            }
+          : switch (accuracy) {
+              TrackingAccuracy.low => 100,
+              TrackingAccuracy.medium => 60,
+              TrackingAccuracy.precised => 15,
+              TrackingAccuracy.high => 20,
+            };
+
   /// Creates a configuration whose unset sampling values come from
   /// [accuracy]'s preset.
   ///
@@ -201,6 +223,7 @@ final class TrackingConfig {
     int? stationaryDistanceFilterMeters,
     Duration? stationaryInterval,
     double? maximumAcceptedAccuracyMeters,
+    double? turnCaptureDegrees,
     double maximumPlausibleSpeedMetersPerSecond = 70,
     Duration stationaryConfirmationDuration = const Duration(seconds: 90),
     double stationaryProbeDisplacementMeters = 30,
@@ -242,6 +265,7 @@ final class TrackingConfig {
           stationaryDistanceFilterMeters: stationaryDistanceFilterMeters,
           stationaryInterval: stationaryInterval,
           maximumAcceptedAccuracyMeters: maximumAcceptedAccuracyMeters,
+          turnCaptureDegrees: turnCaptureDegrees,
           maximumPlausibleSpeedMetersPerSecond:
               maximumPlausibleSpeedMetersPerSecond,
           stationaryConfirmationDuration: stationaryConfirmationDuration,
@@ -283,6 +307,7 @@ final class TrackingConfig {
     required int? stationaryDistanceFilterMeters,
     required Duration? stationaryInterval,
     required double? maximumAcceptedAccuracyMeters,
+    required double? turnCaptureDegrees,
     required this.maximumPlausibleSpeedMetersPerSecond,
     required this.stationaryConfirmationDuration,
     required this.stationaryProbeDisplacementMeters,
@@ -389,6 +414,11 @@ final class TrackingConfig {
                         : accuracy == TrackingAccuracy.precised
                             ? 15
                             : 20),
+        turnCaptureDegrees = turnCaptureDegrees ??
+            (accuracy == TrackingAccuracy.high ||
+                    accuracy == TrackingAccuracy.precised
+                ? 45
+                : 0),
         maximumProviderFixAge = maximumProviderFixAge ??
             largeGapThreshold ??
             const Duration(minutes: 5),
@@ -401,6 +431,8 @@ final class TrackingConfig {
             stationaryDistanceFilterMeters >= 0),
         assert(maximumAcceptedAccuracyMeters == null ||
             maximumAcceptedAccuracyMeters > 0),
+        assert(turnCaptureDegrees == null ||
+            (turnCaptureDegrees >= 0 && turnCaptureDegrees <= 180)),
         assert(maximumPlausibleSpeedMetersPerSecond > 0),
         assert(stationaryProbeDisplacementMeters >= 0),
         assert(stationaryConfidenceThreshold >= 0 &&
@@ -450,6 +482,18 @@ final class TrackingConfig {
 
   /// Displacement used to probe whether a stationary route has moved again.
   final double stationaryProbeDisplacementMeters;
+
+  /// Course change, in degrees, at which a moving route records a fix between
+  /// its regular ones, so junctions and hairpins are not cut; 0 turns it off.
+  ///
+  /// A fix moving at least 3 m/s with a reliable course that has turned this
+  /// far since the last recorded fix is recorded at once. The High and
+  /// Precised presets use 45°; Medium and Low leave it off. On Android the
+  /// moving high-accuracy profile then requests 1-second fixes, batched up to
+  /// [movingInterval] where the device supports it, and records only the
+  /// regular and turning ones. iOS already records every fix that moved
+  /// [movingDistanceFilterMeters].
+  final double turnCaptureDegrees;
 
   /// Minimum platform confidence required to accept stationary evidence.
   final int stationaryConfidenceThreshold;
@@ -560,6 +604,7 @@ final class TrackingConfig {
     int? stationaryDistanceFilterMeters,
     Duration? stationaryInterval,
     double? maximumAcceptedAccuracyMeters,
+    double? turnCaptureDegrees,
     double? maximumPlausibleSpeedMetersPerSecond,
     Duration? stationaryConfirmationDuration,
     double? stationaryProbeDisplacementMeters,
@@ -602,6 +647,7 @@ final class TrackingConfig {
         stationaryInterval: stationaryInterval ?? this.stationaryInterval,
         maximumAcceptedAccuracyMeters:
             maximumAcceptedAccuracyMeters ?? this.maximumAcceptedAccuracyMeters,
+        turnCaptureDegrees: turnCaptureDegrees ?? this.turnCaptureDegrees,
         maximumPlausibleSpeedMetersPerSecond:
             maximumPlausibleSpeedMetersPerSecond ??
                 this.maximumPlausibleSpeedMetersPerSecond,
@@ -657,8 +703,8 @@ final class TrackingConfig {
   /// kept.
   ///
   /// A preset derives the location accuracy levels, the moving and stationary
-  /// intervals and distance filters, the accepted-accuracy limit, and the
-  /// first-fix timeout. Those take [accuracy]'s defaults for this
+  /// intervals and distance filters, the accepted-accuracy limit, turn
+  /// capture, and the first-fix timeout. Those take [accuracy]'s defaults for this
   /// configuration's [captureIntent]. Capture intent, motion fusion,
   /// notifications, and every other policy field are unchanged.
   TrackingConfig withPreset(TrackingAccuracy accuracy) {
@@ -675,6 +721,7 @@ final class TrackingConfig {
       stationaryDistanceFilterMeters: preset.stationaryDistanceFilterMeters,
       stationaryInterval: preset.stationaryInterval,
       maximumAcceptedAccuracyMeters: preset.maximumAcceptedAccuracyMeters,
+      turnCaptureDegrees: preset.turnCaptureDegrees,
       firstFixTimeout: preset.firstFixTimeout,
     );
   }
@@ -746,6 +793,11 @@ final class TrackingConfig {
         stationaryProbeDisplacementMeters < 0) {
       errors.add('stationaryProbeDisplacementMeters must be finite and >= 0');
     }
+    if (!turnCaptureDegrees.isFinite ||
+        turnCaptureDegrees < 0 ||
+        turnCaptureDegrees > 180) {
+      errors.add('turnCaptureDegrees must be between 0 and 180');
+    }
     _percent(
         errors, 'stationaryConfidenceThreshold', stationaryConfidenceThreshold);
     _percent(errors, 'movingConfidenceThreshold', movingConfidenceThreshold);
@@ -782,6 +834,7 @@ final class TrackingConfig {
         'stationaryConfirmationMs':
             stationaryConfirmationDuration.inMilliseconds,
         'stationaryProbeDisplacementMeters': stationaryProbeDisplacementMeters,
+        'turnCaptureDegrees': turnCaptureDegrees,
         'stationaryConfidenceThreshold': stationaryConfidenceThreshold,
         'movingConfidenceThreshold': movingConfidenceThreshold,
         'movingConfirmationCount': movingConfirmationCount,
@@ -864,6 +917,7 @@ final class TrackingConfig {
       ),
       stationaryProbeDisplacementMeters:
           decimal('stationaryProbeDisplacementMeters') ?? 30,
+      turnCaptureDegrees: decimal('turnCaptureDegrees'),
       stationaryConfidenceThreshold:
           integer('stationaryConfidenceThreshold') ?? 75,
       movingConfidenceThreshold: integer('movingConfidenceThreshold') ?? 60,

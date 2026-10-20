@@ -5,10 +5,12 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  final fixture = (jsonDecode(
-    File('test/fixtures/presets/preset_definition_v4.json').readAsStringSync(),
-  ) as Map)
-      .cast<String, Object?>();
+  Map<String, Object?> load(int version) => (jsonDecode(
+        File('test/fixtures/presets/preset_definition_v$version.json')
+            .readAsStringSync(),
+      ) as Map)
+          .cast<String, Object?>();
+  final fixture = load(5);
   final presets = (fixture['presets']! as Map).cast<String, Object?>();
 
   Iterable<(TrackingAccuracy, RouteCaptureIntent)> combinations() sync* {
@@ -24,15 +26,15 @@ void main() {
   Map<String, Object?> presetRecord(TrackingConfig config) =>
       config.toMap()..remove('motionPolicyVersion');
 
-  test('preset definition 4 resolves exactly as recorded', () {
+  test('preset definition 5 resolves exactly as recorded', () {
     // Changing a preset value means a new preset-definition version, a new
     // configuration epoch for new routes, and a new fixture. Old routes are
     // never reinterpreted, so this record stays frozen.
-    expect(fixture['presetDefinitionVersion'], 4);
+    expect(fixture['presetDefinitionVersion'], 5);
     expect(
       TrackingPolicyVersions.presetDefinition,
-      4,
-      reason: 'Add preset_definition_v5.json when bumping the version.',
+      5,
+      reason: 'Add preset_definition_v6.json when bumping the version.',
     );
     expect(presets, hasLength(combinations().length));
     for (final (accuracy, intent) in combinations()) {
@@ -42,6 +44,23 @@ void main() {
         ),
         presets['${accuracy.name}/${intent.name}'],
         reason: '${accuracy.name}/${intent.name}',
+      );
+    }
+  });
+
+  test('preset definition 5 adds only turn capture to version 4', () {
+    final version4 = (load(4)['presets']! as Map).cast<String, Object?>();
+    expect(version4.keys, presets.keys);
+    for (final key in presets.keys) {
+      final current = Map<String, Object?>.of(
+        (presets[key]! as Map).cast<String, Object?>(),
+      );
+      final degrees = current.remove('turnCaptureDegrees');
+      expect(current, version4[key], reason: key);
+      expect(
+        degrees,
+        key.startsWith('high/') || key.startsWith('precised/') ? 45 : 0,
+        reason: key,
       );
     }
   });
@@ -69,6 +88,7 @@ void main() {
     'stationaryDistanceFilterMeters',
     'stationaryIntervalMs',
     'maximumAcceptedAccuracyMeters',
+    'turnCaptureDegrees',
     'firstFixTimeoutMs',
   };
 

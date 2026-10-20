@@ -251,7 +251,7 @@ class _RouteMapScaffold extends StatelessWidget {
                           '${route.pointCount} points • '
                           '${route.stopMarkers.length} stop(s) • '
                           '${route.geometryPartCount} drawable part(s) • '
-                          '${route.gapCount} quality event(s) • '
+                          '${route.qualityEventCount} quality event(s) • '
                           '${route.visibleGapCount} visible gap(s)',
                         ),
                       ),
@@ -637,6 +637,7 @@ class RouteGeometry {
     required this.geometryPartCount,
     required this.gapCount,
     required this.inferredConnectorCount,
+    this.qualityEventCount = 0,
     this.stopMarkers = const <RouteStopMarker>[],
     this.uncertainSegments = const <List<maplibre.LatLng>>[],
     this.recordedDistanceMeters = 0,
@@ -665,6 +666,9 @@ class RouteGeometry {
   final int geometryPartCount;
   final int gapCount;
   final int inferredConnectorCount;
+
+  /// Gaps other than expected stop holds.
+  final int qualityEventCount;
 
   int get visibleGapCount => gapMarkers.length;
 
@@ -765,6 +769,12 @@ class RouteGeometry {
       geometryPartCount: report.geometryPartCount,
       gapCount: report.gapCount,
       inferredConnectorCount: report.inferredConnectorCount,
+      qualityEventCount: (gaps ?? report.gaps)
+          .where(
+            (gap) =>
+                gap.cause != TrackingGapCause.expectedStationarySuppression,
+          )
+          .length,
       stopMarkers: stopMarkers
         ..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
       uncertainSegments: uncertain,
@@ -912,6 +922,7 @@ class RouteGeometry {
     required int geometryPartCount,
     required int gapCount,
     required int inferredConnectorCount,
+    int qualityEventCount = 0,
     List<RouteStopMarker> stopMarkers = const <RouteStopMarker>[],
     List<List<maplibre.LatLng>> uncertainSegments =
         const <List<maplibre.LatLng>>[],
@@ -932,6 +943,7 @@ class RouteGeometry {
       geometryPartCount: geometryPartCount,
       gapCount: gapCount,
       inferredConnectorCount: inferredConnectorCount,
+      qualityEventCount: qualityEventCount,
       stopMarkers: stopMarkers,
       uncertainSegments: uncertainSegments,
       recordedDistanceMeters: recordedDistanceMeters,

@@ -505,6 +505,48 @@ void main() {
     expect(older.stopMarkers.single.recorded, isFalse);
   });
 
+  test('quality events leave out expected stop holds', () {
+    final track = _completedTrack();
+    final source = _timedSegment(
+      track,
+      const <double>[0, 50, 100, 150],
+      spacing: 60,
+      accuracy: 5,
+    );
+    TrackingContinuityGap gap(String id, int before, TrackingGapCause cause) =>
+        TrackingContinuityGap(
+          id: id,
+          trackId: track.id,
+          beforePointId: source.points[before].id,
+          afterPointId: source.points[before + 1].id,
+          beforeSegmentId: source.segment.id,
+          afterSegmentId: source.segment.id,
+          cause: cause,
+          treatment: TrackingGapTreatment.retainCurrentSegment,
+          distanceTreatment: TrackingGapDistanceTreatment.measured,
+          continuityPolicyVersion: 3,
+          providerGap: const Duration(seconds: 60),
+          createdAt: DateTime.utc(2026),
+        );
+    final report = const RouteGeometryAssembler().assemble(
+      sourceParts: <RouteGeometrySourcePart>[
+        RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: source.segment,
+          points: source.points,
+        ),
+      ],
+      gaps: <TrackingContinuityGap>[
+        gap('stop', 0, TrackingGapCause.expectedStationarySuppression),
+        gap('poor', 1, TrackingGapCause.acceptedFixRejectionRun),
+      ],
+      continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    );
+    final geometry = RouteGeometry.fromReport(report);
+    expect(geometry.gapCount, 2);
+    expect(geometry.qualityEventCount, 1);
+  });
+
   test('a tapped stop says how long it lasted and when', () {
     final closed = RouteStopMarker(
       coordinate: const maplibre.LatLng(0.5, 0.5),

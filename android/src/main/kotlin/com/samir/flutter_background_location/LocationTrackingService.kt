@@ -55,6 +55,13 @@ class LocationTrackingService : Service() {
     private var captureStarted = false
     private var currentProfile = TrackingStateStore.PROFILE_IDLE
     private var requestGeneration = 0
+
+    /**
+     * Chooses the stream fixes to record while the moving profile captures
+     * turns. Replaced on the main thread, read by the provider callback.
+     */
+    @Volatile
+    private var turnSampler: TurnCaptureSampler? = null
     private var currentActivityPendingIntent: PendingIntent? = null
     private var currentActivityTransitionPendingIntent: PendingIntent? = null
     private val monotonicDomainId = "android_process_${UUID.randomUUID()}"
@@ -124,9 +131,17 @@ class LocationTrackingService : Service() {
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             if (!captureStarted) return
+            val sampler = turnSampler
+            // A delivery proves the provider alive even when no fix of it is
+            // recorded.
+            if (sampler != null) stateStore.markProviderCallback(System.currentTimeMillis())
             // Batched and flushed deliveries are not guaranteed to be in
             // capture order; journal them oldest first.
-            result.locations.sortedBy { it.elapsedRealtimeNanos }.forEach(::handleLocation)
+            result.locations.sortedBy { it.elapsedRealtimeNanos }.forEach { location ->
+                if (sampler == null || sampler.accept(location.toTurnFix())) {
+                    handleLocation(location)
+                }
+            }
         }
     }
 
@@ -613,8 +628,27 @@ class LocationTrackingService : Service() {
         val highFidelity = profile != TrackingStateStore.PROFILE_STATIONARY &&
             (priority == Priority.PRIORITY_HIGH_ACCURACY ||
                 configuration.captureIntent != "adaptive")
-        val request = LocationRequest.Builder(priority, interval)
-            .setMinUpdateIntervalMillis((interval / 2L).coerceAtLeast(1_000L))
+        // Turn capture asks for a fix every second, batched up to the moving
+        // interval where the device supports it, and records the regular
+        // fixes and those where the course turns sharply.
+        val captureTurns = profile != TrackingStateStore.PROFILE_STATIONARY &&
+            priority == Priority.PRIORITY_HIGH_ACCURACY &&
+            configuration.capturesTurns &&
+            interval > TurnCaptureSampler.PROVIDER_INTERVAL_MS
+        turnSampler = if (captureTurns) {
+            TurnCaptureSampler(
+                intervalMs = interval,
+                turnDegrees = configuration.turnCaptureDegrees,
+                minimumDistanceMeters = distance,
+            )
+        } else {
+            null
+        }
+        val providerInterval = if (captureTurns) TurnCaptureSampler.PROVIDER_INTERVAL_MS else interval
+        val request = LocationRequest.Builder(priority, providerInterval)
+            .setMinUpdateIntervalMillis(
+                if (captureTurns) providerInterval else (interval / 2L).coerceAtLeast(1_000L),
+            )
             // Live walking capture must not be hidden in a long provider batch,
             // and on a low battery a batch could die with the phone.
             .setMaxUpdateDelayMillis(
@@ -723,12 +757,31 @@ class LocationTrackingService : Service() {
         }
     }
 
+    private fun Location.toTurnFix() = TurnCaptureSampler.Fix(
+        elapsedMs = elapsedRealtimeNanos / 1_000_000L,
+        latitude = latitude,
+        longitude = longitude,
+        speedMetersPerSecond = if (hasSpeed()) speed else null,
+        bearingDegrees = if (hasBearing()) bearing else null,
+        bearingAccuracyDegrees = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            hasBearingAccuracy()
+        ) {
+            bearingAccuracyDegrees
+        } else {
+            null
+        },
+    )
+
     private fun handleLocation(
         location: Location,
         captureOrigin: String = CAPTURE_ORIGIN_PROVIDER_STREAM,
         onDurablyHandled: (() -> Unit)? = null,
     ) {
         if (!captureStarted) return
+        // A fix recorded outside the stream is the turn reference too.
+        if (captureOrigin != CAPTURE_ORIGIN_PROVIDER_STREAM) {
+            turnSampler?.record(location.toTurnFix())
+        }
         if (!checkActivePrerequisitesForFix()) return
         val trackId = stateStore.activeTrackId ?: return
         val captureGenerationId = stateStore.captureGenerationId ?: run {

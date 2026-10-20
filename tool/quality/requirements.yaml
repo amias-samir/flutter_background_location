@@ -7,8 +7,8 @@ compatibility:
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
-  preset_definition: 4
-  quality_policy: 3
+  preset_definition: 5
+  quality_policy: 4
   continuity_policy: 3
   motion_policy: 2
 change_classifications:
@@ -1106,6 +1106,33 @@ work_packages:
       - test/public_api_compatibility_test.dart
       - test/analyze_stop_jitter_test.dart
       - example/test/widget_test.dart
+      - lib/src/domain/track_stop_places.dart
+      - test/track_stop_places_test.dart
+  - id: LBO-29
+    phase: LBO
+    title: Consistent routes across phone placements (stops per place, visible gaps, riding envelope, turn capture)
+    release_gate: two phones on one motorbike (pocket and bag) record the same stops per place within a minute, show visible gaps only where a phone's fixes were rejected while travelling, agree on distance within 2 percent where both had fixes, and record a fix within 15 m of each junction turned at riding speed on Android; routes recorded under quality policy 3 and preset definition 4 decide and sample as before
+    required_before: promoting quality policy 4 and turn capture beyond the field re-test
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/track_stop_places.dart
+      - lib/src/domain/fix_quality.dart
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/tracking_quality.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/TurnCaptureSampler.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/TurnCaptureSampler.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - test/fixtures/cross_language/turn_capture_v1.json
+      - test/fixtures/presets/preset_definition_v5.json
+      - test/track_stop_places_test.dart
+      - test/quality_run_visibility_test.dart
+      - test/fix_quality_v4_test.dart
+      - test/turn_capture_config_test.dart
+      - test/turn_capture_fixture_test.dart
+      - android/src/test/kotlin/com/samir/flutter_background_location/TurnCaptureSamplerTest.kt
+      - example/ios/RunnerTests/TurnCaptureSamplerTests.swift
   - id: LBO-13B
     phase: LBO
     title: Stop-aware route cleaning version 2 (stays at a place, from held evidence too)

@@ -51,6 +51,43 @@
     speed, a fix is neither moving nor quiet: only two minutes of accepted
     fixes confined with no net progress start a stop.
   - Routes recorded under quality policies 1 and 2 decide exactly as before.
+- A two-phone motorbike test (one phone in the rider's jacket pocket, one in
+  the passenger's bag, same build and settings) recorded 58.98 and 60.46 km,
+  10 and 12 stops, and 17 and 0 visible gaps. The pocketed phone's fixes were
+  shielded by the rider's body (median accuracy 10 m against 2 m), and for
+  about 15 minutes after a long stop in a valley it had only network-quality
+  positions. Four changes make the results consistent where the package can:
+  - **One place, one stop.** Stop records that follow each other within
+    three minutes, centred within 75 m, are listed and exported as one stop:
+    walking between a temple's shrines no longer splits a two-hour visit on a
+    precise phone. Stored records are unchanged, so routes recorded earlier
+    show merged stops too.
+  - **Visible gaps mark holes in the route.** Under quality policy 3 and
+    later, a single dropped fix is never a visible gap on its own, and
+    rejected fixes that don't show travel and arrive while the device is at a
+    recorded stop (from five minutes before it) are stop evidence. Stored run
+    severities are unchanged.
+  - **Stop holds are not quality events.** `TrackingQualitySummary` gains
+    `stopEvidenceRunCount`, the rejected-fix runs made only of stop evidence;
+    the example's Trip card and map header leave them out.
+  - **Riding fixes up to the vehicle envelope (quality policy 4, the default
+    for new adaptive routes).** A fix whose Doppler speed is at least 5 m/s,
+    or at least 2 m/s with a fresh in-vehicle or on-bicycle reading, is
+    accepted up to the accuracy the vehicle intent allows (35 m at High,
+    25 m at Precised) unless the host set its own limit. Routes recorded
+    under quality policy 3 decide as before. On the test data this recovers
+    about 0.5 km of the 1.5 km difference; the rest had no usable fixes.
+- Moving routes capture turns. At riding speed a fix every 5 s lies tens of
+  metres from the last, so a junction or hairpin between them was cut across.
+  The new `TrackingConfig.turnCaptureDegrees` (45° for the High and Precised
+  presets, off for Medium and Low; preset definition 5) records a fix moving
+  at least 3 m/s with a reliable course as soon as it has turned that far
+  since the last recorded fix. On Android the moving high-accuracy profile
+  requests 1-second fixes, batched up to the moving interval where supported,
+  and records only the regular and turning ones; iOS gains the same rule on
+  top of recording every fix that moved the distance filter. Kotlin and Swift
+  share the `turn_capture_v1` fixture. Configurations stored without the key
+  keep sampling without turn capture.
 - Routes now keep a record of each stop: where it was and how long it lasted
   (route database schema 16, table `track_stops`). A record is written in the
   same transaction as the fix that opens, extends or ends it, survives

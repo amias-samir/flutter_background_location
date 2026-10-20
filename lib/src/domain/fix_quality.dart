@@ -1,3 +1,6 @@
+import 'dart:math' as math;
+
+import 'activity_snapshot.dart';
 import 'location_sample.dart';
 import 'motion_policy.dart';
 import 'stop_site.dart';
@@ -138,8 +141,61 @@ final class FixQualityPolicy {
           now: now,
           stop: stop,
         ),
+      4 => _evaluateVersion3(
+          sample: sample,
+          previous: previous,
+          now: now,
+          stop: stop,
+          appliedVersion: 4,
+          maximumAccuracyMeters: _ridingAccuracyLimit(sample),
+        ),
       _ => throw StateError('Quality policy $applied has no evaluator.'),
     };
+  }
+
+  /// Quality policy 4: a riding fix of an adaptive route is accepted up to
+  /// the vehicle accuracy envelope.
+  ///
+  /// A phone in a rider's pocket is shielded by the body: on a motorbike its
+  /// fixes often report 20 to 35 m where a phone with a sky view reports a
+  /// few metres, and rejecting them cuts the route across bends. A fix is
+  /// riding when its Doppler speed is at least [ridingSpeedMetersPerSecond],
+  /// or at least [slowRidingSpeedMetersPerSecond] with a fresh in-vehicle or
+  /// on-bicycle reading at the moving threshold. A host limit other than the
+  /// preset's still applies.
+  static const double ridingSpeedMetersPerSecond = 5;
+
+  /// See [ridingSpeedMetersPerSecond].
+  static const double slowRidingSpeedMetersPerSecond = 2;
+
+  double _ridingAccuracyLimit(LocationSample sample) {
+    final limit = config.maximumAcceptedAccuracyMeters;
+    if (config.captureIntent != RouteCaptureIntent.adaptive ||
+        limit !=
+            TrackingConfig.defaultMaximumAcceptedAccuracyMeters(
+              config.accuracy,
+              config.captureIntent,
+            )) {
+      return limit;
+    }
+    final speed = sample.speed;
+    if (speed == null || !speed.isFinite) return limit;
+    final reading = sample.capturedActivity;
+    final ridingReading = reading != null &&
+        reading.evidenceState == ActivityEvidenceState.fresh &&
+        (reading.type == TrackingActivityType.inVehicle ||
+            reading.type == TrackingActivityType.onBicycle) &&
+        reading.confidence >= config.movingConfidenceThreshold;
+    final riding = speed >= ridingSpeedMetersPerSecond ||
+        (speed >= slowRidingSpeedMetersPerSecond && ridingReading);
+    if (!riding) return limit;
+    return math.max(
+      limit,
+      TrackingConfig.defaultMaximumAcceptedAccuracyMeters(
+        config.accuracy,
+        RouteCaptureIntent.vehicle,
+      ),
+    );
   }
 
   /// Version 1 plus stays at a place, for adaptive capture.
@@ -163,12 +219,15 @@ final class FixQualityPolicy {
     required TrackPoint? previous,
     required DateTime now,
     required StopContext? stop,
+    int appliedVersion = 3,
+    double? maximumAccuracyMeters,
   }) {
     final decision = _evaluateVersion1(
       sample: sample,
       previous: previous,
       now: now,
-      appliedVersion: 3,
+      appliedVersion: appliedVersion,
+      maximumAccuracyMeters: maximumAccuracyMeters,
     );
     final site = stop?.site;
     if (stop == null ||
@@ -332,7 +391,10 @@ final class FixQualityPolicy {
     required TrackPoint? previous,
     required DateTime now,
     int appliedVersion = 1,
+    double? maximumAccuracyMeters,
   }) {
+    final accuracyLimit =
+        maximumAccuracyMeters ?? config.maximumAcceptedAccuracyMeters;
     final issues = <String>[];
     var flags = TrackPointQualityFlag.none;
     String? rejection;
@@ -369,7 +431,7 @@ final class FixQualityPolicy {
       issues.add(FixQualityIssue.zeroAccuracy);
       flags |= TrackPointQualityFlag.poorAccuracy;
       motionEligible = false;
-    } else if (accuracy > config.maximumAcceptedAccuracyMeters) {
+    } else if (accuracy > accuracyLimit) {
       issues.add(FixQualityIssue.aboveAccuracyLimit);
       flags |= TrackPointQualityFlag.poorAccuracy;
       rejection ??= 'poor_accuracy';

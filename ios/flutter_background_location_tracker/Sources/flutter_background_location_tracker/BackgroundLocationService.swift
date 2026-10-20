@@ -197,6 +197,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
   }
   private var lastEmittedLocation: CLLocation?
+  /// Records a fix at sharp turns while the moving profile captures them.
+  private var turnSampler: TurnCaptureSampler?
   private var lastReliableLocation: CLLocation?
   private var stationaryReferenceLocation: CLLocation?
   private var stationaryCandidateLocation: CLLocation?
@@ -856,6 +858,17 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
 
   private func configureLocationManager(for profile: TrackingProfile) {
     let useStationaryProfile = profile == .stationary
+    turnSampler =
+      profile == .moving && configuration.turnCaptureDegrees > 0
+      ? TurnCaptureSampler(
+        intervalMs: configuration.movingIntervalMs,
+        turnDegrees: configuration.turnCaptureDegrees,
+        minimumDistanceMeters: configuration.movingDistanceFilterMeters
+      )
+      : nil
+    // Reconfiguring never emits an extra fix: turns are measured from the
+    // last emitted one.
+    if let last = lastEmittedLocation { turnSampler?.record(Self.turnFix(last)) }
     locationManager.desiredAccuracy =
       useStationaryProfile
       ? configuration.stationaryDesiredAccuracy
@@ -1379,6 +1392,22 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       : configuration.movingDistanceFilterMeters
     let elapsedMs = location.timestamp.timeIntervalSince(previous.timestamp) * 1_000
     return elapsedMs >= interval || location.distance(from: previous) >= distance
+      || turnSampler?.shouldRecord(Self.turnFix(location)) == true
+  }
+
+  private static func turnFix(_ location: CLLocation) -> TurnCaptureSampler.Fix {
+    var courseAccuracy: Double?
+    if #available(iOS 13.4, *), location.courseAccuracy >= 0 {
+      courseAccuracy = location.courseAccuracy
+    }
+    return TurnCaptureSampler.Fix(
+      elapsedMs: location.timestamp.timeIntervalSince1970 * 1_000,
+      latitude: location.coordinate.latitude,
+      longitude: location.coordinate.longitude,
+      speedMetersPerSecond: location.speed >= 0 ? location.speed : nil,
+      bearingDegrees: location.course >= 0 ? location.course : nil,
+      bearingAccuracyDegrees: courseAccuracy
+    )
   }
 
   private func shouldExitStationary(for location: CLLocation) -> Bool {
@@ -1879,6 +1908,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       }
       guard inBurst || shouldEmit(location) else { continue }
       lastEmittedLocation = location
+      turnSampler?.record(Self.turnFix(location))
       var event = locationMap(location, providerFixKey: fixKey)
       event["captureOrigin"] = inBurst ? "probeBurst" : "providerStream"
       events.append((event, generation))

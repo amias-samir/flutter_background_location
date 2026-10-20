@@ -49,6 +49,10 @@
       "android": "parsed",
       "ios": "parsed"
     },
+    "turnCaptureDegrees": {
+      "android": "parsed",
+      "ios": "parsed"
+    },
     "stationaryConfidenceThreshold": {
       "android": "parsed",
       "ios": "parsed"

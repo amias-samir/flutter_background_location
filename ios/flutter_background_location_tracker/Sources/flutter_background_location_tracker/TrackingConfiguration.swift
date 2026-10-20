@@ -14,6 +14,10 @@ struct TrackingConfiguration {
   let stationaryTimeoutMs: Double
   let stationaryProbeDisplacementMeters: Double
   let maximumAcceptedAccuracyMeters: Double
+  /// Course change at which the moving profile records a fix between its
+  /// regular ones; 0 is off. A configuration without the key predates turn
+  /// capture and keeps sampling without it.
+  let turnCaptureDegrees: Double
   let movingDesiredAccuracy: CLLocationAccuracy
   let stationaryDesiredAccuracy: CLLocationAccuracy
   let activityType: CLActivityType
@@ -83,6 +87,10 @@ struct TrackingConfiguration {
       dictionary["maximumAcceptedAccuracyMeters"],
       defaultValue: 20,
       minimum: 1
+    )
+    turnCaptureDegrees = min(
+      Self.number(dictionary["turnCaptureDegrees"], defaultValue: 0, minimum: 0),
+      180
     )
     let resolvedMovingDesiredAccuracy = Self.accuracy(
       dictionary["desiredAccuracy"],
@@ -183,6 +191,7 @@ struct TrackingConfiguration {
       "stationaryConfirmationMs": stationaryTimeoutMs,
       "stationaryProbeDisplacementMeters": stationaryProbeDisplacementMeters,
       "maximumAcceptedAccuracyMeters": maximumAcceptedAccuracyMeters,
+      "turnCaptureDegrees": turnCaptureDegrees,
       "desiredAccuracy": movingDesiredAccuracy,
       "stationaryDesiredAccuracy": stationaryDesiredAccuracy,
       "activityType": Self.activityTypeName(activityType),

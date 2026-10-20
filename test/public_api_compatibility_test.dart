@@ -90,6 +90,35 @@ void main() {
     expect(await controller.listTripStops('trip'), <TrackStop>[stop]);
     expect(advanced.TrackStopRepository, isNotNull);
   });
+
+  test(
+      'turn capture, the riding envelope and stop-evidence counts are '
+      'additive', () {
+    expect(const TrackingConfig().turnCaptureDegrees, 45);
+    expect(
+      const TrackingConfig(turnCaptureDegrees: 0).turnCaptureDegrees,
+      0,
+    );
+    expect(
+      TrackingConfig.defaultMaximumAcceptedAccuracyMeters(
+        TrackingAccuracy.high,
+        RouteCaptureIntent.vehicle,
+      ),
+      35,
+    );
+    expect(FixQualityPolicy.ridingSpeedMetersPerSecond, 5);
+    const summary = TrackingQualitySummary(
+      rawCallbackCount: 3,
+      acceptedPointCount: 1,
+      rejectedPointCount: 2,
+      qualityRunCount: 1,
+      visibleQualityRunCount: 0,
+      continuityGapCount: 0,
+      lifecycleBoundaryCount: 0,
+      staleActivityCount: 0,
+    );
+    expect(summary.stopEvidenceRunCount, 0);
+  });
 }
 
 /// A host implementation of the optional stop capability.

@@ -39,4 +39,29 @@ class TrackingConfigurationTest {
         assertEquals(30_000L, configuration.motionEvidenceFreshnessMs)
         assertEquals(20.0, configuration.maximumAcceptedAccuracyMeters, 0.0)
     }
+
+    @Test
+    fun `turn capture is parsed, persisted and off for older configurations`() {
+        val configuration = TrackingConfiguration.fromMap(mapOf("turnCaptureDegrees" to 45.0))
+        assertEquals(45f, configuration.turnCaptureDegrees)
+        assertEquals(true, configuration.capturesTurns)
+        assertEquals(
+            45f,
+            TrackingConfiguration.fromJson(configuration.toJson()).turnCaptureDegrees,
+        )
+
+        // Stored before the key existed: the route keeps its sampling.
+        val legacy = TrackingConfiguration.fromMap(mapOf("movingIntervalMs" to 5_000L))
+        assertEquals(0f, legacy.turnCaptureDegrees)
+        assertEquals(false, legacy.capturesTurns)
+
+        assertEquals(
+            180f,
+            TrackingConfiguration.fromMap(mapOf("turnCaptureDegrees" to 400.0)).turnCaptureDegrees,
+        )
+        assertEquals(
+            0f,
+            TrackingConfiguration.fromMap(mapOf("turnCaptureDegrees" to -5.0)).turnCaptureDegrees,
+        )
+    }
 }

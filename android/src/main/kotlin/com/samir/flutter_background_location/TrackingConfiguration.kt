@@ -24,6 +24,9 @@ internal data class TrackingConfiguration(
     val sensorProbeMaximumDurationPerHourMs: Long = 180_000L,
     val desiredAccuracy: String = "precised",
     val maximumAcceptedAccuracyMeters: Double = 20.0,
+    // A configuration without the key predates turn capture and keeps
+    // sampling without it; 0 is off.
+    val turnCaptureDegrees: Float = 0f,
     // A configuration without the key predates motion policy 2 and keeps the
     // legacy state machine, so a route recording across an upgrade resumes
     // with the policy it started with.
@@ -57,6 +60,7 @@ internal data class TrackingConfiguration(
         put(KEY_SENSOR_PROBE_MAXIMUM_PER_HOUR, sensorProbeMaximumDurationPerHourMs)
         put(KEY_DESIRED_ACCURACY, desiredAccuracy)
         put(KEY_MAXIMUM_ACCEPTED_ACCURACY, maximumAcceptedAccuracyMeters)
+        put(KEY_TURN_CAPTURE_DEGREES, turnCaptureDegrees.toDouble())
         put(KEY_MOTION_POLICY_VERSION, motionPolicyVersion)
         put(KEY_NOTIFICATION_CHANNEL_ID, notificationChannelId)
         put(KEY_NOTIFICATION_CHANNEL_NAME, notificationChannelName)
@@ -64,6 +68,10 @@ internal data class TrackingConfiguration(
         put(KEY_NOTIFICATION_TITLE, notificationTitle)
         put(KEY_NOTIFICATION_TEXT, notificationText)
     }.toString()
+
+    /** Whether the moving profile records a fix at sharp turns. */
+    val capturesTurns: Boolean
+        get() = turnCaptureDegrees > 0f
 
     /** Whether motion policy 2 decides the moving/stationary profile. */
     val usesStationaryPolicyV2: Boolean
@@ -98,6 +106,7 @@ internal data class TrackingConfiguration(
             "sensorProbeMaximumDurationPerHourMs"
         private const val KEY_DESIRED_ACCURACY = "desiredAccuracy"
         private const val KEY_MAXIMUM_ACCEPTED_ACCURACY = "maximumAcceptedAccuracyMeters"
+        private const val KEY_TURN_CAPTURE_DEGREES = "turnCaptureDegrees"
         private const val KEY_MOTION_POLICY_VERSION = "motionPolicyVersion"
         private const val KEY_NOTIFICATION_CHANNEL_ID = "notificationChannelId"
         private const val KEY_NOTIFICATION_CHANNEL_NAME = "notificationChannelName"
@@ -175,6 +184,10 @@ internal data class TrackingConfiguration(
                     KEY_MAXIMUM_ACCEPTED_ACCURACY,
                     defaults.maximumAcceptedAccuracyMeters,
                 ).coerceAtLeast(1.0),
+                turnCaptureDegrees = values.float(
+                    KEY_TURN_CAPTURE_DEGREES,
+                    defaults.turnCaptureDegrees,
+                ).let { degrees -> if (degrees.isFinite()) degrees.coerceIn(0f, 180f) else 0f },
                 motionPolicyVersion = values.int(
                     KEY_MOTION_POLICY_VERSION,
                     LEGACY_MOTION_POLICY_VERSION,
