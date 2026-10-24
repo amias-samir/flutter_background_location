@@ -262,7 +262,7 @@ void main() {
     );
     final records = await raw.rawQuery('SELECT COUNT(*) AS n FROM track_stops');
     await raw.close();
-    expect(records.single['n'], 2, reason: 'the walk left the first stay');
+    expect(records.single['n'], 1, reason: 'one stored row per visit');
     final stops = await run.harness.repository.listTrackStops(run.trackId);
     expect(stops, hasLength(1), reason: 'one visit, one stop');
     final visit = stops.single;

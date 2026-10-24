@@ -95,4 +95,9 @@ abstract final class NativeTrackingCapabilities {
   /// readings and ends only on positive moving evidence, Doppler speed or
   /// sustained displacement.
   static const stationaryPolicyV2 = 'stationary_policy_v2';
+
+  /// Native code counts steps in every capture generation with the device's
+  /// step counter, when it has one and the activity permission is granted,
+  /// and reports them as `stepCount` on location events and status.
+  static const stepCount = 'step_count';
 }

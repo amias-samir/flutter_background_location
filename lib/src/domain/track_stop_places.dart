@@ -7,40 +7,45 @@ import 'track_stop.dart';
 ///
 /// A precise phone holds a stop within the 25 m minimum radius, so walking
 /// between the buildings of one place, such as a temple's shrines, leaves the
-/// radius and splits the visit into several stop records. A phone with poorer
-/// fixes has a wider radius and keeps one record. Consecutive records of one
-/// segment that start at most [maximumGap] after the previous one ended, with
-/// a centre at most [maximumCentreDistanceMeters] from the place's centre so
-/// far, are one stop. Stored records never change.
+/// radius and splits the visit into several stays. A phone with poorer fixes
+/// has a wider radius and keeps one. A stay of one segment that starts at
+/// most [maximumGap] after the place's last stay ended, centred at most
+/// [maximumCentreDistanceMeters] from the place's centre so far, continues
+/// the place. The route database stores one row per place: the repository
+/// applies this rule when it writes a stop, and the schema 17 upgrade
+/// consolidated older rows with [group].
 abstract final class TrackStopPlaces {
   static const maximumGap = Duration(minutes: 3);
   static const maximumCentreDistanceMeters = 75.0;
 
   /// [stops] as stays at places, oldest first.
-  static List<TrackStop> merge(Iterable<TrackStop> stops) {
+  static List<TrackStop> merge(Iterable<TrackStop> stops) =>
+      <TrackStop>[for (final place in group(stops)) combine(place)];
+
+  /// [stops], oldest first, grouped into the stays of each place.
+  static List<List<TrackStop>> group(Iterable<TrackStop> stops) {
     final sorted = stops.toList()
       ..sort((a, b) => a.startedAt.compareTo(b.startedAt));
     final places = <List<TrackStop>>[];
     for (final stop in sorted) {
       final place = places.isEmpty ? null : places.last;
-      if (place != null && _continues(place, stop)) {
+      if (place != null && continues(combine(place), stop)) {
         place.add(stop);
       } else {
         places.add(<TrackStop>[stop]);
       }
     }
-    return <TrackStop>[for (final place in places) _combine(place)];
+    return places;
   }
 
-  static bool _continues(List<TrackStop> place, TrackStop stop) {
-    final previous = place.last;
-    if (stop.segmentId != previous.segmentId || previous.isOpen) return false;
-    final previousEnd = previous.endedAt ?? previous.lastSeenAt;
-    if (stop.startedAt.difference(previousEnd) > maximumGap) return false;
-    final (latitude, longitude) = _centre(place);
+  /// Whether [stop] continues [place], the place's stays so far combined.
+  static bool continues(TrackStop place, TrackStop stop) {
+    if (stop.segmentId != place.segmentId || place.isOpen) return false;
+    final placeEnd = place.endedAt ?? place.lastSeenAt;
+    if (stop.startedAt.difference(placeEnd) > maximumGap) return false;
     return TrackGeodesy.sphericalHaversineMeters(
-          latitude,
-          longitude,
+          place.latitude,
+          place.longitude,
           stop.latitude,
           stop.longitude,
         ) <=
@@ -64,7 +69,10 @@ abstract final class TrackStopPlaces {
     return (latitude / weight, ((longitude + 540) % 360) - 180);
   }
 
-  static TrackStop _combine(List<TrackStop> place) {
+  /// The stays of one [place], oldest first, as one stop: the first stay's
+  /// identity, start and arrival, the last one's end and departure, summed
+  /// evidence, an evidence-weighted centre and a radius covering every stay.
+  static TrackStop combine(List<TrackStop> place) {
     if (place.length == 1) return place.single;
     final first = place.first;
     final last = place.last;

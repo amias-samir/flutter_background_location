@@ -52,6 +52,7 @@ final class LocationSample {
     this.nativeSessionStartedAt,
     this.nativeLifecycle,
     this.samplingProfile,
+    this.stepCount,
   });
 
   /// Latitude in decimal degrees.
@@ -150,6 +151,11 @@ final class LocationSample {
   /// Native sampling profile attached to this journaled callback.
   final SamplingProfile? samplingProfile;
 
+  /// Steps the native step counter counted since this capture generation
+  /// began (`stepCount`); null when the device has no step counter, the
+  /// activity permission is missing, or the native build predates it.
+  final int? stepCount;
+
   /// Three-state interpretation of the available mock-location evidence.
   MockLocationAssessment get mockAssessment {
     // A positive platform signal is authoritative even if an older adapter
@@ -236,6 +242,7 @@ final class LocationSample {
         'moving' => SamplingProfile.moving,
         _ => null,
       },
+      stepCount: stepCountFromPayload(map['stepCount']),
       capturedActivity: _activityFromLocationPayload(map),
       capturedMotionState: switch (rawMotion?.toString().toLowerCase()) {
         'moving' => MotionState.moving,
@@ -247,6 +254,14 @@ final class LocationSample {
           : MotionEvidenceSnapshot.fromMap(rawMotionEvidence),
     );
   }
+}
+
+/// A native `stepCount`: a whole, non-negative number of steps, or null for an
+/// absent or malformed value.
+int? stepCountFromPayload(Object? value) {
+  if (value is! num || !value.isFinite || value < 0) return null;
+  if (value is double && value != value.roundToDouble()) return null;
+  return value.toInt();
 }
 
 /// Decodes the `activity*` keys of a native location payload.

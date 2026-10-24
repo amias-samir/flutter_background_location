@@ -58,6 +58,7 @@ final class TrackPoint {
     this.nativeSessionStartedAt,
     this.nativeLifecycle,
     this.samplingProfile,
+    this.stepCount,
     this.qualityPolicyVersion,
     this.activitySource,
     this.activityRawType,
@@ -119,6 +120,10 @@ final class TrackPoint {
   final DateTime? nativeSessionStartedAt;
   final TrackerLifecycle? nativeLifecycle;
   final SamplingProfile? samplingProfile;
+
+  /// Steps the native counter had counted since this point's capture
+  /// generation began; null without a step counter or its permission.
+  final int? stepCount;
   final int? qualityPolicyVersion;
   final bool accepted;
   final int qualityFlags;
@@ -181,6 +186,7 @@ final class TrackPoint {
         nativeSessionStartedAt: nativeSessionStartedAt,
         nativeLifecycle: nativeLifecycle,
         samplingProfile: samplingProfile,
+        stepCount: stepCount,
         qualityPolicyVersion: qualityPolicyVersion,
         accepted: accepted,
         qualityFlags: qualityFlags,
@@ -256,6 +262,7 @@ final class TrackPoint {
                   (candidate) => candidate?.name == row['sampling_profile'],
                   orElse: () => null,
                 ),
+        stepCount: (row['step_count'] as num?)?.toInt(),
         qualityPolicyVersion: (row['quality_policy_version'] as num?)?.toInt(),
         accepted: row['accepted'] == 1,
         qualityFlags: (row['quality_flags'] as num?)?.toInt() ?? 0,

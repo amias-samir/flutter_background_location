@@ -1,6 +1,7 @@
 import '../domain/activity_snapshot.dart';
 import '../domain/export_models.dart';
 import '../domain/location_sample.dart';
+import '../domain/route_summary.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
@@ -19,15 +20,19 @@ final class TrackBundle {
     required this.track,
     required this.segments,
     this.stops = const <TrackStop>[],
+    this.summary,
   });
 
   final Track track;
   final List<TrackSegmentWithPoints> segments;
 
-  /// Stops recorded for the track, oldest first, read in the same snapshot.
-  /// Empty for routes recorded without stop records and for repositories
-  /// without [TrackStopRepository].
+  /// Stops of the track, one per place, oldest first, read in the same
+  /// snapshot. Empty for repositories without [TrackStopRepository].
   final List<TrackStop> stops;
+
+  /// The track's stored summary, read in the same snapshot; null for
+  /// repositories without [RouteSummaryRepository].
+  final RouteSummary? summary;
 }
 
 final class PointWriteRequest {
@@ -105,6 +110,48 @@ abstract interface class TrackStopRepository {
 
   /// Stops of [trackId], oldest first.
   Future<List<TrackStop>> listTrackStops(String trackId);
+}
+
+/// Optional capability: route details kept in the database as a route
+/// records ([RouteSummary], [TripSummary]).
+abstract interface class RouteSummaryRepository {
+  /// [trackId]'s stored summary, computed first if it has none yet; null for
+  /// an unknown track.
+  Future<RouteSummary?> routeSummary(String trackId);
+
+  /// [tripId]'s totals over its legs, stored and returned; null for an
+  /// unknown Trip.
+  Future<TripSummary?> tripSummary(String tripId);
+
+  /// Recomputes [trackId]'s summary from its stored rows.
+  Future<void> refreshRouteSummary(String trackId);
+
+  /// Completed tracks whose stops are still [TrackStopSource.pending],
+  /// oldest first.
+  Future<List<String>> tracksAwaitingStops({int limit = 20});
+
+  /// Stores [stops], derived from [trackId]'s stored points, as its stop rows,
+  /// one per place, and marks its stops [TrackStopSource.derived]. Does
+  /// nothing unless its stops are still pending.
+  Future<void> storeDerivedStops(String trackId, List<TrackStop> stops);
+
+  /// Records [stepCount], the native step count of capture generation
+  /// [captureGenerationId] read from status before capture stops, so the
+  /// steps after the route's newest fix count too. Adds to the current
+  /// segment; a count no higher than one already recorded adds nothing.
+  Future<void> recordStepCount(
+    String trackId, {
+    required String? captureGenerationId,
+    required int stepCount,
+  });
+
+  /// Records [runId] as [trackId]'s current cleaned view, [distanceMeters]
+  /// long.
+  Future<void> recordCleanedGeometry(
+    String trackId, {
+    required String runId,
+    required double distanceMeters,
+  });
 }
 
 enum TrackOperationType { pause, complete }

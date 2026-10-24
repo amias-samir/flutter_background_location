@@ -518,6 +518,7 @@ internal class TrackingStateStore(context: Context) {
             "serviceAlive" to serviceAlive,
             "captureAlive" to captureAlive,
             "captureGenerationId" to captureGenerationId,
+            "stepCount" to LocationTrackingService.stepCount(captureGenerationId),
             "nativeSessionStartedAt" to nativeSessionStartedAt,
             "captureStartReason" to captureStartReason,
             "serviceHeartbeatAt" to heartbeatAt,

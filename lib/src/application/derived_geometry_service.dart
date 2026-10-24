@@ -521,6 +521,7 @@ final class DerivedGeometryService {
           ),
       ],
       stops: bundle.stops,
+      summary: bundle.summary,
     );
   }
 }

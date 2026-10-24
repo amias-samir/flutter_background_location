@@ -29,6 +29,8 @@ library;
 export 'src/application/tracking_client.dart';
 export 'src/application/derived_geometry_service.dart';
 export 'src/application/motion_evidence_reducer.dart';
+export 'src/application/route_detail_service.dart'
+    show TrackingSummaryController;
 export 'src/application/tracking_privacy_service.dart';
 export 'src/application/route_geometry_assembler.dart';
 export 'src/application/uncertainty_route_smoother.dart';
@@ -45,6 +47,7 @@ export 'src/domain/native_tracking_protocol.dart';
 export 'src/domain/permission_state.dart';
 export 'src/domain/route_geometry.dart';
 export 'src/domain/route_geometry_processor.dart';
+export 'src/domain/route_summary.dart';
 export 'src/domain/stop_site.dart' show StopSiteAnchor;
 export 'src/domain/track.dart';
 export 'src/domain/track_data_page.dart';

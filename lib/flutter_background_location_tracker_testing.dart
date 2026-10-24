@@ -1153,7 +1153,14 @@ final class FakeTrackerAdapter
   Future<TrackerStatus> runtimeState() async => TrackerStatus(
         lifecycle: _running ? TrackerLifecycle.tracking : TrackerLifecycle.idle,
         trackId: _trackId,
+        stepCount: stepCount,
+        captureGenerationId: stepCaptureGenerationId,
       );
+
+  /// Steps the fake native counter reports in [runtimeState], with the
+  /// capture generation they belong to; null reports no step counter.
+  int? stepCount;
+  String? stepCaptureGenerationId;
 
   @override
   Future<LocationSample?> lastLocation() async => _lastLocation;

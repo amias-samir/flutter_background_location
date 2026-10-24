@@ -57,11 +57,11 @@
   shielded by the rider's body (median accuracy 10 m against 2 m), and for
   about 15 minutes after a long stop in a valley it had only network-quality
   positions. Four changes make the results consistent where the package can:
-  - **One place, one stop.** Stop records that follow each other within
-    three minutes, centred within 75 m, are listed and exported as one stop:
+  - **One place, one stop.** A stay that begins within three minutes of the
+    previous stop's end, centred within 75 m of it, extends that stop:
     walking between a temple's shrines no longer splits a two-hour visit on a
-    precise phone. Stored records are unchanged, so routes recorded earlier
-    show merged stops too.
+    precise phone. The route database stores one row per visit (schema 17),
+    and the upgrade consolidates the rows stored per stay.
   - **Visible gaps mark holes in the route.** Under quality policy 3 and
     later, a single dropped fix is never a visible gap on its own, and
     rejected fixes that don't show travel and arrive while the device is at a
@@ -108,6 +108,46 @@
     Uploads are unchanged.
   - The example map draws recorded stops in both views (tap one for its
     times), and the Trip list shows the number of stops and the time stopped.
+- Every route detail is kept in the route database (schema 17), so hosts show
+  or upload it without computing anything.
+  - `RouteSummary` and `TripSummary` carry recording, moving, stopped and
+    paused time, the stop count, maximum and average moving speed, steps,
+    quality events, visible gaps and the cleaned distance. The owner-scoped
+    controllers implement the optional `TrackingSummaryController`
+    (`routeSummary`, `tripSummary`, `currentCleanedGeometry`), and
+    `TrackBundle.summary` and `TripBundle.summary` carry them. The new
+    `track_summaries` and `trip_summaries` tables are kept in the
+    transactions that change them and equal a full recompute. Custom
+    repositories can implement the optional `RouteSummaryRepository`.
+  - Ending a day or completing a Trip now closes a current stop; it stayed
+    open before.
+  - Completed routes recorded without live stop records (quality policies 1
+    and 2, or an explicit travel intent) get their stops once, derived from
+    the stored points with the cleaned view's stay rule, in the background
+    after the client opens and on first read (`RouteSummary.stopsSource`).
+  - Each stored gap keeps its visible decision: lifecycle breaks, or gaps of
+    at least 60 s or 150 m between accepted fixes, never a stop or pause.
+    `TrackingContinuityGap.isVisible` applies the same rule, so maps and
+    counts agree. Rejected-fix runs keep whether they are only stop evidence.
+  - Exports carry the summary: GeoJSON route properties, GPX `fbl:` metadata
+    extensions and KML `ExtendedData`. A derived-geometry export now reports
+    the derived line's distance and `geometrySource: derived:<run id>`; it
+    reported the raw ones.
+  - The example app counts nothing itself. Its Trip and route cards and map
+    header read the summaries, draw the stored stops and the gaps the
+    database marks visible, and show moving and stopped time and steps.
+- Steps are counted on every route, in every motion fusion mode: Android uses
+  the step counter sensor (batched, non-wake-up) with `ACTIVITY_RECOGNITION`
+  on Android 10 and later, and iOS the pedometer with Motion & Fitness. The
+  package never prompts for steps on its own; without the permission or a
+  step counter, steps stay null. Location events and native status carry
+  `stepCount`, the steps since the capture session started
+  (`LocationSample.stepCount`, `TrackerStatus.stepCount` with
+  `TrackerStatus.captureGenerationId`), each point keeps it
+  (`TrackPoint.stepCount`), and segments add each session once. Steps taken
+  after the newest fix count when the route pauses or completes. Native code
+  advertises the `step_count` capability. Steps are fitness data: a host
+  that uploads them must declare that in its own privacy disclosures.
 - `exportTrack` on the owner-scoped controllers now accepts
   `TrackGeometrySelection.derived` and writes the derived coordinates. It
   previously failed with `derived_geometry_requires_v2_export`.

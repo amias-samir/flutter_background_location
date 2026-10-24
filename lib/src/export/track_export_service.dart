@@ -19,6 +19,7 @@ import '../domain/tracking_error.dart';
 import '../storage/track_repository.dart';
 import 'export_diagnostics.dart';
 import 'export_stops.dart';
+import 'export_summary.dart';
 
 abstract interface class ExportFileWriter {
   Future<String> write({
@@ -321,7 +322,7 @@ final class TrackExportService {
     final features = <Map<String, Object?>>[
       <String, Object?>{
         'type': 'Feature',
-        'properties': _trackProperties(bundle.track, options, report),
+        'properties': _trackProperties(bundle, options, report),
         'geometry': _geoJsonRouteGeometry(lines),
       },
     ];
@@ -421,7 +422,8 @@ final class TrackExportService {
             builder.element(
               'Data',
               attributes: const <String, String>{'name': 'geometrySource'},
-              nest: () => builder.element('value', nest: 'raw'),
+              nest: () =>
+                  builder.element('value', nest: _geometrySource(options)),
             );
             builder.element(
               'Data',
@@ -431,6 +433,14 @@ final class TrackExportService {
                 nest: report.continuity.name,
               ),
             );
+            for (final MapEntry(:key, :value)
+                in routeSummaryFields(bundle.summary).entries) {
+              builder.element(
+                'Data',
+                attributes: <String, String>{'name': key},
+                nest: () => builder.element('value', nest: '$value'),
+              );
+            }
           });
           for (var index = 0; index < segmentPoints.length; index += 1) {
             final points = segmentPoints[index];
@@ -558,6 +568,14 @@ final class TrackExportService {
             nest: _formatTime(bundle.track.startedAt, options),
           );
           builder.element('desc', nest: report.continuity.name);
+          final summary = routeSummaryFields(bundle.summary);
+          if (summary.isNotEmpty) {
+            builder.element('extensions', nest: () {
+              for (final MapEntry(:key, :value) in summary.entries) {
+                builder.element('fbl:$key', nest: '$value');
+              }
+            });
+          }
         });
         if (options.includeStops) {
           // GPX 1.1 orders waypoints before tracks.
@@ -694,28 +712,47 @@ final class TrackExportService {
       point.longitude <= 180;
 
   static Map<String, Object?> _trackProperties(
-    Track track,
+    TrackBundle bundle,
     TrackExportOptions options,
     RouteGeometryReport report,
-  ) =>
-      <String, Object?>{
-        'trackId': track.id,
-        'routeId': track.routeId,
-        'startedAt': track.startedAt.toUtc().toIso8601String(),
-        'completedAt': track.endedAt?.toUtc().toIso8601String(),
-        'status': track.status.name,
-        'segmentCount': track.segmentCount,
-        'acceptedPointCount': track.acceptedPointCount,
-        'rejectedPointCount': track.rejectedPointCount,
-        'distanceMeters': track.totalDistanceMeters,
-        'geometrySource': 'raw',
-        'geometryContinuity': report.continuity.name,
-        'sourceSegmentCount': report.sourceSegmentCount,
-        'geometryPartCount': report.geometryPartCount,
-        'gapCount': report.gapCount,
-        'inferredConnectorCount': report.inferredConnectorCount,
-        'hasInferredConnectors': report.hasInferredConnectors,
+  ) {
+    final track = bundle.track;
+    return <String, Object?>{
+      'trackId': track.id,
+      'routeId': track.routeId,
+      'startedAt': track.startedAt.toUtc().toIso8601String(),
+      'completedAt': track.endedAt?.toUtc().toIso8601String(),
+      'status': track.status.name,
+      'segmentCount': track.segmentCount,
+      'acceptedPointCount': track.acceptedPointCount,
+      'rejectedPointCount': track.rejectedPointCount,
+      'distanceMeters': _distanceMeters(bundle, options),
+      'geometrySource': _geometrySource(options),
+      'geometryContinuity': report.continuity.name,
+      'sourceSegmentCount': report.sourceSegmentCount,
+      'geometryPartCount': report.geometryPartCount,
+      'gapCount': report.gapCount,
+      'inferredConnectorCount': report.inferredConnectorCount,
+      'hasInferredConnectors': report.hasInferredConnectors,
+      ...routeSummaryFields(bundle.summary),
+    };
+  }
+
+  /// `raw`, or `derived:<run-id>` for a derived-geometry export.
+  static String _geometrySource(TrackExportOptions options) =>
+      switch (options.geometry) {
+        DerivedTrackGeometry(:final runId) => 'derived:$runId',
+        _ => 'raw',
       };
+
+  /// The measured distance, or the derived geometry's own length.
+  static double _distanceMeters(
+    TrackBundle bundle,
+    TrackExportOptions options,
+  ) =>
+      options.geometry is DerivedTrackGeometry
+          ? acceptedPathMeters(bundle)
+          : bundle.track.totalDistanceMeters;
 
   static Map<String, Object?> _pointProperties(
     TrackPoint point,

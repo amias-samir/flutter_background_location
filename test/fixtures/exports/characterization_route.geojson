@@ -19,7 +19,15 @@
         "geometryPartCount": 2,
         "gapCount": 1,
         "inferredConnectorCount": 0,
-        "hasInferredConnectors": false
+        "hasInferredConnectors": false,
+        "recordingSeconds": 120,
+        "movingSeconds": 120,
+        "stoppedSeconds": 0,
+        "pausedSeconds": 540,
+        "stopCount": 0,
+        "averageMovingSpeedMetersPerSecond": 0.0,
+        "qualityEventCount": 1,
+        "visibleGapCount": 0
       },
       "geometry": {
         "type": "MultiLineString",

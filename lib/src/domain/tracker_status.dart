@@ -1,3 +1,4 @@
+import 'location_sample.dart';
 import 'motion_evidence.dart';
 
 /// Native capture lifecycle independent of the Flutter widget lifecycle.
@@ -57,6 +58,8 @@ final class TrackerStatus {
     this.samplingProfile = SamplingProfile.moving,
     this.motionEvidence,
     this.profileTransitionReason,
+    this.stepCount,
+    this.captureGenerationId,
   });
 
   /// Current native capture lifecycle.
@@ -85,6 +88,14 @@ final class TrackerStatus {
   /// or `sustained_displacement`, when the native side reports one. Older
   /// natives send none.
   final String? profileTransitionReason;
+
+  /// Steps the native step counter counted in the current capture
+  /// generation ([captureGenerationId]); null without a step counter, its
+  /// permission, or a native build that reports it.
+  final int? stepCount;
+
+  /// The native capture generation the status describes.
+  final String? captureGenerationId;
 
   /// Decodes a native status-channel payload.
   factory TrackerStatus.fromMap(Map<Object?, Object?> map) {
@@ -126,6 +137,11 @@ final class TrackerStatus {
           : null,
       profileTransitionReason: switch (map['profileTransitionReason']) {
         final String reason when reason.trim().isNotEmpty => reason.trim(),
+        _ => null,
+      },
+      stepCount: stepCountFromPayload(map['stepCount']),
+      captureGenerationId: switch (map['captureGenerationId']) {
+        final String id when id.isNotEmpty => id,
         _ => null,
       },
     );

@@ -230,7 +230,7 @@ void main() {
         'track_stops',
       ]);
       final raw = await openRaw('fresh');
-      expect(await raw.getVersion(), 16);
+      expect(await raw.getVersion(), 17);
       await raw.close();
     });
 

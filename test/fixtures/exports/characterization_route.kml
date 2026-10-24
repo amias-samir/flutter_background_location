@@ -9,6 +9,30 @@
       <Data name="geometryContinuity">
         <value>preserveEvidenceSegments</value>
       </Data>
+      <Data name="recordingSeconds">
+        <value>120</value>
+      </Data>
+      <Data name="movingSeconds">
+        <value>120</value>
+      </Data>
+      <Data name="stoppedSeconds">
+        <value>0</value>
+      </Data>
+      <Data name="pausedSeconds">
+        <value>540</value>
+      </Data>
+      <Data name="stopCount">
+        <value>0</value>
+      </Data>
+      <Data name="averageMovingSpeedMetersPerSecond">
+        <value>0.0</value>
+      </Data>
+      <Data name="qualityEventCount">
+        <value>1</value>
+      </Data>
+      <Data name="visibleGapCount">
+        <value>0</value>
+      </Data>
     </ExtendedData>
     <Placemark>
       <name>Segment 1</name>

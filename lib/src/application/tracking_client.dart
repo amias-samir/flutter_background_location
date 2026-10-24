@@ -25,6 +25,7 @@ import '../domain/track_query.dart';
 import '../domain/trip.dart';
 import '../domain/trip_query.dart';
 import '../domain/track_geodesy.dart';
+import '../domain/route_summary.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
@@ -37,6 +38,7 @@ import '../domain/tracking_session_snapshot.dart';
 import '../domain/tracking_settings.dart';
 import '../domain/tracking_start.dart';
 import '../export/track_export_service.dart';
+import 'route_detail_service.dart';
 import '../export/track_export_v2_service.dart';
 import '../export/trip_export_service.dart';
 import '../platform/native_tracker_adapter.dart';
@@ -278,7 +280,7 @@ class TrackingClient implements Tracking {
       await client.checkReadiness();
       await client.healthSnapshot();
       await client._publishSessionSnapshot();
-      return _OwnerBoundTrackingController(client, owner);
+      return _OwnerBoundTrackingController(client, owner)..scheduleBackfill();
     } on Object {
       try {
         await client.dispose();
@@ -1141,6 +1143,7 @@ class TrackingClient implements Tracking {
       _acceptingLocations = false;
       try {
         await _bindNativeCommandLease(track.id);
+        await _recordFinalSteps(track.id);
         await _tracker.pause(trackId: track.id);
         await _waitUntilNativeStopped();
       } catch (_) {
@@ -1497,6 +1500,7 @@ class TrackingClient implements Tracking {
         await _drainPendingNativeLocations(trackId: track.id);
         await _bindNativeCommandLease(track.id);
         if (stage == TrackingConfigurationUpdateStage.pending) {
+          await _recordFinalSteps(track.id);
           await _tracker.pause(trackId: track.id);
           await epochStore.markConfigurationUpdateStage(
             operationId: operation.id,
@@ -1636,6 +1640,7 @@ class TrackingClient implements Tracking {
       if (nativeRunning || nativeTrackId == track.id) {
         try {
           await _bindNativeCommandLease(track.id);
+          await _recordFinalSteps(track.id);
           await _tracker.stop(trackId: track.id, reason: command.reason);
           await _waitUntilNativeStopped();
         } catch (_) {
@@ -1723,6 +1728,7 @@ class TrackingClient implements Tracking {
     _acceptingLocations = false;
     if (nativeRunning) {
       await _bindNativeCommandLease(command.trackId);
+      await _recordFinalSteps(command.trackId);
       if (command.type == TrackCommandType.pause) {
         await _tracker.pause(trackId: command.trackId);
       } else {
@@ -1902,6 +1908,7 @@ class TrackingClient implements Tracking {
     _acceptingLocations = false;
     if (nativeRunning || nativeState.trackId == track.id) {
       await _bindNativeCommandLease(track.id);
+      await _recordFinalSteps(track.id);
       await _tracker.stop(
         trackId: track.id,
         reason: operation.reason ?? 'trip_operation_recovery',
@@ -3554,6 +3561,38 @@ class TrackingClient implements Tracking {
     await _pointTail;
   }
 
+  /// Records the native step count from status before capture stops, so the
+  /// steps after the route's newest fix count. Fixes journaled later carry
+  /// lower counts and add nothing. Best effort: without a count, or for
+  /// another generation than the newest fix's, nothing is recorded.
+  Future<void> _recordFinalSteps(String trackId) async {
+    final store = _store;
+    if (store is! RouteSummaryRepository) return;
+    final TrackerStatus status;
+    try {
+      status = await _tracker.runtimeState();
+    } on Object {
+      return;
+    }
+    final steps = status.stepCount;
+    if (steps == null || status.trackId != trackId) return;
+    final newest = store is ContinuityTrackRepository
+        ? await (store as ContinuityTrackRepository).findLastRawPoint(trackId)
+        : null;
+    final generation = status.captureGenerationId;
+    if (newest != null &&
+        generation != null &&
+        newest.captureGenerationId != null &&
+        newest.captureGenerationId != generation) {
+      return;
+    }
+    await (store as RouteSummaryRepository).recordStepCount(
+      trackId,
+      captureGenerationId: generation ?? newest?.captureGenerationId,
+      stepCount: steps,
+    );
+  }
+
   Future<void> _waitUntilNativeStopped() async {
     for (var attempt = 0; attempt < 100; attempt += 1) {
       if (!await _tracker.isRunning()) return;
@@ -3875,7 +3914,8 @@ final class _OwnerBoundTrackingController
         TrackingConfigurationController,
         TrackingGeometryController,
         TrackingQualityController,
-        TrackingStopController {
+        TrackingStopController,
+        TrackingSummaryController {
   _OwnerBoundTrackingController(this._client, this._owner) {
     _sessionSubscription = _client.sessionStream.listen(
       (snapshot) {
@@ -3896,6 +3936,7 @@ final class _OwnerBoundTrackingController
   final StreamController<TrackHistoryEvent> _history =
       StreamController<TrackHistoryEvent>.broadcast();
   TrackingSessionSnapshot? _snapshot;
+  Future<void>? _backfill;
   String? _foreignConflictTrackId;
   String? _foreignConflictToken;
 
@@ -4648,6 +4689,7 @@ final class _OwnerBoundTrackingController
   }) async {
     final track = await _currentOwnedTrack();
     await _client.completeTrack(trackId: track.id, reason: reason);
+    scheduleBackfill();
     final updated = (await _client.getTrack(track.id))!;
     _history.add(TrackHistoryEvent(
       kind: TrackHistoryChangeKind.updated,
@@ -4749,6 +4791,8 @@ final class _OwnerBoundTrackingController
   @override
   Future<TrackBundle> loadTrackBundle(String trackId) async {
     await _requireOwnedTrack(trackId);
+    await _client.initialize();
+    await _details.ensureStops(trackId);
     return _client.loadTrackBundle(trackId);
   }
 
@@ -4758,7 +4802,71 @@ final class _OwnerBoundTrackingController
     await _client.initialize();
     final store = _client._store;
     if (store is! TrackStopRepository) return const <TrackStop>[];
+    await _details.ensureStops(trackId);
     return (store as TrackStopRepository).listTrackStops(trackId);
+  }
+
+  RouteDetailService get _details => RouteDetailService(_client._store);
+
+  /// Derives, in the background, the stops of completed routes recorded
+  /// without live stop records. A failed pass is retried on the next open,
+  /// and reads derive a route's stops before returning them.
+  void scheduleBackfill() {
+    _backfill ??= _details
+        .backfillStops()
+        .catchError((Object _) {})
+        .whenComplete(() => _backfill = null);
+  }
+
+  RouteSummaryRepository _summaryStore() {
+    final store = _client._store;
+    if (store is! RouteSummaryRepository) {
+      throw const TrackingStorageException(
+        code: 'capability_unsupported',
+        message: 'This repository does not keep route summaries.',
+      );
+    }
+    return store as RouteSummaryRepository;
+  }
+
+  @override
+  Future<RouteSummary> routeSummary(String trackId) async {
+    await _requireOwnedTrack(trackId);
+    await _client.initialize();
+    final store = _summaryStore();
+    await _details.ensureStops(trackId);
+    final summary = await store.routeSummary(trackId);
+    if (summary == null) {
+      throw const TrackingOwnershipException(
+        code: 'track_not_found_in_owner_scope',
+        message: 'The route is not available in the current owner scope.',
+      );
+    }
+    return summary;
+  }
+
+  @override
+  Future<TripSummary> tripSummary(String tripId) async {
+    final bundle = await loadTripBundle(tripId);
+    final store = _summaryStore();
+    for (final leg in bundle.legs) {
+      await _details.ensureStops(leg.trackId);
+    }
+    final summary = await store.tripSummary(tripId);
+    if (summary == null) {
+      throw const TrackingOwnershipException(
+        code: 'trip_not_found_in_owner_scope',
+        message: 'The Trip is not available in the current owner scope.',
+      );
+    }
+    return summary;
+  }
+
+  @override
+  Future<DerivedGeometryRun> currentCleanedGeometry(String trackId) async {
+    await _requireOwnedTrack(trackId);
+    await _client.initialize();
+    return _details.currentCleanedGeometry(_owner, trackId);
   }
 
   @override
@@ -4943,6 +5051,7 @@ final class _OwnerBoundTrackingController
 
   @override
   Future<void> dispose() async {
+    await _backfill;
     await _sessionSubscription.cancel();
     await _history.close();
     if (!_sessions.isClosed) await _sessions.close();

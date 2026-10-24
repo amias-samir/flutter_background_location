@@ -4,6 +4,7 @@ import '../application/route_geometry_assembler.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
 import '../domain/route_geometry.dart';
+import '../domain/route_summary.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
 import '../domain/trip.dart';
@@ -155,10 +156,37 @@ final class TripExportService {
       currentSegmentId: null,
       config: firstTrack.config,
     );
+    final totals = tripBundle.summary;
     final bundle = TrackBundle(
       track: syntheticTrack,
       segments: combinedSegments,
       stops: combinedStops..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
+      // The Trip's stored totals, written like a route's summary.
+      summary: totals == null
+          ? null
+          : RouteSummary(
+              trackId: trip.id,
+              startedAt: totals.startedAt,
+              endedAt: totals.endedAt,
+              firstFixAt: totals.firstFixAt,
+              lastFixAt: totals.lastFixAt,
+              distanceMeters: totals.distanceMeters,
+              cleanedDistanceMeters: totals.cleanedDistanceMeters,
+              acceptedPointCount: totals.acceptedPointCount,
+              rejectedPointCount: totals.rejectedPointCount,
+              segmentCount: totals.segmentCount,
+              recording: totals.recording,
+              moving: totals.moving,
+              stopped: totals.stopped,
+              stopCount: totals.stopCount,
+              maxSpeedMetersPerSecond: totals.maxSpeedMetersPerSecond,
+              stepCount: totals.stepCount,
+              qualityEventCount: totals.qualityEventCount,
+              visibleGapCount: totals.visibleGapCount,
+              stopEvidenceRunCount: totals.stopEvidenceRunCount,
+              stopsSource: TrackStopSource.recorded,
+              updatedAt: totals.updatedAt,
+            ),
     );
     final trackArtifact = TrackExportService(
       repository: repository,

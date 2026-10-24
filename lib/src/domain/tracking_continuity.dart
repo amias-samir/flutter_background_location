@@ -265,6 +265,42 @@ final class TrackingContinuityGap {
 
   static Duration? _durationFromMilliseconds(Object? value) =>
       value == null ? null : Duration(milliseconds: (value as num).toInt());
+
+  /// Whether a map should mark this gap as a hole in the route; the route
+  /// database stores the same decision with each gap.
+  bool get isVisible => visibleFor(
+        cause: cause,
+        providerGap: providerGap,
+        straightLineDistanceMeters: straightLineDistanceMeters,
+      );
+
+  /// Lifecycle breaks are holes in a route, and so are gaps of at least
+  /// [visibleProviderGap] or [visibleStraightLineMeters] between accepted
+  /// fixes. A gap across a stop or pause
+  /// ([TrackingGapCause.expectedStationarySuppression]) is not: the device
+  /// stayed where it was.
+  static bool visibleFor({
+    required TrackingGapCause cause,
+    required Duration? providerGap,
+    required double? straightLineDistanceMeters,
+  }) {
+    if (cause == TrackingGapCause.expectedStationarySuppression) return false;
+    if (_lifecycleCauses.contains(cause)) return true;
+    return (providerGap ?? Duration.zero) >= visibleProviderGap ||
+        (straightLineDistanceMeters ?? 0) >= visibleStraightLineMeters;
+  }
+
+  /// See [visibleFor].
+  static const visibleProviderGap = Duration(seconds: 60);
+  static const double visibleStraightLineMeters = 150;
+
+  static const _lifecycleCauses = <TrackingGapCause>{
+    TrackingGapCause.explicitPause,
+    TrackingGapCause.nativeInterruption,
+    TrackingGapCause.processRestart,
+    TrackingGapCause.permissionOrServiceLoss,
+    TrackingGapCause.overnightBoundary,
+  };
 }
 
 /// Pure classifier that keeps quality evidence separate from route topology.

@@ -177,6 +177,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
   private static let continuityHealthPersistInterval: TimeInterval = 15
   private var lastMotionEvidence: [String: Any]?
+  private let stepCounter = StepCounter()
+  private var lastStepCounterAttemptAt = Date.distantPast
+  private static let stepCounterRetryInterval: TimeInterval = 60
   private lazy var motionSensorFusion = MotionSensorFusion { [weak self] evidence in
     DispatchQueue.main.async {
       guard let self, self.lifecycle == .tracking || self.lifecycle == .starting else { return }
@@ -470,6 +473,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     startBackgroundActivitySessionIfNeeded()
     startMotionUpdatesIfPossible()
     motionSensorFusion.start(configuration: configuration)
+    startStepCounter()
     startConfiguredLocationUpdates()
     // Start/Continue should actively acquire a fresh fix instead of waiting
     // for a cached or deferred standard-location callback.
@@ -589,6 +593,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       }
       startConfiguredLocationUpdates()
       motionSensorFusion.start(configuration: configuration)
+      startStepCounter()
     }
     persistState()
     emitStatus(message: "configuration_updated")
@@ -636,6 +641,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
     if let nativeSessionStartedAt = captureGeneration.startedAt {
       state["nativeSessionStartedAt"] = epochMilliseconds(nativeSessionStartedAt)
+    }
+    if let steps = stepCounter.steps(for: captureGeneration.id) {
+      state["stepCount"] = steps
     }
     if let lastProviderCallbackAt {
       state["lastProviderCallbackAt"] = epochMilliseconds(lastProviderCallbackAt)
@@ -914,6 +922,25 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
   }
 
+  /// Counts the capture generation's steps when the device and Motion &
+  /// Fitness allow.
+  private func startStepCounter(at now: Date = Date()) {
+    guard lifecycle == .tracking || lifecycle == .starting,
+      let generationId = captureGeneration.id,
+      let startedAt = captureGeneration.startedAt
+    else {
+      return
+    }
+    lastStepCounterAttemptAt = now
+    stepCounter.start(generationId: generationId, startedAt: startedAt)
+  }
+
+  /// Reads the step count up to now, then calls [then] on the main thread,
+  /// so a state read before a pause has every step.
+  func flushStepCount(then: @escaping () -> Void) {
+    stepCounter.flush(then: then)
+  }
+
   private func requestMotionAuthorizationIfPossible() {
     guard CMMotionActivityManager.isActivityAvailable(),
       CMMotionActivityManager.authorizationStatus() == .notDetermined,
@@ -948,6 +975,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     motionManager?.stopActivityUpdates()
     motionManager = nil
     motionSensorFusion.stop()
+    stepCounter.stop()
     lastMotionEvidence = nil
     stationaryTransitionWorkItem?.cancel()
     stationaryTransitionWorkItem = nil
@@ -1011,6 +1039,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       startBackgroundActivitySessionIfNeeded()
       startMotionUpdatesIfPossible()
       motionSensorFusion.start(configuration: configuration)
+      startStepCounter()
       startConfiguredLocationUpdates()
       lifecycle = .tracking
       recoveredFromTermination = true
@@ -1492,6 +1521,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     if let nativeSessionStartedAt = captureGeneration.startedAt {
       event["nativeSessionStartedAt"] = epochMilliseconds(nativeSessionStartedAt)
     }
+    if let steps = stepCounter.steps(for: captureGeneration.id) {
+      event["stepCount"] = steps
+    }
     // Core Location marks unknown values with negative sentinels; send only
     // valid ones (`normalized_location_validity`). A negative vertical
     // accuracy means the altitude itself is invalid.
@@ -1880,6 +1912,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     let now = Date()
     lastProviderCallbackAt = now
     persistContinuityHealth(throttled: true)
+    // Motion & Fitness granted while capturing starts the count.
+    if !stepCounter.isCounting(captureGeneration.id),
+      now.timeIntervalSince(lastStepCounterAttemptAt) >= Self.stepCounterRetryInterval
+    {
+      startStepCounter(at: now)
+    }
     // Only a fix captured after the request proves the probe; a cached or
     // queued older fix does not.
     if let requestedAt = lastProbeRequestedAt,

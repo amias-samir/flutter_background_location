@@ -153,7 +153,9 @@ class FlutterBackgroundLocationPlugin :
             "stopTracking" -> executeLegacyCommand(result) { stopTracking(call, result) }
             "updateConfig" -> executeLegacyCommand(result) { updateConfig(call, result) }
             "isTracking" -> result.success(stateStore.isActuallyTracking())
-            "getState" -> result.success(stateStore.statusMap())
+            "getState" -> LocationTrackingService.flushStepCount {
+                result.success(stateStore.statusMap())
+            }
             "getLastLocation" -> result.success(TrackingEventBus.lastLocation)
             "getPendingLocations" -> pendingLocations(result)
             "getPendingLocationsPage" -> pendingLocationsPage(call, result)
@@ -1383,7 +1385,7 @@ class FlutterBackgroundLocationPlugin :
 
     private fun protocolInfo(): Map<String, Any?> = linkedMapOf(
         "version" to 2,
-        "capabilityCodes" to listOf(
+        "capabilityCodes" to listOfNotNull(
             "location_settings",
             "battery_optimization_settings",
             "shared_pending_location_coordinator",
@@ -1403,6 +1405,7 @@ class FlutterBackgroundLocationPlugin :
             "listen_replay_control",
             "status_fix_echo_control",
             "stationary_policy_v2",
+            "step_count".takeIf { StepCounter.isAvailable(applicationContext) },
         ),
     )
 

@@ -4,6 +4,16 @@
     <name>Track characterization-route</name>
     <time>2026-07-20T08:00:00.000Z</time>
     <desc>preserveEvidenceSegments</desc>
+    <extensions>
+      <fbl:recordingSeconds>120</fbl:recordingSeconds>
+      <fbl:movingSeconds>120</fbl:movingSeconds>
+      <fbl:stoppedSeconds>0</fbl:stoppedSeconds>
+      <fbl:pausedSeconds>540</fbl:pausedSeconds>
+      <fbl:stopCount>0</fbl:stopCount>
+      <fbl:averageMovingSpeedMetersPerSecond>0.0</fbl:averageMovingSpeedMetersPerSecond>
+      <fbl:qualityEventCount>1</fbl:qualityEventCount>
+      <fbl:visibleGapCount>0</fbl:visibleGapCount>
+    </extensions>
   </metadata>
   <trk>
     <name>Track characterization-route</name>

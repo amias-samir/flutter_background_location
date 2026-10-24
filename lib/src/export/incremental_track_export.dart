@@ -10,6 +10,8 @@ import '../domain/export_models.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/activity_snapshot.dart';
 import '../domain/route_geometry.dart';
+import '../domain/route_summary.dart';
+import '../domain/track_geodesy.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
@@ -22,6 +24,7 @@ import '../storage/track_repository.dart';
 import 'track_export_service.dart';
 import 'export_diagnostics.dart';
 import 'export_stops.dart';
+import 'export_summary.dart';
 
 /// Internal descriptor used by the S1 incremental sink foundation.
 ///
@@ -219,6 +222,10 @@ final class IncrementalTrackExportService {
         stops: options.includeStops && repository is TrackStopRepository
             ? await (repository as TrackStopRepository).listTrackStops(track.id)
             : const <TrackStop>[],
+        summary: repository is RouteSummaryRepository
+            ? await (repository as RouteSummaryRepository)
+                .routeSummary(track.id)
+            : null,
       );
       final counts = switch (format) {
         TrackExportFormat.geoJson => await encoder.writeGeoJson(),
@@ -480,6 +487,7 @@ final class _PagedTrackEncoder {
     required Iterable<TrackingContinuityGap> gaps,
     required this.safeLegacyAfterSegmentIds,
     Iterable<TrackStop> stops = const <TrackStop>[],
+    this.summary,
   })  : gaps = List<TrackingContinuityGap>.unmodifiable(gaps),
         stops = List<TrackStop>.unmodifiable(stops);
 
@@ -497,6 +505,9 @@ final class _PagedTrackEncoder {
 
   /// Recorded stops to write, already filtered by [TrackExportOptions].
   final List<TrackStop> stops;
+
+  /// The route's stored summary, written with the route's metadata.
+  final RouteSummary? summary;
   static const RouteGeometryAssembler _geometryAssembler =
       RouteGeometryAssembler();
 
@@ -514,7 +525,7 @@ final class _PagedTrackEncoder {
     await operation.addChunk(
       sink,
       '{"type":"FeatureCollection","features":['
-      '{"type":"Feature","properties":${jsonEncode(_trackProperties(track, options, plan))},'
+      '{"type":"Feature","properties":${jsonEncode(_trackProperties(track, options, plan, summary))},'
       '"geometry":',
     );
     if (plan.linePartCount == 0) {
@@ -606,7 +617,9 @@ final class _PagedTrackEncoder {
       '${_xmlText(_geometryLabel(options.geometry))}'
       '</value></Data><Data name="geometryContinuity"><value>'
       '${options.geometryContinuity.name}'
-      '</value></Data></ExtendedData>',
+      '</value></Data>'
+      '${routeSummaryFields(summary).entries.map((entry) => '<Data name="${entry.key}"><value>${_xmlText('${entry.value}')}</value></Data>').join()}'
+      '</ExtendedData>',
     );
     for (final part in plan.parts) {
       final line = part.validGeometryCoordinates >= 2;
@@ -693,6 +706,7 @@ final class _PagedTrackEncoder {
       'http://www.topografix.com/GPX/1/1/gpx.xsd">'
       '<metadata><name>$name</name><time>${_formatTime(track.startedAt, options)}</time>'
       '<desc>${options.geometryContinuity.name}</desc>'
+      '${_gpxSummaryExtensions(summary)}'
       '</metadata>',
     );
     // GPX 1.1 orders waypoints before tracks.
@@ -832,6 +846,8 @@ final class _PagedTrackEncoder {
     var validGeometryCoordinates = 0;
     TrackPoint? firstGeometryPoint;
     TrackPoint? lastGeometryPoint;
+    TrackPoint? previousValid;
+    var pathMeters = 0.0;
     await _walkPointPages(segmentId, (points) async {
       for (final point in points) {
         if (_isSelected(point)) selectedPoints += 1;
@@ -839,7 +855,18 @@ final class _PagedTrackEncoder {
         geometryPoints += 1;
         firstGeometryPoint ??= point;
         lastGeometryPoint = point;
-        if (_hasValidCoordinate(point)) validGeometryCoordinates += 1;
+        if (!_hasValidCoordinate(point)) continue;
+        validGeometryCoordinates += 1;
+        final previous = previousValid;
+        if (previous != null) {
+          pathMeters += TrackGeodesy.sphericalHaversineMeters(
+            previous.latitude,
+            previous.longitude,
+            point.latitude,
+            point.longitude,
+          );
+        }
+        previousValid = point;
       }
     });
     return _SegmentScan(
@@ -848,6 +875,7 @@ final class _PagedTrackEncoder {
       validGeometryCoordinates: validGeometryCoordinates,
       firstGeometryPoint: firstGeometryPoint,
       lastGeometryPoint: lastGeometryPoint,
+      pathMeters: pathMeters,
     );
   }
 
@@ -1029,7 +1057,9 @@ final class _SegmentScan {
     required this.validGeometryCoordinates,
     required this.firstGeometryPoint,
     required this.lastGeometryPoint,
+    this.pathMeters = 0,
   });
+  final double pathMeters;
   final int selectedPoints;
   final int geometryPoints;
   final int validGeometryCoordinates;
@@ -1064,7 +1094,11 @@ final class _GeometryPlan {
     required Iterable<InferredRouteConnector> connectors,
     required this.selectedPoints,
     required this.gapCount,
-  })  : sources = List<_GeometrySourceScan>.unmodifiable(sources),
+  })  : pathMeters = sources.fold(
+          0.0,
+          (total, source) => total + source.scan.pathMeters,
+        ),
+        sources = List<_GeometrySourceScan>.unmodifiable(sources),
         parts = List<_GeometryPartScan>.unmodifiable(parts),
         connectors = List<InferredRouteConnector>.unmodifiable(connectors);
 
@@ -1073,6 +1107,10 @@ final class _GeometryPlan {
   final List<InferredRouteConnector> connectors;
   final int selectedPoints;
   final int gapCount;
+
+  /// Length of the accepted points, segment by segment, in the exported
+  /// coordinates.
+  final double pathMeters;
 
   int get sourceSegmentCount => sources.length;
   int get linePartCount =>
@@ -1095,6 +1133,7 @@ Map<String, Object?> _trackProperties(
   Track track,
   TrackExportOptions options,
   _GeometryPlan plan,
+  RouteSummary? summary,
 ) =>
     <String, Object?>{
       'trackId': track.id,
@@ -1105,7 +1144,10 @@ Map<String, Object?> _trackProperties(
       'segmentCount': track.segmentCount,
       'acceptedPointCount': track.acceptedPointCount,
       'rejectedPointCount': track.rejectedPointCount,
-      'distanceMeters': track.totalDistanceMeters,
+      // A derived export reports the derived geometry's own length.
+      'distanceMeters': options.geometry is DerivedTrackGeometry
+          ? plan.pathMeters
+          : track.totalDistanceMeters,
       'geometrySource': _geometryLabel(options.geometry),
       'geometryContinuity': options.geometryContinuity.name,
       'sourceSegmentCount': plan.sourceSegmentCount,
@@ -1113,7 +1155,20 @@ Map<String, Object?> _trackProperties(
       'gapCount': plan.gapCount,
       'inferredConnectorCount': plan.connectors.length,
       'hasInferredConnectors': plan.connectors.isNotEmpty,
+      ...routeSummaryFields(summary),
     };
+
+/// The route summary as GPX `fbl:` metadata extensions, or nothing.
+String _gpxSummaryExtensions(RouteSummary? summary) {
+  final fields = routeSummaryFields(summary);
+  if (fields.isEmpty) return '';
+  final buffer = StringBuffer('<extensions>');
+  for (final MapEntry(:key, :value) in fields.entries) {
+    buffer.write('<fbl:$key>${_xmlText('$value')}</fbl:$key>');
+  }
+  buffer.write('</extensions>');
+  return buffer.toString();
+}
 
 Map<String, Object?> _geoJsonConnectorFeature(
   InferredRouteConnector connector,

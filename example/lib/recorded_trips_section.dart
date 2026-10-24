@@ -3,26 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
+import 'route_totals.dart';
+
 final class RecordedTripSummary {
-  const RecordedTripSummary({
-    required this.trip,
-    required this.segmentCount,
-    required this.gapCount,
-    this.qualityEventCount = 0,
-    this.visibleGapCount = 0,
-    this.stopCount = 0,
-    this.stoppedFor = Duration.zero,
-  });
+  const RecordedTripSummary({required this.trip, this.totals});
 
   final Trip trip;
-  final int segmentCount;
-  final int gapCount;
-  final int qualityEventCount;
-  final int visibleGapCount;
 
-  /// Stops the Trip recorded, and how long they lasted together.
-  final int stopCount;
-  final Duration stoppedFor;
+  /// The Trip's stored totals; null when the facade keeps none.
+  final RouteTotals? totals;
 }
 
 enum RecordedTripAction {
@@ -192,28 +181,38 @@ class RecordedTripsSection extends StatelessWidget {
               ),
               _TripDetail(
                 icon: Icons.straighten_rounded,
-                label:
-                    '${(trip.measuredDistanceMeters / 1000).toStringAsFixed(2)} km',
+                label: kilometres(trip.measuredDistanceMeters),
               ),
-              _TripDetail(
-                icon: Icons.polyline_outlined,
-                label: '${summary.segmentCount} segment(s)',
-              ),
-              if (summary.stopCount > 0)
+              if (summary.totals case final totals?) ...<Widget>[
                 _TripDetail(
-                  icon: Icons.local_parking_rounded,
-                  label:
-                      '${summary.stopCount} stop(s) • '
-                      '${_stopped(summary.stoppedFor)}',
+                  icon: Icons.polyline_outlined,
+                  label: '${totals.segmentCount} segment(s)',
                 ),
-              _TripDetail(
-                icon: Icons.warning_amber_rounded,
-                label: '${summary.qualityEventCount} quality event(s)',
-              ),
-              _TripDetail(
-                icon: Icons.broken_image_outlined,
-                label: '${summary.visibleGapCount} visible gap(s)',
-              ),
+                _TripDetail(
+                  icon: Icons.timer_outlined,
+                  label: 'Moving ${hoursMinutes(totals.moving)}',
+                ),
+                if (totals.stopCount > 0)
+                  _TripDetail(
+                    icon: Icons.local_parking_rounded,
+                    label:
+                        '${totals.stopCount} stop(s) • '
+                        '${hoursMinutes(totals.stopped)}',
+                  ),
+                if (totals.stepCount case final steps?)
+                  _TripDetail(
+                    icon: Icons.directions_walk_rounded,
+                    label: '$steps steps',
+                  ),
+                _TripDetail(
+                  icon: Icons.warning_amber_rounded,
+                  label: '${totals.qualityEventCount} quality event(s)',
+                ),
+                _TripDetail(
+                  icon: Icons.broken_image_outlined,
+                  label: '${totals.visibleGapCount} visible gap(s)',
+                ),
+              ],
             ],
           ),
         ),
@@ -278,10 +277,6 @@ class RecordedTripsSection extends StatelessWidget {
       ),
     );
   }
-
-  static String _stopped(Duration duration) => duration.inMinutes >= 60
-      ? '${duration.inHours} h ${duration.inMinutes % 60} min'
-      : '${duration.inMinutes} min';
 
   static IconData _statusIcon(TripStatus status) => switch (status) {
     TripStatus.active => Icons.navigation_rounded,

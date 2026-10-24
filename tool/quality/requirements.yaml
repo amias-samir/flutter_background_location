@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 16
+  route_database_schema: 17
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
@@ -1086,10 +1086,20 @@ work_packages:
       - test/stop_hold_pipeline_test.dart
   - id: LBO-28
     phase: LBO
-    title: Stop records in storage, API, exports and the example map
-    release_gate: schema 16 stores each stop atomically with the fix that opens, extends, closes or records it, survives restarts, upgrades from schema 15 and reopens; stops are listed owner-scoped per route and per Trip; GeoJSON, GPX and KML exports carry stops by default in the materialized, streamed and Trip exports; derived-geometry exports work through the facade; uploads are unchanged
+    title: Stop records and every route detail in storage, API, exports and the example map
+    release_gate: schema 16 stores each stop atomically with the fix that opens, extends, closes or records it, survives restarts, upgrades from schema 15 and reopens; stops are listed owner-scoped per route and per Trip; GeoJSON, GPX and KML exports carry stops by default in the materialized, streamed and Trip exports; derived-geometry exports work through the facade and report the derived distance; uploads are unchanged. Schema 17 stores one stop row per visit (merged as written, older rows consolidated on upgrade), closes a current stop when a day or Trip ends, derives stops once for completed routes recorded without stop records, stores visible-gap and stop-evidence decisions, and keeps route and Trip summaries in the transactions that change them, equal to a full recompute; exports carry the summary; the example app counts nothing itself
     required_before: stop records beyond the example app
     evidence:
+      - lib/src/domain/route_summary.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/application/route_detail_service.dart
+      - lib/src/domain/tracking_continuity.dart
+      - lib/src/export/export_summary.dart
+      - test/route_summary_test.dart
+      - test/route_detail_service_test.dart
+      - test/characterization_fixtures_test.dart
+      - example/lib/route_totals.dart
+      - example/lib/recorded_tracks_section.dart
       - lib/src/domain/track_stop.dart
       - lib/src/storage/track_repository.dart
       - lib/src/storage/sqlite_track_repository.dart
@@ -1133,6 +1143,25 @@ work_packages:
       - test/turn_capture_fixture_test.dart
       - android/src/test/kotlin/com/samir/flutter_background_location/TurnCaptureSamplerTest.kt
       - example/ios/RunnerTests/TurnCaptureSamplerTests.swift
+  - id: LBO-30
+    phase: LBO
+    title: Steps counted on every route
+    release_gate: on a walk and a ride the route's steps are within 5 percent of the phone's own step count for the same span on Android and iOS, a pause or a completed route keeps every step taken before it, a new capture generation adds its own count once, and with the activity or Motion & Fitness permission denied steps stay unmeasured; the step counter adds no measurable battery drain to the field re-test
+    required_before: showing or uploading step counts beyond the example app
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/StepCounter.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/StepCounter.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+      - lib/src/domain/location_sample.dart
+      - lib/src/domain/tracker_status.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/application/tracking_client.dart
+      - test/step_count_test.dart
+      - android/src/test/kotlin/com/samir/flutter_background_location/StepCountSessionTest.kt
+      - example/ios/RunnerTests/StepCounterTests.swift
   - id: LBO-13B
     phase: LBO
     title: Stop-aware route cleaning version 2 (stays at a place, from held evidence too)

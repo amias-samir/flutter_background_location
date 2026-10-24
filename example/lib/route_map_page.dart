@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
+import 'route_totals.dart';
+
 class TrackMapPage extends StatefulWidget {
   const TrackMapPage({super.key, required this.tracking, required this.track});
 
@@ -21,24 +23,33 @@ class _TrackMapPageState extends State<TrackMapPage> {
 
   Future<RouteGeometry> _load() async {
     final tracking = widget.tracking;
+    final trackId = widget.track.id;
     final stops = tracking is TrackingStopController
-        ? await (tracking as TrackingStopController).listTrackStops(
-            widget.track.id,
-          )
+        ? await (tracking as TrackingStopController).listTrackStops(trackId)
         : const <TrackStop>[];
+    final summaries = tracking is TrackingSummaryController
+        ? tracking as TrackingSummaryController
+        : null;
     if (tracking is TrackingGeometryController) {
       final geometry = tracking as TrackingGeometryController;
       final report = await geometry.assembleTrackRouteGeometry(
-        widget.track.id,
+        trackId,
         continuity: _continuity,
       );
+      final cleaned = _cleaned && summaries != null
+          ? await cleanedCoordinates(geometry, summaries, report)
+          : null;
       return RouteGeometry.fromReport(
         report,
-        cleaned: _cleaned ? await cleanedCoordinates(geometry, report) : null,
+        cleaned: cleaned,
         stops: stops,
+        // Read after cleaning, which stores the cleaned distance.
+        totals: summaries == null
+            ? null
+            : RouteTotals.ofRoute(await summaries.routeSummary(trackId)),
       );
     }
-    final bundle = await tracking.loadTrackBundle(widget.track.id);
+    final bundle = await tracking.loadTrackBundle(trackId);
     return RouteGeometry.fromReport(
       const RouteGeometryAssembler().assemble(
         sourceParts: bundle.segments.map(
@@ -51,6 +62,9 @@ class _TrackMapPageState extends State<TrackMapPage> {
         continuity: _continuity,
       ),
       stops: stops,
+      totals: bundle.summary == null
+          ? null
+          : RouteTotals.ofRoute(bundle.summary!),
     );
   }
 
@@ -60,12 +74,17 @@ class _TrackMapPageState extends State<TrackMapPage> {
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
     cleaned: _cleaned,
-    onCleanedChanged: widget.tracking is TrackingGeometryController
+    onCleanedChanged: _canClean(widget.tracking)
         ? (value) => setState(() => _cleaned = value)
         : null,
     future: _load(),
   );
 }
+
+/// Whether [tracking] can show the cleaned view.
+bool _canClean(Object tracking) =>
+    tracking is TrackingGeometryController &&
+    tracking is TrackingSummaryController;
 
 class TripMapPage extends StatefulWidget {
   const TripMapPage({super.key, required this.tracking, required this.trip});
@@ -97,20 +116,28 @@ class _TripMapPageState extends State<TripMapPage> {
     ]);
     final report = results[0] as RouteGeometryReport;
     final tracking = widget.tracking;
+    final summaries = tracking is TrackingSummaryController
+        ? tracking as TrackingSummaryController
+        : null;
+    final cleaned = _cleaned && _canClean(tracking)
+        ? await cleanedCoordinates(
+            tracking as TrackingGeometryController,
+            summaries!,
+            report,
+          )
+        : null;
     return RouteGeometry.fromReport(
       report,
       gaps: (results[1] as TripBundle).gaps,
-      cleaned: _cleaned && tracking is TrackingGeometryController
-          ? await cleanedCoordinates(
-              tracking as TrackingGeometryController,
-              report,
-            )
-          : null,
+      cleaned: cleaned,
       stops: tracking is TrackingStopController
           ? await (tracking as TrackingStopController).listTripStops(
               widget.trip.id,
             )
           : const <TrackStop>[],
+      totals: summaries == null
+          ? null
+          : RouteTotals.ofTrip(await summaries.tripSummary(widget.trip.id)),
     );
   }
 
@@ -120,38 +147,28 @@ class _TripMapPageState extends State<TripMapPage> {
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
     cleaned: _cleaned,
-    onCleanedChanged: widget.tracking is TrackingGeometryController
+    onCleanedChanged: _canClean(widget.tracking)
         ? (value) => setState(() => _cleaned = value)
         : null,
     future: _load(),
   );
 }
 
-/// Cleaned positions for every point of [report], by point ID.
-///
-/// Each track keeps one stop-aware cleaning run, derived again only when the
-/// track has newer points or the run used older stop rules. The recorded
-/// points never change.
+/// Cleaned positions for every point of [report], by point ID, from each
+/// track's current cleaned view ([TrackingSummaryController.currentCleanedGeometry]).
+/// The recorded points never change.
 Future<Map<String, maplibre.LatLng>> cleanedCoordinates(
   TrackingGeometryController geometry,
+  TrackingSummaryController summaries,
   RouteGeometryReport report,
 ) async {
-  final newestSequence = <String, int>{};
-  for (final part in report.parts) {
-    for (final point in part.points) {
-      newestSequence[point.trackId] = math.max(
-        newestSequence[point.trackId] ?? 0,
-        point.sequence,
-      );
-    }
-  }
+  final trackIds = <String>{
+    for (final part in report.parts)
+      for (final point in part.points) point.trackId,
+  };
   final cleaned = <String, maplibre.LatLng>{};
-  for (final MapEntry(key: trackId, value: newest) in newestSequence.entries) {
-    final current = await currentCleaningRun(
-      geometry,
-      trackId,
-      newestSequence: newest,
-    );
+  for (final trackId in trackIds) {
+    final current = await summaries.currentCleanedGeometry(trackId);
     final bundle = await geometry.loadTrackGeometry(
       trackId,
       geometry: TrackGeometrySelection.derived(current.id),
@@ -163,44 +180,6 @@ Future<Map<String, maplibre.LatLng>> cleanedCoordinates(
     }
   }
   return cleaned;
-}
-
-/// The track's current stop-aware cleaning run: the newest completed run when
-/// it covers [newestSequence] and used the current stop rules, otherwise a new
-/// one. Older runs are deleted.
-Future<DerivedGeometryRun> currentCleaningRun(
-  TrackingGeometryController geometry,
-  String trackId, {
-  required int newestSequence,
-}) async {
-  final runs =
-      (await geometry.listDerivedGeometry(trackId))
-          .where(
-            (run) =>
-                run.algorithm ==
-                    DerivedGeometryAlgorithm.stopAwareRouteCleaning &&
-                run.status == DerivedGeometryRunStatus.completed,
-          )
-          .toList()
-        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-  final reusable =
-      runs.isNotEmpty &&
-      runs.first.sourceMaximumSequence >= newestSequence &&
-      runs.first.algorithmVersion ==
-          DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion;
-  final current = reusable
-      ? runs.first
-      : await geometry.deriveGeometry(
-          trackId,
-          request: const DerivedGeometryRequest(
-            name: 'cleaned',
-            algorithm: DerivedGeometryAlgorithm.stopAwareRouteCleaning,
-          ),
-        );
-  for (final stale in runs.where((run) => run.id != current.id)) {
-    await geometry.deleteDerivedGeometry(trackId, stale.id);
-  }
-  return current;
 }
 
 class _RouteMapScaffold extends StatelessWidget {
@@ -246,15 +225,7 @@ class _RouteMapScaffold extends StatelessWidget {
                 children: <Widget>[
                   Row(
                     children: <Widget>[
-                      Expanded(
-                        child: Text(
-                          '${route.pointCount} points • '
-                          '${route.stopMarkers.length} stop(s) • '
-                          '${route.geometryPartCount} drawable part(s) • '
-                          '${route.qualityEventCount} quality event(s) • '
-                          '${route.visibleGapCount} visible gap(s)',
-                        ),
-                      ),
+                      Expanded(child: Text(routeHeadline(route))),
                       if (onCleanedChanged case final onChanged?) ...<Widget>[
                         const SizedBox(width: 8),
                         SegmentedButton<bool>(
@@ -294,18 +265,17 @@ class _RouteMapScaffold extends StatelessWidget {
                       ),
                     ],
                   ),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      route.cleanedDistanceMeters == null
-                          ? 'Recorded ${_kilometres(route.recordedDistanceMeters)}'
-                                ' • raw evidence'
-                          : 'Recorded ${_kilometres(route.recordedDistanceMeters)}'
-                                ' • cleaned ≈ '
-                                '${_kilometres(route.cleanedDistanceMeters!)}',
-                      style: Theme.of(context).textTheme.bodySmall,
+                  for (final line in routeTotalsLines(
+                    route.totals,
+                    cleaned: cleaned && onCleanedChanged != null,
+                  ))
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        line,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ),
-                  ),
                   Align(
                     alignment: Alignment.centerLeft,
                     child: Text(switch (continuity) {
@@ -349,7 +319,35 @@ class _RouteMapScaffold extends StatelessWidget {
   );
 }
 
-String _kilometres(double meters) => '${(meters / 1000).toStringAsFixed(2)} km';
+/// The map header's first line: what is drawn, and the route database's
+/// counts of quality events and visible gaps.
+String routeHeadline(RouteGeometry route) => <String>[
+  '${route.pointCount} points',
+  '${route.stopMarkers.length} stop(s)',
+  '${route.geometryPartCount} drawable part(s)',
+  if (route.totals case final totals?) ...<String>[
+    '${totals.qualityEventCount} quality event(s)',
+    '${totals.visibleGapCount} visible gap(s)',
+  ],
+].join(' • ');
+
+/// The map header's distance and time lines, from the route database. The
+/// cleaned distance shows in the [cleaned] view.
+List<String> routeTotalsLines(RouteTotals? totals, {required bool cleaned}) {
+  if (totals == null) return const <String>[];
+  final cleanedMeters = totals.cleanedDistanceMeters;
+  return <String>[
+    cleaned && cleanedMeters != null
+        ? 'Distance ${kilometres(totals.distanceMeters)} • cleaned ≈ '
+              '${kilometres(cleanedMeters)}'
+        : 'Distance ${kilometres(totals.distanceMeters)}',
+    <String>[
+      'Moving ${hoursMinutes(totals.moving)}',
+      'stopped ${hoursMinutes(totals.stopped)}',
+      if (totals.stepCount case final steps?) '$steps steps',
+    ].join(' • '),
+  ];
+}
 
 class TrackRouteMap extends StatefulWidget {
   const TrackRouteMap({super.key, required this.route});
@@ -596,17 +594,15 @@ class RouteStopMarker {
     required this.coordinate,
     required this.startedAt,
     required this.endedAt,
-    this.recorded = false,
     this.current = false,
   });
 
-  /// A stop the route recorded.
+  /// A stop as the route database stores it.
   RouteStopMarker.fromStop(TrackStop stop)
     : this(
         coordinate: maplibre.LatLng(stop.latitude, stop.longitude),
         startedAt: stop.startedAt,
         endedAt: stop.endedAt ?? stop.lastSeenAt,
-        recorded: true,
         current: stop.isOpen,
       );
 
@@ -615,10 +611,6 @@ class RouteStopMarker {
 
   /// When the stay ended, or its newest fix while it is [current].
   final DateTime endedAt;
-
-  /// Whether the route recorded the stop, rather than the cleaned view
-  /// collapsing a stay of an older route.
-  final bool recorded;
 
   /// Whether the stop is still in progress.
   final bool current;
@@ -637,40 +629,31 @@ class RouteGeometry {
     required this.geometryPartCount,
     required this.gapCount,
     required this.inferredConnectorCount,
-    this.qualityEventCount = 0,
     this.stopMarkers = const <RouteStopMarker>[],
     this.uncertainSegments = const <List<maplibre.LatLng>>[],
-    this.recordedDistanceMeters = 0,
-    this.cleanedDistanceMeters,
+    this.totals,
   });
 
   final List<List<maplibre.LatLng>> segments;
   final List<maplibre.LatLng> points;
+
+  /// Gaps the route database marks visible, and inferred connectors.
   final List<maplibre.LatLng> gapMarkers;
 
-  /// The route's recorded stops, in both views. For tracks recorded before
-  /// stop records, the cleaned view adds the stays it collapsed.
+  /// The route's stops as the route database stores them, one per visit.
   final List<RouteStopMarker> stopMarkers;
 
   /// Low-confidence stretches drawn over [segments].
   final List<List<maplibre.LatLng>> uncertainSegments;
 
-  /// Length of the recorded accepted points, part by part.
-  final double recordedDistanceMeters;
-
-  /// Length of the cleaned view, or null for raw evidence.
-  final double? cleanedDistanceMeters;
+  /// The route database's totals; null when the facade keeps none.
+  final RouteTotals? totals;
   final maplibre.LatLngBounds bounds;
   final maplibre.LatLng center;
   final int pointCount;
   final int geometryPartCount;
   final int gapCount;
   final int inferredConnectorCount;
-
-  /// Gaps other than expected stop holds.
-  final int qualityEventCount;
-
-  int get visibleGapCount => gapMarkers.length;
 
   maplibre.LatLng get start => points.first;
   maplibre.LatLng get destination => points.last;
@@ -679,73 +662,39 @@ class RouteGeometry {
       start.latitude != destination.latitude ||
       start.longitude != destination.longitude;
 
-  /// Builds map geometry from [report]. Recorded [stops] are markers, not
-  /// gaps. With [cleaned] positions, stays of tracks without stop records
-  /// collapse to markers too, and their gaps are not drawn as gaps.
+  /// Builds map geometry from [report], drawn at [cleaned] positions when
+  /// given. Stops are the stored [stops]; a gap is marked when the route
+  /// database marks it visible ([TrackingContinuityGap.isVisible]), so a stop
+  /// or pause is never a gap.
   factory RouteGeometry.fromReport(
     RouteGeometryReport report, {
     Iterable<TrackingContinuityGap>? gaps,
     Map<String, maplibre.LatLng>? cleaned,
     Iterable<TrackStop> stops = const <TrackStop>[],
+    RouteTotals? totals,
   }) {
     final all = <maplibre.LatLng>[];
     final pointCoordinates = <String, maplibre.LatLng>{};
     final segments = <List<maplibre.LatLng>>[];
     final uncertain = <List<maplibre.LatLng>>[];
-    final stopMarkers = <RouteStopMarker>[
-      for (final stop in stops) RouteStopMarker.fromStop(stop),
-    ];
-    final recordedTracks = <String>{for (final stop in stops) stop.trackId};
-    // The route points either side of each recorded stop.
-    final recordedBoundaries = <String>{
-      for (final stop in stops)
-        ...<String?>[stop.arrivalPointId, stop.departurePointId].nonNulls,
-    };
-    final stopPointIds = <String>{};
-    var recorded = 0.0;
-    double? cleanedDistance = cleaned == null ? null : 0.0;
     for (final part in report.parts) {
       final valid = part.points.where(_valid).toList();
-      final raw = <maplibre.LatLng>[
-        for (final point in valid)
-          maplibre.LatLng(point.latitude, point.longitude),
-      ];
       final coordinates = <maplibre.LatLng>[
-        for (var index = 0; index < valid.length; index += 1)
-          cleaned?[valid[index].id] ?? raw[index],
+        for (final point in valid)
+          cleaned?[point.id] ??
+              maplibre.LatLng(point.latitude, point.longitude),
       ];
       for (var index = 0; index < valid.length; index += 1) {
         all.add(coordinates[index]);
         pointCoordinates[valid[index].id] = coordinates[index];
       }
       if (coordinates.length >= 2) segments.add(coordinates);
-      recorded += _pathMeters(raw);
-      if (cleanedDistance != null) {
-        cleanedDistance += _pathMeters(coordinates);
-        stopMarkers.addAll(
-          _stopsOf(valid, coordinates, stopPointIds, recordedTracks),
-        );
-      }
-      uncertain.addAll(_uncertainStretches(valid, coordinates, stopPointIds));
+      uncertain.addAll(_uncertainStretches(valid, coordinates));
     }
     final markers = <maplibre.LatLng>[];
     final representedBoundaries = <String>{};
     for (final gap in gaps ?? report.gaps) {
-      if (!_isVisibleGap(gap)) continue;
-      // A recorded stop is a marker, not a gap.
-      if (gap.cause == TrackingGapCause.expectedStationarySuppression &&
-          (recordedBoundaries.contains(gap.beforePointId) ||
-              recordedBoundaries.contains(gap.afterPointId))) {
-        continue;
-      }
-      // In the cleaned view a stop is a marker, not a gap, and so is a gap
-      // that starts or ends at a stop.
-      if (cleaned != null &&
-          (gap.cause == TrackingGapCause.expectedStationarySuppression ||
-              stopPointIds.contains(gap.beforePointId) ||
-              stopPointIds.contains(gap.afterPointId))) {
-        continue;
-      }
+      if (!gap.isVisible) continue;
       final beforeId = gap.beforePointId;
       final before = beforeId == null ? null : pointCoordinates[beforeId];
       final after = pointCoordinates[gap.afterPointId];
@@ -769,62 +718,12 @@ class RouteGeometry {
       geometryPartCount: report.geometryPartCount,
       gapCount: report.gapCount,
       inferredConnectorCount: report.inferredConnectorCount,
-      qualityEventCount: (gaps ?? report.gaps)
-          .where(
-            (gap) =>
-                gap.cause != TrackingGapCause.expectedStationarySuppression,
-          )
-          .length,
-      stopMarkers: stopMarkers
-        ..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
+      stopMarkers: <RouteStopMarker>[
+        for (final stop in stops) RouteStopMarker.fromStop(stop),
+      ]..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
       uncertainSegments: uncertain,
-      recordedDistanceMeters: recorded,
-      cleanedDistanceMeters: cleanedDistance,
+      totals: totals,
     );
-  }
-
-  /// Shortest stay drawn as a stop marker; it matches the package's rule for
-  /// a stop without still evidence.
-  static const minimumStopMarkerDuration = Duration(minutes: 2);
-
-  /// Runs of consecutive points the cleaning collapsed onto one coordinate:
-  /// three or more, or two whose stay, until the next point, lasted
-  /// [minimumStopMarkerDuration]. A stay counts the time until the next point
-  /// because fixes held at a stop are not drawn. Tracks in [recordedTracks]
-  /// have stop records instead.
-  static List<RouteStopMarker> _stopsOf(
-    List<TrackPoint> points,
-    List<maplibre.LatLng> coordinates,
-    Set<String> stopPointIds,
-    Set<String> recordedTracks,
-  ) {
-    final stops = <RouteStopMarker>[];
-    var first = 0;
-    for (var index = 1; index <= points.length; index += 1) {
-      final continues =
-          index < points.length && coordinates[index] == coordinates[first];
-      if (continues) continue;
-      final count = index - first;
-      final leftAt = index < points.length
-          ? points[index].capturedAt
-          : points[index - 1].capturedAt;
-      final stay = leftAt.difference(points[first].capturedAt);
-      if (!recordedTracks.contains(points[first].trackId) &&
-          (count >= 3 || (count == 2 && stay >= minimumStopMarkerDuration))) {
-        stops.add(
-          RouteStopMarker(
-            coordinate: coordinates[first],
-            startedAt: points[first].capturedAt,
-            endedAt: leftAt,
-          ),
-        );
-        for (var member = first; member < index; member += 1) {
-          stopPointIds.add(points[member].id);
-        }
-      }
-      first = index;
-    }
-    return stops;
   }
 
   /// Stretches of five or more fixes, at least 30 s long, that zig-zag
@@ -832,13 +731,11 @@ class RouteGeometry {
   static List<List<maplibre.LatLng>> _uncertainStretches(
     List<TrackPoint> points,
     List<maplibre.LatLng> coordinates,
-    Set<String> stopPointIds,
   ) {
     const window = 5;
     final flagged = List<bool>.filled(points.length, false);
     for (var start = 0; start + window <= points.length; start += 1) {
       final members = points.sublist(start, start + window);
-      if (members.any((point) => stopPointIds.contains(point.id))) continue;
       if (members.last.capturedAt.difference(members.first.capturedAt) <
           const Duration(seconds: 30)) {
         continue;
@@ -880,14 +777,6 @@ class RouteGeometry {
     maplibre.LatLng(to.latitude, to.longitude),
   );
 
-  static double _pathMeters(List<maplibre.LatLng> path) {
-    var total = 0.0;
-    for (var index = 1; index < path.length; index += 1) {
-      total += _distanceMeters(path[index - 1], path[index]);
-    }
-    return total;
-  }
-
   static double _distanceMeters(maplibre.LatLng from, maplibre.LatLng to) {
     const earthRadiusMeters = 6371008.8;
     final phi1 = from.latitude * math.pi / 180;
@@ -922,12 +811,10 @@ class RouteGeometry {
     required int geometryPartCount,
     required int gapCount,
     required int inferredConnectorCount,
-    int qualityEventCount = 0,
     List<RouteStopMarker> stopMarkers = const <RouteStopMarker>[],
     List<List<maplibre.LatLng>> uncertainSegments =
         const <List<maplibre.LatLng>>[],
-    double recordedDistanceMeters = 0,
-    double? cleanedDistanceMeters,
+    RouteTotals? totals,
   }) {
     final bounds = _bounds(points);
     return RouteGeometry(
@@ -943,11 +830,9 @@ class RouteGeometry {
       geometryPartCount: geometryPartCount,
       gapCount: gapCount,
       inferredConnectorCount: inferredConnectorCount,
-      qualityEventCount: qualityEventCount,
       stopMarkers: stopMarkers,
       uncertainSegments: uncertainSegments,
-      recordedDistanceMeters: recordedDistanceMeters,
-      cleanedDistanceMeters: cleanedDistanceMeters,
+      totals: totals,
     );
   }
 
@@ -967,21 +852,6 @@ class RouteGeometry {
       point.latitude <= 90 &&
       point.longitude >= -180 &&
       point.longitude <= 180;
-
-  static bool _isVisibleGap(TrackingContinuityGap gap) {
-    if (gap.cause == TrackingGapCause.explicitPause ||
-        gap.cause == TrackingGapCause.nativeInterruption ||
-        gap.cause == TrackingGapCause.processRestart ||
-        gap.cause == TrackingGapCause.permissionOrServiceLoss ||
-        gap.cause == TrackingGapCause.overnightBoundary) {
-      return true;
-    }
-    // Same-segment rejected-fix runs are quality diagnostics, not lifecycle
-    // breaks. Show only severe automatic gaps so normal urban uncertainty does
-    // not cover an otherwise continuous route with orange markers.
-    return (gap.providerGap ?? Duration.zero) >= const Duration(seconds: 60) ||
-        (gap.straightLineDistanceMeters ?? 0) >= 150;
-  }
 
   static maplibre.LatLngBounds _bounds(List<maplibre.LatLng> points) {
     if (points.isEmpty) {

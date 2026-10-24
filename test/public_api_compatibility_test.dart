@@ -119,6 +119,78 @@ void main() {
     );
     expect(summary.stopEvidenceRunCount, 0);
   });
+
+  test('route summaries and step counts are additive', () async {
+    final summary = RouteSummary(
+      trackId: 'track',
+      startedAt: DateTime.utc(2026),
+      endedAt: DateTime.utc(2026, 1, 1, 2),
+      distanceMeters: 7200,
+      acceptedPointCount: 100,
+      rejectedPointCount: 4,
+      segmentCount: 2,
+      recording: const Duration(minutes: 90),
+      moving: const Duration(minutes: 60),
+      stopped: const Duration(minutes: 30),
+      stopCount: 2,
+      qualityEventCount: 1,
+      visibleGapCount: 0,
+      stopEvidenceRunCount: 3,
+      stopsSource: TrackStopSource.recorded,
+      updatedAt: DateTime.utc(2026, 1, 1, 2),
+    );
+    expect(summary.paused, const Duration(minutes: 30));
+    expect(summary.averageMovingSpeedMetersPerSecond, 2);
+    expect(summary.stepCount, isNull);
+    expect(TrackStopSource.derived, 'derived');
+
+    // Existing bundles, events and points compile unchanged.
+    expect(
+      TripBundle(
+        trip: Trip(
+          id: 'trip',
+          organizationId: 'org',
+          userId: 'user',
+          status: TripStatus.completed,
+          startedAt: DateTime.utc(2026),
+          legCount: 0,
+          acceptedPointCount: 0,
+          rejectedPointCount: 0,
+          measuredDistanceMeters: 0,
+          lifecycleRevision: 1,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+        legs: const <TripLeg>[],
+        gaps: const <TrackingContinuityGap>[],
+      ).summary,
+      isNull,
+    );
+    expect(const TrackerStatus(lifecycle: TrackerLifecycle.idle).stepCount,
+        isNull);
+    expect(advanced.NativeTrackingCapabilities.stepCount, 'step_count');
+
+    final TrackingSummaryController controller = _HostSummaries(summary);
+    expect((await controller.routeSummary('track')).stopCount, 2);
+    expect(advanced.RouteSummaryRepository, isNotNull);
+  });
+}
+
+/// A host implementation of the optional summary capability.
+final class _HostSummaries implements TrackingSummaryController {
+  _HostSummaries(this._summary);
+
+  final RouteSummary _summary;
+
+  @override
+  Future<RouteSummary> routeSummary(String trackId) async => _summary;
+
+  @override
+  Future<TripSummary> tripSummary(String tripId) => throw UnimplementedError();
+
+  @override
+  Future<DerivedGeometryRun> currentCleanedGeometry(String trackId) =>
+      throw UnimplementedError();
 }
 
 /// A host implementation of the optional stop capability.

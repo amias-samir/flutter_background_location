@@ -243,6 +243,13 @@ void main() {
 
       final route = (jsonDecode(contents) as Map<String, Object?>)['features']!
           as List<Object?>;
+      final routeProperties = (route.first!
+          as Map<String, Object?>)['properties']! as Map<String, Object?>;
+      expect(routeProperties['stopCount'], 1);
+      expect(routeProperties['stoppedSeconds'], 425);
+      expect(routeProperties['recordingSeconds'], 600);
+      expect(routeProperties['movingSeconds'], 175);
+      expect(routeProperties['geometrySource'], 'raw');
       final line = (route.first! as Map<String, Object?>)['geometry']!
           as Map<String, Object?>;
       expect(line['coordinates'], hasLength(3),
@@ -267,10 +274,25 @@ void main() {
       expect(extensions['stopId'], stop.id);
       expect(extensions, isNot(contains('featureType')));
       expect(_elements(XmlDocument.parse(contents), 'trkpt'), hasLength(3));
+      final metadata =
+          _elements(XmlDocument.parse(contents), 'metadata').single;
+      expect(_gpxExtensions(metadata)['stopCount'], '1');
+      expect(_gpxExtensions(metadata)['stoppedSeconds'], '425');
     });
 
     test('KML adds a timed Placemark per stop', () async {
-      final placemark = _kmlStops(await render(TrackExportFormat.kml)).single;
+      final kml = await render(TrackExportFormat.kml);
+      final document = _elements(XmlDocument.parse(kml), 'Document').single;
+      final documentData = <String, String>{
+        for (final data in document.childElements
+            .where((element) => element.name.local == 'ExtendedData')
+            .single
+            .childElements)
+          data.getAttribute('name')!: _child(data, 'value'),
+      };
+      expect(documentData['stopCount'], '1');
+      expect(documentData['geometrySource'], 'raw');
+      final placemark = _kmlStops(kml).single;
       expect(DateTime.parse(_child(placemark, 'begin')), stop.startedAt);
       expect(DateTime.parse(_child(placemark, 'end')), stop.endedAt);
       expect(_child(placemark, 'description'), 'Stayed 7 min');
@@ -494,6 +516,28 @@ void main() {
         _elements(document, 'wpt')
             .map((waypoint) => _gpxExtensions(waypoint)['stopId']),
         <String>[stop.id],
+      );
+
+      final geoJson = await controller.exportTrack(
+        trackId: track.id,
+        format: TrackExportFormat.geoJson,
+        fileName: 'derived_stop_route_geojson',
+        options: TrackExportOptions(
+          geometry: TrackGeometrySelection.derived(run.id),
+        ),
+      );
+      final properties = ((jsonDecode(writer.files[geoJson.path]!)
+              as Map<String, Object?>)['features']! as List<Object?>)
+          .first! as Map<String, Object?>;
+      final routeProperties = properties['properties']! as Map<String, Object?>;
+      expect(routeProperties['geometrySource'], 'derived:${run.id}');
+      final rawDistance =
+          (await harness.repository.getTrack(track.id))!.totalDistanceMeters;
+      expect(routeProperties['distanceMeters'], isNot(rawDistance));
+      expect(
+        routeProperties['distanceMeters']! as double,
+        lessThan(rawDistance),
+        reason: 'the derived length, not the raw one',
       );
 
       // Rejected points have no derived coordinates, as in V2 exports.

@@ -46,6 +46,7 @@ class LocationTrackingService : Service() {
     private lateinit var stateStore: TrackingStateStore
     private lateinit var workerThread: HandlerThread
     private lateinit var motionSensorFusion: MotionSensorFusion
+    private lateinit var stepCounter: StepCounter
     private var captureWakeLock: PowerManager.WakeLock? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -124,6 +125,8 @@ class LocationTrackingService : Service() {
         override fun run() {
             if (!captureStarted) return
             if (!checkActivePrerequisites()) return
+            // Activity permission granted while capturing starts the count.
+            startStepCounter()
             mainHandler.postDelayed(this, PREREQUISITE_MONITOR_INTERVAL_MS)
         }
     }
@@ -167,6 +170,7 @@ class LocationTrackingService : Service() {
                 stateStore.emitCurrentStatus()
             }
         }
+        stepCounter = StepCounter(this, workerHandler, mainHandler)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         activityRecognitionClient = ActivityRecognition.getClient(this)
         isServiceAliveNow = true
@@ -247,6 +251,7 @@ class LocationTrackingService : Service() {
         runCatching { fusedLocationClient.removeLocationUpdates(locationCallback) }
         removeCurrentActivityUpdates(clearGeneration = false)
         motionSensorFusion.stop()
+        stepCounter.stop()
         unregisterPowerReceiver()
         releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
@@ -442,6 +447,7 @@ class LocationTrackingService : Service() {
         } else {
             replaceStationaryPolicy()
             motionSensorFusion.start(configuration)
+            startStepCounter()
             requestLocationUpdates(currentProfile)
         }
         stateStore.emitCurrentStatus()
@@ -523,6 +529,7 @@ class LocationTrackingService : Service() {
         registerPowerReceiver()
         requestActivityUpdates()
         motionSensorFusion.start(configuration)
+        startStepCounter()
         requestLocationUpdates(currentProfile)
         requestStationaryExitProbe()
         stateStore.markServiceHeartbeat(captureActive = true)
@@ -550,6 +557,7 @@ class LocationTrackingService : Service() {
         }
         removeCurrentActivityUpdates(clearGeneration = true)
         motionSensorFusion.stop()
+        stepCounter.stop()
         unregisterPowerReceiver()
         releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
@@ -870,6 +878,7 @@ class LocationTrackingService : Service() {
             "activityAgeMs" to activityAgeMs,
             "activityProbabilities" to latestActivity?.get("probabilities"),
             "motionEvidence" to TrackingEventBus.lastMotionEvidence,
+            "stepCount" to stepCounter.steps(captureGenerationId),
             "motionState" to if (currentProfile == TrackingStateStore.PROFILE_STATIONARY) {
                 "stationary"
             } else {
@@ -1701,6 +1710,17 @@ class LocationTrackingService : Service() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) ==
             PackageManager.PERMISSION_GRANTED
 
+    /**
+     * Counts the capture generation's steps when the device has a step
+     * counter and, from Android 10, activity recognition is granted.
+     */
+    private fun startStepCounter() {
+        val generationId = stateStore.captureGenerationId ?: return
+        if (captureStarted && hasActivityRecognitionPermission()) {
+            stepCounter.start(generationId)
+        }
+    }
+
     private fun hasHighConfidenceStillActivity(): Boolean {
         val type = latestActivity?.get("type") as? String
         val confidence = (latestActivity?.get("confidence") as? Number)?.toInt() ?: 0
@@ -1838,5 +1858,18 @@ class LocationTrackingService : Service() {
         @Volatile
         internal var liveService: LocationTrackingService? = null
             private set
+
+        /** Steps of capture generation [generationId]; null when not counted. */
+        internal fun stepCount(generationId: String?): Long? =
+            liveService?.takeIf { it.captureStarted }?.stepCounter?.steps(generationId)
+
+        /**
+         * Delivers the step counter's batched readings, then runs [then] on
+         * the main thread, so a status read before a pause has every step.
+         */
+        internal fun flushStepCount(then: () -> Unit) {
+            val counter = liveService?.takeIf { it.captureStarted }?.stepCounter
+            if (counter == null) then() else counter.flush(then)
+        }
     }
 }

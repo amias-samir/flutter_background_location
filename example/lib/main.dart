@@ -6,6 +6,7 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'recorded_tracks_section.dart';
 import 'recorded_trips_section.dart';
 import 'route_map_page.dart';
+import 'route_totals.dart';
 import 'tracking_controls.dart';
 import 'tracking_dialogs.dart';
 
@@ -76,6 +77,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   MultiDayRoutePresentation _routePresentation =
       MultiDayRoutePresentation.separateRecordedParts;
   List<Track> _tracks = const <Track>[];
+  Map<String, RouteTotals> _trackTotals = const <String, RouteTotals>{};
   List<RecordedTripSummary> _trips = const <RecordedTripSummary>[];
   String? _historyCursor;
   bool _historyHasMore = false;
@@ -163,11 +165,23 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final page = await tracking.listTrackPage(
       TrackQuery(limit: 25, cursor: append ? _historyCursor : null),
     );
+    final totals = <String, RouteTotals>{
+      if (tracking is TrackingSummaryController)
+        for (final track in page.items)
+          track.id: RouteTotals.ofRoute(
+            await (tracking as TrackingSummaryController).routeSummary(
+              track.id,
+            ),
+          ),
+    };
     if (!mounted) return;
     setState(() {
       _tracks = append
           ? List<Track>.unmodifiable(<Track>[..._tracks, ...page.items])
           : page.items;
+      _trackTotals = Map<String, RouteTotals>.unmodifiable(
+        <String, RouteTotals>{if (append) ..._trackTotals, ...totals},
+      );
       _historyCursor = page.nextCursor;
       _historyHasMore = page.hasMore;
     });
@@ -184,39 +198,20 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         cursor: append ? _historyCursor : null,
       ),
     );
+    // Each Trip's details are stored in the route database.
     final summaries = await Future.wait<RecordedTripSummary>(
-      page.items.map((trip) async {
-        final bundle = await tripTracking.loadTripBundle(trip.id);
-        final quality = tracking is TrackingQualityController
-            ? await (tracking as TrackingQualityController).tripQualitySummary(
-                trip.id,
-              )
-            : null;
-        final stops = tracking is TrackingStopController
-            ? await (tracking as TrackingStopController).listTripStops(trip.id)
-            : const <TrackStop>[];
-        var segmentCount = 0;
-        for (final leg in bundle.legs) {
-          final track = await _tracking!.getTrack(leg.trackId);
-          segmentCount += track?.segmentCount ?? 0;
-        }
-        return RecordedTripSummary(
+      page.items.map(
+        (trip) async => RecordedTripSummary(
           trip: trip,
-          segmentCount: segmentCount,
-          gapCount: bundle.gaps.length,
-          // Stop holds are expected, not quality events.
-          qualityEventCount: quality == null
-              ? bundle.gaps.length
-              : quality.qualityRunCount - quality.stopEvidenceRunCount,
-          visibleGapCount:
-              quality?.visibleQualityRunCount ?? bundle.gaps.length,
-          stopCount: stops.length,
-          stoppedFor: stops.fold(
-            Duration.zero,
-            (total, stop) => total + stop.duration,
-          ),
-        );
-      }),
+          totals: tracking is TrackingSummaryController
+              ? RouteTotals.ofTrip(
+                  await (tracking as TrackingSummaryController).tripSummary(
+                    trip.id,
+                  ),
+                )
+              : null,
+        ),
+      ),
     );
     if (!mounted) return;
     setState(() {
@@ -569,12 +564,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   }
 
   /// GPX of the cleaned route view, one file per recorded day. Combined Trip
-  /// export takes raw geometry only, so each day exports its own cleaning
-  /// run.
+  /// export takes raw geometry only, so each day exports its own cleaned
+  /// view.
   Future<void> _exportTripCleaned(Trip trip) async {
     final tracking = _tracking;
-    if (tracking == null || tracking is! TrackingGeometryController) return;
-    final geometry = tracking as TrackingGeometryController;
+    if (tracking == null || tracking is! TrackingSummaryController) return;
+    final summaries = tracking as TrackingSummaryController;
     final name = await showDialog<String>(
       context: context,
       builder: (_) => ExportNameDialog(
@@ -590,18 +585,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
       final exported = <String>[];
       var points = 0;
       for (final leg in bundle.legs) {
-        final track = await tracking.loadTrackBundle(leg.trackId);
-        var newest = 0;
-        for (final segment in track.segments) {
-          for (final point in segment.points) {
-            newest = point.sequence > newest ? point.sequence : newest;
-          }
-        }
-        final run = await currentCleaningRun(
-          geometry,
-          leg.trackId,
-          newestSequence: newest,
-        );
+        final run = await summaries.currentCleanedGeometry(leg.trackId);
         final result = await tracking.exportTrack(
           trackId: leg.trackId,
           format: TrackExportFormat.gpx,
@@ -894,7 +878,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                     onExport: _busy ? null : _exportTrip,
                     onExportDiagnostics: _busy ? null : _exportTripDiagnostics,
                     onExportCleaned:
-                        _busy || tracking is! TrackingGeometryController
+                        _busy || tracking is! TrackingSummaryController
                         ? null
                         : _exportTripCleaned,
                     onDelete: _busy ? null : _deleteTrip,
@@ -902,6 +886,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                 else
                   RecordedTracksSection(
                     tracks: _tracks,
+                    totals: _trackTotals,
                     hasMore: _historyHasMore,
                     onRefresh: _busy ? null : _refreshTracks,
                     onLoadMore: _busy

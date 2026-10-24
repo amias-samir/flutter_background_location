@@ -73,10 +73,14 @@ variables.
 - Mock/simulation evidence per location fix with allow, flag, or reject policy.
 - Typed gap evidence for rejected fixes, lifecycle boundaries, and background
   callback interruptions.
+- Steps counted on every route from the phone's step counter, with the
+  activity permission the package already requests.
 
 ### Routes and export
 
 - Single-day `Track` routes and additive multi-day `Trip` journeys.
+- Every route detail kept in the route database: stops, moving and stopped
+  time, steps, speeds, quality events, visible gaps and the cleaned distance.
 - Combined multi-day Trip map and GeoJSON/KML/GPX export.
 - Persisted route presentation modes: recorded parts, connected days, or
   continuous presentation with labeled inferred connectors.
@@ -370,11 +374,21 @@ or `dwell`) and the number of fixes held. A stop ends at the departure fix,
 or at its last fix when the route pauses or completes during it.
 `TrackBundle.stops` carries a route's stops, and exports include them.
 
-A visit to one place is one stop. A phone with precise fixes holds a stop
-within the 25 m minimum radius, so walking between the buildings of a place,
-such as a temple's shrines, ends one stay and starts the next. Stays that
-follow each other within three minutes, centred within 75 m of the place, are
-listed and exported as a single stop; the stored records are unchanged.
+A visit to one place is one stop, and the route database stores it as one
+row. A phone with precise fixes holds a stop within the 25 m minimum radius,
+so walking between the buildings of a place, such as a temple's shrines, ends
+one stay and starts the next. A stay that begins within three minutes of the
+previous stop's end, centred within 75 m of it, extends that stop's row
+instead of adding one; schema 17 consolidated the rows older versions stored
+per stay. What the API returns is what is stored.
+
+Routes recorded without live stop records (quality policies 1 and 2, or an
+explicit travel intent) get their stops once they complete: the package
+derives them from the stored points with the cleaned view's stay rule, stores
+them as closed `dwell` rows and marks the route
+(`RouteSummary.stopsSource`), in the background after the client opens and on
+first read. The points never change.
+
 Rejected fixes that arrive while the device is at a recorded stop are stop
 evidence, not visible gaps, and `TrackingQualitySummary.stopEvidenceRunCount`
 counts the rejected-fix runs made only of stop evidence, so
@@ -669,8 +683,9 @@ until all required conditions are true:
 - The command is initiated while an Activity is visible.
 
 Activity Recognition permission is requested on Android 10 and later. If it is
-denied, route capture can continue, but activity classification becomes unknown
-and the battery-saving stationary transition remains conservative.
+denied, route capture can continue, but activity classification becomes unknown,
+the battery-saving stationary transition remains conservative, and steps are
+not counted.
 
 #### Permission sequence by Android version
 
@@ -746,8 +761,9 @@ continues in the background, and how the user stops it:
 `NSLocationWhenInUseUsageDescription` is required for the first authorization
 stage. `NSLocationAlwaysAndWhenInUseUsageDescription` is required before the
 plugin can request Always access. `NSMotionUsageDescription` is required for
-`CMMotionActivityManager`; without motion access, tracking remains on the
-conservative moving profile.
+`CMMotionActivityManager` and the step count; without motion access, tracking
+remains on the conservative moving profile and steps are not counted. Mention
+step counting in the string when your app shows steps.
 
 The deprecated `NSLocationAlwaysUsageDescription` key is not used because this
 package supports iOS 13 and later and checks the modern
@@ -1135,6 +1151,70 @@ how to display recorded tracks with `maplibre_gl` and the OpenFreeMap Liberty
 street style; applications can use MapLibre, Google Maps, Apple MapKit, or any
 other renderer.
 
+### Route details
+
+The route database keeps each route's details up to date in the transaction
+that changes them, so a host shows or uploads them without computing
+anything. The owner-scoped controllers implement `TrackingSummaryController`:
+
+```dart
+final details = tracking as TrackingSummaryController;
+final summary = await details.routeSummary(trackId);
+print('${summary.distanceMeters} m, moving ${summary.moving}, '
+    'stopped ${summary.stopped} at ${summary.stopCount} stops, '
+    '${summary.stepCount ?? 'no'} steps');
+final trip = await details.tripSummary(tripId);
+```
+
+`RouteSummary` carries the measured distance, accepted and rejected point
+counts, segments, first and newest fix times, and these values:
+
+| Value | Meaning |
+|---|---|
+| `recording` | Time inside the route's segments, pauses excluded; while recording, up to the newest fix |
+| `stopped`, `stopCount` | Time at the stored stops, and their number |
+| `moving` | `recording` less `stopped` |
+| `paused`, `elapsed` | Time paused, and start to end with pauses |
+| `maxSpeedMetersPerSecond` | Fastest Doppler speed of an accepted fix with speed accuracy of 2 m/s or better, or unreported |
+| `averageMovingSpeedMetersPerSecond` | Distance over moving time |
+| `stepCount` | Steps counted while the route recorded; null when not counted |
+| `qualityEventCount` | Rejected-fix runs worth a look; runs made only of stop evidence are counted in `stopEvidenceRunCount` |
+| `visibleGapCount` | Holes in the route: lifecycle breaks, or gaps of at least 60 s or 150 m between accepted fixes |
+| `cleanedDistanceMeters` | Length of the current cleaned view, once one was derived |
+
+A gap across a stop or pause is never a visible gap: the device stayed where
+it was. Each stored gap keeps this decision, and
+`TrackingContinuityGap.isVisible` applies the same rule, so a map that marks
+`isVisible` gaps agrees with the count. `TripSummary` holds the same totals
+over a Trip's legs. `TrackBundle.summary` and `TripBundle.summary` carry them
+too.
+
+`currentCleanedGeometry(trackId)` returns the route's current stop-aware
+cleaned view: the newest run when it covers the route's newest point under the
+current cleaning version, otherwise a new one. It deletes older runs and
+stores the cleaned distance in the summary.
+
+#### Steps
+
+While a route records, Android counts steps with the phone's step counter and
+iOS with the motion coprocessor's pedometer, in every motion fusion mode.
+Steps need the activity permission the package already requests:
+`ACTIVITY_RECOGNITION` on Android 10 and later, and Motion & Fitness on iOS.
+The package never prompts for steps on its own; without the permission, or
+on a phone without a step counter, `stepCount` stays null. A permission
+granted while a route records starts the count within a minute. Each location
+fix carries the count since its capture session started (`stepCount`), each
+point keeps it, and the route adds each session once, so a restart or
+recovery never counts steps twice. Steps taken after the newest fix count when
+the route pauses or completes. The native capability `step_count` reports a
+step counter.
+
+Steps are fitness data. They are kept in the route database and its exports.
+Upload batches leave them out of `TrackUploadBatch.toMap()`, but the batch's
+`TrackPoint`s carry `stepCount`. A host that sends steps to a server must
+declare fitness data in its own privacy disclosures, such as its App Store
+privacy details and Google Play data safety form.
+
 ### Optional derived geometry
 
 Raw point coordinates are immutable. To create a separately versioned,
@@ -1327,6 +1407,14 @@ const options = TrackExportOptions(
   track, with those values as `fbl:` extensions; and a KML Placemark with a
   `TimeSpan`. Set `TrackExportOptions.includeStops` to false to leave them
   out. Routes without stop records export as before.
+- The route's summary is exported with it: GeoJSON route properties, GPX
+  `fbl:` metadata extensions and KML `ExtendedData` carry `recordingSeconds`,
+  `movingSeconds`, `stoppedSeconds`, `pausedSeconds`, `stopCount`,
+  `qualityEventCount` and `visibleGapCount`, plus `maxSpeedMetersPerSecond`,
+  `averageMovingSpeedMetersPerSecond`, `stepCount` and
+  `cleanedDistanceMeters` when known.
+- A derived-geometry export reports the derived line's distance and
+  `geometrySource: derived:<run id>`.
 - `TrackExportOptions.includeDiagnosticProperties` adds coordinate-free
   per-fix evidence to GeoJSON point features and GPX `fbl:` extensions:
   vertical accuracy, Doppler speed and heading with their accuracies,
@@ -1720,7 +1808,8 @@ validate its key lifecycle independently.
 Host applications should:
 
 - show an explicit in-app tracking indicator;
-- explain why background and motion access are needed;
+- explain why background and motion access are needed, including step
+  counting when the app shows steps;
 - avoid logging coordinates or export contents;
 - apply a documented retention policy;
 - protect uploader authentication and transport;
