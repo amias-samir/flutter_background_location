@@ -1,0 +1,788 @@
+{
+  "version": 1,
+  "note": "Activity-reading compaction shared by Kotlin and Swift DecisionInputJournal. Readings are those received since the previous journaled fix, in arrival order. Every transition reading (source android_activity_transition) and every change-only reading (source ios_core_motion_activity) is kept and ends the current run. Other readings form runs of consecutive readings with the same type and confidence bucket (below 60, 60 to 74, 75 and above); a run keeps its first and last reading. When more than maxReadings remain, the oldest are dropped and counted in dropped. kept lists input indices in order.",
+  "config": {
+    "maxReadings": 64
+  },
+  "scenarios": [
+    {
+      "name": "a still run keeps its first and last readings",
+      "readings": [
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000000000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000005000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000010000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000015000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000020000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000025000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000030000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000035000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000040000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000045000,
+          "source": "android_activity_recognition"
+        }
+      ],
+      "kept": [
+        0,
+        9
+      ],
+      "dropped": 0
+    },
+    {
+      "name": "a confidence bucket change splits a run",
+      "readings": [
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000000000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 98,
+          "timestamp": 1800000005000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000010000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 70,
+          "timestamp": 1800000015000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 72,
+          "timestamp": 1800000020000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000025000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 99,
+          "timestamp": 1800000030000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000035000,
+          "source": "android_activity_recognition"
+        }
+      ],
+      "kept": [
+        0,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "dropped": 0
+    },
+    {
+      "name": "transitions are always kept and break runs",
+      "readings": [
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000000000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000005000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000010000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000015000,
+          "source": "android_activity_transition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000020000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000025000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000030000,
+          "source": "android_activity_recognition"
+        }
+      ],
+      "kept": [
+        0,
+        2,
+        3,
+        4,
+        6
+      ],
+      "dropped": 0
+    },
+    {
+      "name": "change-only readings are always kept",
+      "readings": [
+        {
+          "type": "walking",
+          "confidence": 100,
+          "timestamp": 1800000000000,
+          "source": "ios_core_motion_activity"
+        },
+        {
+          "type": "walking",
+          "confidence": 100,
+          "timestamp": 1800000005000,
+          "source": "ios_core_motion_activity"
+        },
+        {
+          "type": "stationary",
+          "confidence": 50,
+          "timestamp": 1800000010000,
+          "source": "ios_core_motion_activity"
+        },
+        {
+          "type": "stationary",
+          "confidence": 100,
+          "timestamp": 1800000015000,
+          "source": "ios_core_motion_activity"
+        }
+      ],
+      "kept": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "dropped": 0
+    },
+    {
+      "name": "a type change splits a run",
+      "readings": [
+        {
+          "type": "walking",
+          "confidence": 90,
+          "timestamp": 1800000000000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 85,
+          "timestamp": 1800000005000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 95,
+          "timestamp": 1800000010000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000015000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000020000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 88,
+          "timestamp": 1800000025000,
+          "source": "android_activity_recognition"
+        }
+      ],
+      "kept": [
+        0,
+        2,
+        3,
+        4,
+        5
+      ],
+      "dropped": 0
+    },
+    {
+      "name": "a single reading is kept once",
+      "readings": [
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000000000,
+          "source": "android_activity_recognition"
+        }
+      ],
+      "kept": [
+        0
+      ],
+      "dropped": 0
+    },
+    {
+      "name": "only the newest 64 kept readings survive the cap",
+      "readings": [
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000000000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000005000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000010000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000015000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000020000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000025000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000030000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000035000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000040000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000045000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000050000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000055000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000060000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000065000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000070000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000075000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000080000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000085000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000090000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000095000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000100000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000105000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000110000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000115000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000120000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000125000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000130000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000135000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000140000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000145000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000150000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000155000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000160000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000165000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000170000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000175000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000180000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000185000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000190000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000195000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000200000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000205000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000210000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000215000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000220000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000225000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000230000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000235000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000240000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000245000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000250000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000255000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000260000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000265000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000270000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000275000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000280000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000285000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000290000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000295000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000300000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000305000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000310000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000315000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000320000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000325000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000330000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000335000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "walking",
+          "confidence": 80,
+          "timestamp": 1800000340000,
+          "source": "android_activity_recognition"
+        },
+        {
+          "type": "unknown",
+          "confidence": 40,
+          "timestamp": 1800000345000,
+          "source": "android_activity_recognition"
+        }
+      ],
+      "kept": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69
+      ],
+      "dropped": 6
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'activity_snapshot.dart';
+import 'kinematic_policy.dart';
 import 'motion_policy.dart';
 import 'track_geodesy.dart';
 
@@ -109,6 +110,157 @@ abstract final class StopSitePolicy {
         activity,
         movingConfidenceThreshold: movingConfidenceThreshold,
       );
+}
+
+/// Rules of quality policy 5 for stays at a place, chipset-agnostic.
+///
+/// Version 3's pause ended at the first fix with one moving reading or a
+/// walking-pace Doppler speed measured to 0.4 m/s, anywhere: a pocketed
+/// phone's Doppler noise or one Activity Recognition reading split stops on
+/// one phone and not on another. Here nothing inside the hold radius ends a
+/// stay. Outside it, a stay ends on a Doppler speed whose lower bound shows
+/// movement, on confirmed activity (never one reading), or on steady outward
+/// progress; a fresh confident still reading with no measured speed blocks
+/// the activity and progress exits. The radius comes from effective
+/// uncertainty and is clamped, so neither an optimistic chipset nor a few
+/// network fixes change it much. Network fixes never set the radius, never
+/// count as members and never confirm a departure.
+abstract final class StopSitePolicyV5 {
+  /// Smallest hold radius, in metres.
+  static const double radiusFloorMeters = 25;
+
+  /// Largest hold radius, in metres.
+  static const double radiusCapMeters = 60;
+
+  /// `√9.21`: the 99 % radius of a two-dimensional normal, per sigma.
+  static const double radiusSigmaFactor = 3.0348;
+
+  /// A Doppler speed less twice its accuracy must reach this, in m/s, to show
+  /// movement.
+  static const double leavingLowerBoundMetersPerSecond = 0.4;
+
+  /// Doppler speed, in m/s, that leaves a pause.
+  static const double pauseLeavingSpeedMetersPerSecond = 0.6;
+
+  /// Doppler speed, in m/s, that leaves a stop.
+  static const double stopLeavingSpeedMetersPerSecond = 1.2;
+
+  /// Moving readings this far apart or closer confirm activity.
+  static const confirmedReadingsWindow = Duration(seconds: 60);
+
+  /// The newest confirming reading must be this recent.
+  static const confirmedReadingFreshness = Duration(seconds: 30);
+
+  /// Consecutive outside fixes, each farther out, that leave a pause.
+  static const int pauseProgressFixes = 3;
+
+  /// Shortest span of those fixes.
+  static const pauseProgressSpan = Duration(seconds: 10);
+
+  /// Shortest outside run that leaves a stop by progress.
+  static const stopProgressSpan = Duration(seconds: 60);
+
+  /// Smallest distance trend, in m/s, of that run.
+  static const double stopProgressTrendMetersPerSecond = 0.2;
+
+  /// Outside fixes must reach this many radii out to leave by progress.
+  static const double progressRadiusFactor = 2;
+
+  /// A still reading at or above this confidence can block an exit.
+  static const int blockerStillConfidence = 75;
+
+  /// How recent that still reading must be.
+  static const blockerStillFreshness = Duration(seconds: 30);
+
+  /// Largest Doppler speed, in m/s, that lets a still reading block an exit.
+  static const double blockerMaximumSpeedMetersPerSecond = 0.3;
+
+  /// Consecutive agreeing outside fixes that re-anchor a pause once.
+  static const int reanchorFixes = 3;
+
+  /// Shortest span of those fixes.
+  static const reanchorSpan = Duration(seconds: 15);
+
+  /// Fewest member fixes, spanning [promotionSpan], that make a stay a stop.
+  static const int promotionMembers = 3;
+
+  /// Shortest span of those members.
+  static const promotionSpan = Duration(seconds: 60);
+
+  /// Fewest member fixes that make a stay with still evidence a stop.
+  static const int stillPromotionMembers = 2;
+
+  /// Hold radius, in metres, around a centre with per-axis uncertainty
+  /// [centreSigmaMeters] for a fix with [fixSigmaMeters].
+  static double holdRadiusMeters({
+    required double centreSigmaMeters,
+    required double fixSigmaMeters,
+  }) =>
+      math.min(
+        radiusCapMeters,
+        math.max(
+          radiusFloorMeters,
+          radiusSigmaFactor *
+              math.sqrt(
+                centreSigmaMeters * centreSigmaMeters +
+                    fixSigmaMeters * fixSigmaMeters,
+              ),
+        ),
+      );
+
+  /// Whether a Doppler speed leaves a stay: usable, with a lower bound of at
+  /// least [leavingLowerBoundMetersPerSecond], and at least the pause or stop
+  /// leaving speed.
+  static bool dopplerLeaves({
+    required double? speed,
+    required double? speedAccuracy,
+    required bool stop,
+  }) {
+    if (!KinematicPolicy.isUsable(
+      KinematicPolicy.classify(speed: speed, speedAccuracy: speedAccuracy),
+    )) {
+      return false;
+    }
+    return speed! - 2 * speedAccuracy! >= leavingLowerBoundMetersPerSecond &&
+        speed >=
+            (stop
+                ? stopLeavingSpeedMetersPerSecond
+                : pauseLeavingSpeedMetersPerSecond);
+  }
+
+  /// Whether the activity and progress exits are blocked: by a fix whose
+  /// precise Doppler speed shows the device still
+  /// ([StopSitePolicy.dopplerShowsStillness]; moving readings arrive late),
+  /// or by a fresh confident still reading [reading] with a Doppler speed
+  /// that doesn't contradict it.
+  static bool stillBlocks({
+    required ActivitySnapshot? reading,
+    required DateTime capturedAt,
+    required double? speed,
+    required double? speedAccuracy,
+  }) {
+    if (StopSitePolicy.dopplerShowsStillness(
+      speed: speed,
+      speedAccuracy: speedAccuracy,
+    )) {
+      return true;
+    }
+    final recordedAt = reading?.recordedAt;
+    if (reading == null ||
+        recordedAt == null ||
+        reading.type != TrackingActivityType.stationary ||
+        reading.confidence < blockerStillConfidence ||
+        capturedAt.difference(recordedAt) > blockerStillFreshness) {
+      return false;
+    }
+    final placeholder = speed != null &&
+        speedAccuracy != null &&
+        speed < KinematicPolicy.zeroPlaceholderSpeed &&
+        speedAccuracy >= KinematicPolicy.preciseSpeedAccuracy;
+    return speed == null ||
+        placeholder ||
+        speed <= blockerMaximumSpeedMetersPerSecond;
+  }
 }
 
 /// Centre of a stop and the uncertainty of that centre.

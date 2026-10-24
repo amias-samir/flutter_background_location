@@ -6,6 +6,8 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.PowerManager
 import java.util.UUID
+import org.json.JSONException
+import org.json.JSONObject
 
 internal class TrackingStateStore(context: Context) {
     private val appContext = context.applicationContext
@@ -194,6 +196,7 @@ internal class TrackingStateStore(context: Context) {
             generationId = generationId,
         )
         preferences.edit()
+            .endUnflushedStepCheckpoint(evidence.generationId)
             .putString(KEY_CAPTURE_GENERATION_ID, evidence.generationId)
             .putLong(KEY_NATIVE_SESSION_STARTED_AT, evidence.startedAt)
             .putString(KEY_CAPTURE_START_REASON, evidence.startReason)
@@ -229,6 +232,44 @@ internal class TrackingStateStore(context: Context) {
             .putLong(KEY_LAST_PROVIDER_CALLBACK_AT, timestamp)
             .apply()
         persistedProviderCallbackAt = timestamp
+    }
+
+    /**
+     * The running generation's steps, saved every heartbeat so a process
+     * death leaves them behind. Asynchronous, like the heartbeat.
+     */
+    fun checkpointSteps(snapshot: StepSnapshot) {
+        preferences.edit()
+            .putString(KEY_STEP_CHECKPOINT, StepRecordCodec.encode(snapshot))
+            .apply()
+    }
+
+    /** An ended generation's final steps, durable before capture stops. */
+    fun finalizeSteps(snapshot: StepSnapshot) {
+        preferences.edit()
+            .putString(KEY_STEP_FINAL, StepRecordCodec.encode(snapshot))
+            .remove(KEY_STEP_CHECKPOINT)
+            .commitOrThrow("persist final steps")
+    }
+
+    /**
+     * `{captureGenerationId, stepCount, stepCoverage}` of the newest ended
+     * generation: its final flush, or the checkpoint its process left behind
+     * (`ended_unflushed`). Kept until a newer generation ends.
+     */
+    fun stepFinal(): Map<String, Any?>? =
+        StepRecordCodec.decode(preferences.getString(KEY_STEP_FINAL, null))
+            ?.let(StepRecordCodec::toStatusMap)
+
+    /**
+     * Capture ends with no live step count: a checkpoint left behind belongs
+     * to a generation whose process died, and becomes its final now.
+     */
+    fun endUnflushedSteps() {
+        if (!preferences.contains(KEY_STEP_CHECKPOINT)) return
+        preferences.edit()
+            .endUnflushedStepCheckpoint(newGenerationId = null)
+            .commitOrThrow("end unflushed steps")
     }
 
     fun markLocationRequestFailure(
@@ -519,6 +560,8 @@ internal class TrackingStateStore(context: Context) {
             "captureAlive" to captureAlive,
             "captureGenerationId" to captureGenerationId,
             "stepCount" to LocationTrackingService.stepCount(captureGenerationId),
+            "stepCoverage" to LocationTrackingService.stepCoverage(captureGenerationId),
+            "stepFinal" to stepFinal(),
             "nativeSessionStartedAt" to nativeSessionStartedAt,
             "captureStartReason" to captureStartReason,
             "serviceHeartbeatAt" to heartbeatAt,
@@ -571,6 +614,23 @@ internal class TrackingStateStore(context: Context) {
         if (!commit()) {
             throw IllegalStateException("Could not durably persist $operation.")
         }
+    }
+
+    /**
+     * A checkpoint of another generation was never finalized: its process
+     * died. Its last heartbeat becomes that generation's final.
+     */
+    private fun SharedPreferences.Editor.endUnflushedStepCheckpoint(
+        newGenerationId: String?,
+    ): SharedPreferences.Editor {
+        val checkpoint = preferences.getString(KEY_STEP_CHECKPOINT, null) ?: return this
+        val snapshot = StepRecordCodec.decode(checkpoint) ?: return remove(KEY_STEP_CHECKPOINT)
+        if (snapshot.generationId == newGenerationId) return this
+        val ended = snapshot.copy(
+            coverage = snapshot.coverage.copy(state = StepCoverage.STATE_ENDED_UNFLUSHED),
+        )
+        return putString(KEY_STEP_FINAL, StepRecordCodec.encode(ended))
+            .remove(KEY_STEP_CHECKPOINT)
     }
 
     private fun SharedPreferences.Editor.clearActiveCaptureEvidence(): SharedPreferences.Editor =
@@ -651,6 +711,8 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_SESSION_CONTROL_TOKEN = "session_control_token"
         private const val KEY_COMMAND_REVISION = "command_revision"
         private const val KEY_LAST_COMMAND_ID = "last_command_id"
+        private const val KEY_STEP_CHECKPOINT = "step_checkpoint"
+        private const val KEY_STEP_FINAL = "step_final"
         private const val SERVICE_START_GRACE_MS = 90_000L
         private const val SERVICE_HEARTBEAT_STALE_AFTER_MS = 180_000L
         private const val PROVIDER_CALLBACK_PERSIST_INTERVAL_MS = 15_000L
@@ -673,4 +735,62 @@ internal class TrackingStateStore(context: Context) {
             return manager.isIgnoringBatteryOptimizations(context.packageName)
         }
     }
+}
+
+/** JSON for the persisted step checkpoint and final; no Android types. */
+internal object StepRecordCodec {
+    fun encode(snapshot: StepSnapshot): String = JSONObject().apply {
+        put("captureGenerationId", snapshot.generationId)
+        put("stepCount", snapshot.steps ?: JSONObject.NULL)
+        put(
+            "stepCoverage",
+            JSONObject().apply {
+                val coverage = snapshot.coverage
+                put("state", coverage.state)
+                put("countedThrough", coverage.countedThrough ?: JSONObject.NULL)
+                put("lastRiseAt", coverage.lastRiseAt ?: JSONObject.NULL)
+                put("uncountedMs", coverage.uncountedMs)
+                put("sensor", coverage.sensor ?: JSONObject.NULL)
+                put("reregistrations", coverage.reregistrations)
+            },
+        )
+    }.toString()
+
+    fun decode(text: String?): StepSnapshot? {
+        if (text.isNullOrBlank()) return null
+        return try {
+            val json = JSONObject(text)
+            val generationId = json.stringOrNull("captureGenerationId")
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
+            val coverage = json.optJSONObject("stepCoverage")
+            StepSnapshot(
+                generationId = generationId,
+                steps = json.longOrNull("stepCount"),
+                coverage = StepCoverage(
+                    state = coverage?.stringOrNull("state") ?: StepCoverage.STATE_UNAVAILABLE,
+                    countedThrough = coverage?.longOrNull("countedThrough"),
+                    lastRiseAt = coverage?.longOrNull("lastRiseAt"),
+                    uncountedMs = coverage?.longOrNull("uncountedMs") ?: 0L,
+                    sensor = coverage?.stringOrNull("sensor"),
+                    reregistrations = coverage?.longOrNull("reregistrations")?.toInt() ?: 0,
+                ),
+            )
+        } catch (_: JSONException) {
+            null
+        }
+    }
+
+    /** The `stepFinal` status map. */
+    fun toStatusMap(snapshot: StepSnapshot): Map<String, Any?> = linkedMapOf(
+        "captureGenerationId" to snapshot.generationId,
+        "stepCount" to snapshot.steps,
+        "stepCoverage" to snapshot.coverage.toMap(),
+    )
+
+    private fun JSONObject.longOrNull(key: String): Long? =
+        if (isNull(key)) null else (opt(key) as? Number)?.toLong()
+
+    private fun JSONObject.stringOrNull(key: String): String? =
+        if (isNull(key)) null else opt(key) as? String
 }

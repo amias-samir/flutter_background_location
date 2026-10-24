@@ -508,8 +508,9 @@ void main() {
     );
     expect(
       routeHeadline(withTotals),
-      '2 points • 0 stop(s) • 1 drawable part(s) • 4 quality event(s) • '
+      '2 points • 3 stop(s) • 1 drawable part(s) • 4 quality event(s) • '
       '1 visible gap(s)',
+      reason: 'the stop count is the stored one',
     );
   });
 
@@ -557,6 +558,7 @@ void main() {
                 trip: trip('with_stops'),
                 totals: const RouteTotals(
                   distanceMeters: 1234,
+                  displayDistanceMeters: 1234,
                   segmentCount: 1,
                   moving: Duration(minutes: 95),
                   stopped: Duration(minutes: 17),
@@ -597,6 +599,7 @@ void main() {
             totals: const <String, RouteTotals>{
               'track-1': RouteTotals(
                 distanceMeters: 100,
+                displayDistanceMeters: 100,
                 segmentCount: 1,
                 moving: Duration(minutes: 40),
                 stopped: Duration(minutes: 20),

@@ -11,12 +11,18 @@ import 'track_stop.dart';
 /// has a wider radius and keeps one. A stay of one segment that starts at
 /// most [maximumGap] after the place's last stay ended, centred at most
 /// [maximumCentreDistanceMeters] from the place's centre so far, continues
-/// the place. The route database stores one row per place: the repository
-/// applies this rule when it writes a stop, and the schema 17 upgrade
-/// consolidated older rows with [group].
+/// the place. From quality policy 5, a stay anchored on the fix that left the
+/// place continues it at any distance: the device never travelled between
+/// them, as when a visit drifts slowly across its radius and stops again.
+/// The route database stores one row per place: the repository applies this
+/// rule when it writes a stop, and the schema 17 upgrade consolidated older
+/// rows with [group].
 abstract final class TrackStopPlaces {
   static const maximumGap = Duration(minutes: 3);
   static const maximumCentreDistanceMeters = 75.0;
+
+  /// First quality policy whose stays continue a place they never left.
+  static const int anchoredContinuationPolicy = 5;
 
   /// [stops] as stays at places, oldest first.
   static List<TrackStop> merge(Iterable<TrackStop> stops) =>
@@ -43,6 +49,13 @@ abstract final class TrackStopPlaces {
     if (stop.segmentId != place.segmentId || place.isOpen) return false;
     final placeEnd = place.endedAt ?? place.lastSeenAt;
     if (stop.startedAt.difference(placeEnd) > maximumGap) return false;
+    final departure = place.departurePointId;
+    if (departure != null &&
+        stop.arrivalPointId == departure &&
+        place.qualityPolicyVersion >= anchoredContinuationPolicy &&
+        stop.qualityPolicyVersion >= anchoredContinuationPolicy) {
+      return true;
+    }
     return TrackGeodesy.sphericalHaversineMeters(
           place.latitude,
           place.longitude,

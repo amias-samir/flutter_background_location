@@ -11,10 +11,12 @@ import kotlin.math.sqrt
  * Chooses the provider fixes a moving profile records: one per interval, and
  * one wherever the course has turned sharply since the last recorded fix, so
  * a junction or hairpin is not cut between fixes tens of metres apart.
+ * [turnDegrees] of 0 turns turn capture off; the interval still applies.
  *
  * Shared with the Swift `TurnCaptureSampler` through
- * `test/fixtures/cross_language/turn_capture_v1.json`. The provider stream and
- * other capture origins call it from different threads.
+ * `test/fixtures/cross_language/turn_capture_v1.json` and, for sampling
+ * policy 2 on an unfiltered 1 Hz stream, `turn_capture_v2.json`. The provider
+ * stream and other capture origins call it from different threads.
  */
 internal class TurnCaptureSampler(
     private val intervalMs: Long,
@@ -59,6 +61,9 @@ internal class TurnCaptureSampler(
     }
 
     private fun isTurn(fix: Fix, previous: Fix): Boolean {
+        // Every course is at least 0° from the reference, so 0° would make
+        // each moving fix a turn.
+        if (turnDegrees <= 0f) return false
         if (fix.elapsedMs <= previous.elapsedMs) return false
         val course = reliableCourse(fix) ?: return false
         val reference = referenceCourse ?: return false

@@ -223,7 +223,11 @@ void main() {
   });
 
   test('a slow stroll with short pauses keeps its distance', () async {
-    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    final run = await StopReplay.start(
+      t0,
+      config: const TrackingConfig(),
+      qualityPolicy: 4,
+    );
     final stroll = SyntheticTrackingRoute.slowStrollWithPauses(
       startedAt: t0,
       trackId: run.trackId,
@@ -429,7 +433,11 @@ void main() {
 
   test('a pause shorter than two minutes holds its jitter and is no stop',
       () async {
-    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    final run = await StopReplay.start(
+      t0,
+      config: const TrackingConfig(),
+      qualityPolicy: 4,
+    );
     final arrival = syntheticWalk(
       trackId: run.trackId,
       from: -60,
@@ -478,7 +486,11 @@ void main() {
     Future<(StopReplay, List<TrackPoint>)> replay({
       required double resumeFrom,
     }) async {
-      final run = await StopReplay.start(t0, config: const TrackingConfig());
+      final run = await StopReplay.start(
+        t0,
+        config: const TrackingConfig(),
+        qualityPolicy: 4,
+      );
       final arrival = syntheticWalk(
         trackId: run.trackId,
         from: -60,
@@ -536,6 +548,131 @@ void main() {
     test('is no stop when the walk resumes elsewhere', () async {
       // Where the device was during the silence is unknown.
       final (run, _) = await replay(resumeFrom: 200);
+      expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
+    });
+  });
+
+  group('quality policy 5', () {
+    test(
+        'a slow stroll with short pauses keeps its distance within 3 % '
+        'and 8 m', () async {
+      final run = await StopReplay.start(t0, config: const TrackingConfig());
+      final stroll = SyntheticTrackingRoute.slowStrollWithPauses(
+        startedAt: t0,
+        trackId: run.trackId,
+      );
+      final points = await run.replay(stroll);
+      expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
+      // Fixes inside a pause's radius are held until the walk leaves it; the
+      // chord out of the radius is measured (D38).
+      final pathLength = metersFromSyntheticOrigin(points.last);
+      final track = (await run.harness.repository.getTrack(run.trackId))!;
+      expect(
+        track.totalDistanceMeters,
+        inInclusiveRange(pathLength * 0.97, pathLength * 1.03 + 8),
+      );
+    });
+
+    test(
+        'a pause shorter than two minutes is no stop, and the walk on is '
+        'kept once it leaves the radius', () async {
+      final run = await StopReplay.start(t0, config: const TrackingConfig());
+      final arrival = syntheticWalk(
+        trackId: run.trackId,
+        from: -60,
+        to: 0,
+        startedAt: t0,
+        eventPrefix: 'arrive',
+      );
+      final pauseStart =
+          arrival.locations.last.capturedAt.add(const Duration(seconds: 5));
+      final pause = SyntheticTrackingRoute.pocketStop(
+        duration: const Duration(seconds: 70),
+        startedAt: pauseStart,
+        seed: 9,
+        eventPrefix: 'pause',
+        trackId: run.trackId,
+      );
+      final onward = syntheticWalk(
+        trackId: run.trackId,
+        from: 0,
+        to: 90,
+        startedAt: pauseStart.add(const Duration(seconds: 75)),
+        eventPrefix: 'onward',
+      );
+      final points =
+          await run.replay(arrival.followedBy(pause).followedBy(onward));
+      expect(
+        points
+            .where((point) => point.nativeEventId!.startsWith('pause-'))
+            .where((point) => point.accepted),
+        isEmpty,
+      );
+      final onwardPoints = points
+          .where((point) => point.nativeEventId!.startsWith('onward-'))
+          .toList();
+      final firstKept = onwardPoints.firstWhere((point) => point.accepted);
+      expect(
+        metersFromSyntheticOrigin(firstKept),
+        lessThan(40),
+        reason: 'kept as soon as it leaves the 25 m radius',
+      );
+      expect(
+        onwardPoints
+            .skipWhile((point) => !point.accepted)
+            .every((point) => point.accepted),
+        isTrue,
+      );
+      expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
+    });
+
+    Future<(StopReplay, List<TrackPoint>)> silentStay({
+      required double resumeFrom,
+    }) async {
+      final run = await StopReplay.start(t0, config: const TrackingConfig());
+      final arrival = syntheticWalk(
+        trackId: run.trackId,
+        from: -60,
+        to: 0,
+        startedAt: t0,
+        eventPrefix: 'arrive',
+      );
+      final pauseStart =
+          arrival.locations.last.capturedAt.add(const Duration(seconds: 5));
+      final pause = SyntheticTrackingRoute.pocketStop(
+        duration: const Duration(seconds: 70),
+        startedAt: pauseStart,
+        seed: 9,
+        eventPrefix: 'pause',
+        trackId: run.trackId,
+      );
+      final onward = syntheticWalk(
+        trackId: run.trackId,
+        from: resumeFrom,
+        to: resumeFrom + 60,
+        startedAt: pauseStart.add(const Duration(minutes: 7)),
+        eventPrefix: 'onward',
+      );
+      final points =
+          await run.replay(arrival.followedBy(pause).followedBy(onward));
+      return (run, points);
+    }
+
+    test(
+        'a stay the provider fell silent in is a stop when the walk resumes '
+        'at the place', () async {
+      final (run, _) = await silentStay(resumeFrom: 0);
+      final stop =
+          (await run.harness.repository.listTrackStops(run.trackId)).single;
+      expect(stop.isOpen, isFalse);
+      expect(stop.duration, greaterThan(const Duration(minutes: 7)));
+      expect(stop.duration, lessThan(const Duration(minutes: 8)));
+    });
+
+    test(
+        'a silent stay is no stop when the walk resumes too far away to have '
+        'left just before', () async {
+      final (run, _) = await silentStay(resumeFrom: 200);
       expect(await run.harness.repository.listTrackStops(run.trackId), isEmpty);
     });
   });

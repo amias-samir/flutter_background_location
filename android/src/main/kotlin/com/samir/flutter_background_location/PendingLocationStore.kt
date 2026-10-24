@@ -469,9 +469,12 @@ internal class PendingLocationStore(context: Context) : Closeable {
     private fun decode(payload: String): Map<String, Any?> = JournalPayloadCodec.decode(payload)
 
     companion object {
+        // Declared before its first use: older Kotlin frontends reject a
+        // forward reference to a const in an initializer.
+        private const val DATABASE_NAME = "flutter_background_location_pending.db"
+
         val databaseNameForDiagnostics: String = DATABASE_NAME
 
-        private const val DATABASE_NAME = "flutter_background_location_pending.db"
         private const val TABLE_PENDING_LOCATIONS = "pending_locations"
         private const val COLUMN_EVENT_ID = "event_id"
         private const val COLUMN_TRACK_ID = "track_id"
@@ -498,6 +501,9 @@ internal class PendingLocationCapacityException(message: String) : IllegalStateE
 internal class PendingLocationCursorException(message: String) : IllegalArgumentException(message)
 
 internal object PendingLocationCoordinator {
+    // Declared before its first use, as above.
+    private const val MAX_QUEUED_TASKS = 512
+
     private val executor = ThreadPoolExecutor(
         1,
         1,
@@ -594,6 +600,4 @@ internal object PendingLocationCoordinator {
         "errorType" to error.javaClass.simpleName,
         "errorMessage" to (error.message ?: "Native journal initialization failed."),
     )
-
-    private const val MAX_QUEUED_TASKS = 512
 }

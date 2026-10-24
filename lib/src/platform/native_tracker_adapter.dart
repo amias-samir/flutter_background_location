@@ -6,6 +6,7 @@ import '../domain/capability_report.dart';
 import '../domain/location_sample.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
+import '../domain/step_coverage.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_error.dart';
@@ -23,6 +24,7 @@ final class NativeTrackerAdapter
         StagedPermissionAdapter,
         PagedNativeLocationAdapter,
         NativeJournalDiagnosticsAdapter,
+        StepCounterDiagnosticsAdapter,
         NativeTrackingHealthAdapter,
         TrackScopedNativeDataAdapter,
         CommandLeaseTrackerAdapter {
@@ -499,6 +501,26 @@ final class NativeTrackerAdapter
         message: error.message ?? 'Paged native pending locations failed.',
         cause: error.details,
       );
+    }
+  }
+
+  @override
+  Future<List<StepCounterDiagnostic>> stepCounterDiagnostics() async {
+    if (!(await protocolInfo()).supports(
+      NativeTrackingCapabilities.stepCounterDiagnostics,
+    )) {
+      return const <StepCounterDiagnostic>[];
+    }
+    try {
+      final result = await _methodChannel.invokeMethod<Object?>(
+        'getStepCounterDiagnostics',
+      );
+      if (result is! List) return const <StepCounterDiagnostic>[];
+      return List<StepCounterDiagnostic>.unmodifiable(
+        result.map(StepCounterDiagnostic.fromPayload).nonNulls,
+      );
+    } on MissingPluginException {
+      return const <StepCounterDiagnostic>[];
     }
   }
 

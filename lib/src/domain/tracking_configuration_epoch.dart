@@ -7,7 +7,11 @@ abstract final class TrackingPolicyVersions {
   ///
   /// Version 5 adds turn capture at 45° to the High and Precised presets
   /// ([TrackingConfig.turnCaptureDegrees]).
-  static const int presetDefinition = 5;
+  ///
+  /// Version 6 samples every preset under [samplingPolicy] 2
+  /// ([TrackingConfig.samplingPolicyVersion]): High and Precised record one
+  /// fix per moving interval or a turn on both platforms.
+  static const int presetDefinition = 6;
 
   /// Version of the point acceptance/rejection policy.
   ///
@@ -25,13 +29,26 @@ abstract final class TrackingPolicyVersions {
   /// Version 4 is version 3, and a riding fix of an adaptive route is
   /// accepted up to the vehicle accuracy envelope (see
   /// `FixQualityPolicy.ridingSpeedMetersPerSecond`).
-  static const int qualityPolicy = 4;
+  ///
+  /// Version 5 decides the same on every chipset: the first far fix after a
+  /// silence must prove itself with a precise Doppler speed, a fix the route
+  /// could not have reached is held back until a later fix agrees with it,
+  /// nothing inside the hold radius ends a stay, the radius comes from
+  /// effective uncertainty and is clamped, and the riding envelope needs a
+  /// credible Doppler speed. Decisions come only from evidence stored with
+  /// each fix (`RouteDecisionEngine`), so a route decided live, after a
+  /// restart or offline gets the same answers.
+  static const int qualityPolicy = 5;
 
   /// Version of accepted-gap classification and topology semantics.
   ///
   /// Version 3 keeps a route's segment across the provider restart that
   /// applies a runtime configuration update.
-  static const int continuityPolicy = 3;
+  ///
+  /// Version 4 ignores the native sampling-profile stamp: a gap is expected
+  /// stationary suppression only when a stay explains it, and every accepted
+  /// gap of at least `TrackingContinuityGap.visibleProviderGap` is decided.
+  static const int continuityPolicy = 4;
 
   /// Version of the moving/stationary motion state machine, carried in the
   /// resolved configuration as `motionPolicyVersion` for native code.
@@ -40,6 +57,13 @@ abstract final class TrackingPolicyVersions {
   /// low-confidence and missing activity readings, and ends it only on
   /// positive moving evidence, valid Doppler speed or sustained displacement.
   static const int motionPolicy = 2;
+
+  /// Version of how native capture picks the fixes it records, carried in the
+  /// resolved configuration as `samplingPolicyVersion`.
+  ///
+  /// Version 2 records one fix per moving interval or a turn from an
+  /// unfiltered 1 Hz stream in the High and Precised moving profile.
+  static const int samplingPolicy = 2;
 
   /// Preset label for routes recorded before epochs stored policy versions.
   ///
@@ -64,14 +88,20 @@ abstract final class TrackingPolicyVersions {
   /// machine it started with.
   static const int legacyMotionPolicy = 1;
 
+  /// Sampling policy of configurations persisted before they recorded one.
+  static const int legacySamplingPolicy = 1;
+
   /// Quality policy versions this build can evaluate, oldest first.
-  static const List<int> supportedQualityPolicies = <int>[1, 2, 3, 4];
+  static const List<int> supportedQualityPolicies = <int>[1, 2, 3, 4, 5];
 
   /// Continuity policy versions this build can evaluate, oldest first.
-  static const List<int> supportedContinuityPolicies = <int>[2, 3];
+  static const List<int> supportedContinuityPolicies = <int>[2, 3, 4];
 
   /// Motion policy versions this build can apply, oldest first.
   static const List<int> supportedMotionPolicies = <int>[1, 2];
+
+  /// Sampling policy versions this build can apply, oldest first.
+  static const List<int> supportedSamplingPolicies = <int>[1, 2];
 
   /// The quality policy that evaluates points recorded under [recorded].
   ///
@@ -89,6 +119,10 @@ abstract final class TrackingPolicyVersions {
   /// The motion policy for [recorded]; see [resolveQualityPolicy].
   static int resolveMotionPolicy(int recorded) =>
       _resolve(recorded, supportedMotionPolicies);
+
+  /// The sampling policy for [recorded]; see [resolveQualityPolicy].
+  static int resolveSamplingPolicy(int recorded) =>
+      _resolve(recorded, supportedSamplingPolicies);
 
   static int _resolve(int recorded, List<int> supported) =>
       supported.contains(recorded) ? recorded : supported.last;

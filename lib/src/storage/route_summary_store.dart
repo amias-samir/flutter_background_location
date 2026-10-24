@@ -4,6 +4,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../domain/fix_quality.dart';
 import '../domain/route_summary.dart';
+import '../domain/step_coverage.dart';
 import '../domain/track_point.dart';
 import '../domain/tracking_continuity.dart';
 
@@ -16,7 +17,7 @@ import '../domain/tracking_continuity.dart';
 abstract final class RouteSummaryStore {
   /// Bumped when a summary's definition changes; rows written under an older
   /// definition are recomputed when the database opens.
-  static const summaryVersion = 1;
+  static const summaryVersion = 2;
 
   /// A Doppler speed counts for the maximum when measured to within this.
   static const maximumSpeedAccuracyMetersPerSecond = 2.0;
@@ -79,6 +80,30 @@ abstract final class RouteSummaryStore {
     ''');
     await _addColumn(database, 'track_summaries', 'step_generation', 'TEXT');
     await _addColumn(database, 'track_summaries', 'step_last_count', 'INTEGER');
+    // Schema 18: the review that applies the current rules to an older
+    // route, the corrected distance and when a stalled step counter stopped.
+    await _addColumn(database, 'track_summaries', 'review_run_id', 'TEXT');
+    await _addColumn(database, 'track_summaries', 'review_version', 'INTEGER');
+    await _addColumn(
+      database,
+      'track_summaries',
+      'corrected_distance_m',
+      'REAL',
+    );
+    await _addColumn(
+      database,
+      'track_summaries',
+      'step_count_stopped_at',
+      'TEXT',
+    );
+    await _addColumn(
+        database, 'trip_summaries', 'corrected_distance_m', 'REAL');
+    await _addColumn(
+      database,
+      'trip_summaries',
+      'step_count_stopped_at',
+      'TEXT',
+    );
   }
 
   static Future<void> _addColumn(
@@ -182,11 +207,14 @@ abstract final class RouteSummaryStore {
     );
   }
 
-  /// After a rejected-fix run of [trackId] was stored.
+  /// After a rejected-fix run of [trackId] was stored. A quality event is a
+  /// run that left a visible hole in the route ([visible]) and was not stop
+  /// evidence; an informational run, such as one dropped fix, is not one.
   static Future<void> onQualityRun(
     DatabaseExecutor database,
     String trackId, {
     required bool stopEvidence,
+    required bool visible,
     required DateTime now,
   }) =>
       database.rawUpdate(
@@ -198,12 +226,31 @@ abstract final class RouteSummaryStore {
         WHERE track_id = ?
         ''',
         <Object?>[
-          stopEvidence ? 0 : 1,
+          !stopEvidence && visible ? 1 : 0,
           stopEvidence ? 1 : 0,
           _timestamp(now),
           trackId,
         ],
       );
+
+  /// After [count] visible runs of [trackId] became informational because a
+  /// stop opened right after them.
+  static Future<void> onQualityRunsDowngraded(
+    DatabaseExecutor database,
+    String trackId, {
+    required int count,
+    required DateTime now,
+  }) async {
+    if (count <= 0) return;
+    await database.rawUpdate(
+      '''
+      UPDATE track_summaries
+      SET quality_event_count = MAX(0, quality_event_count - ?), updated_at = ?
+      WHERE track_id = ?
+      ''',
+      <Object?>[count, _timestamp(now), trackId],
+    );
+  }
 
   /// After a continuity gap of [trackId] was stored.
   static Future<void> onGap(
@@ -223,45 +270,141 @@ abstract final class RouteSummaryStore {
     );
   }
 
-  /// Adds the steps counted in capture generation [generation] since its
-  /// last count to [segmentId]. Native counts are cumulative within a
-  /// generation: a new generation adds its whole count, a repeated or older
-  /// count adds nothing, so a fix journaled after a final count from status
-  /// never counts twice.
-  static Future<void> onStepCount(
+  /// Records capture generation [generation]'s cumulative [stepCount] and
+  /// the counter's [coverage] in the generation's live
+  /// `track_step_generations` row (schema 18).
+  ///
+  /// Native counts are cumulative within a generation, so a generation counts
+  /// once, at its highest count, in whatever order its counts arrive: a
+  /// higher count adds its increase to the segment the generation began in,
+  /// and a repeated or lower one adds nothing. A fix journaled after a final
+  /// count from status, or a final recorded again during recovery, never
+  /// counts twice.
+  ///
+  /// The count is incomplete from `stopped_at`: the last rise of a counter
+  /// that stalled, or where a generation ended without a final flush. A rise
+  /// while counting again clears it.
+  ///
+  /// Returns the coverage state before and after, for health events.
+  static Future<(String?, String?)> onStepCount(
     DatabaseExecutor database, {
     required String trackId,
     required String segmentId,
     required String? generation,
     required int stepCount,
+    StepCoverage? coverage,
     required DateTime now,
   }) async {
     final current = await _summaryRow(database, trackId);
-    if (current == null) return;
-    final sameGeneration = current['step_generation'] == (generation ?? '');
-    final last =
-        sameGeneration ? (current['step_last_count'] as num?)?.toInt() ?? 0 : 0;
-    final delta = stepCount - last;
-    if (sameGeneration && delta <= 0) return;
-    await database.rawUpdate(
-      '''
-      UPDATE track_segments SET step_count = COALESCE(step_count, 0) + ?
-      WHERE id = ?
-      ''',
-      <Object?>[math.max(0, delta), segmentId],
+    if (current == null) return (null, null);
+    final key = generation ?? '';
+    final rows = await database.query(
+      'track_step_generations',
+      where: 'track_id = ? AND capture_generation_id = ? '
+          'AND review_run_id IS NULL',
+      whereArgs: <Object?>[trackId, key],
+      limit: 1,
     );
-    await database.update(
-      'track_summaries',
-      <String, Object?>{
-        'step_generation': generation ?? '',
-        'step_last_count': stepCount,
-        'step_count': await _steps(database, trackId),
-        'updated_at': _timestamp(now),
-      },
-      where: 'track_id = ?',
-      whereArgs: <Object?>[trackId],
+    final existing = rows.isEmpty ? null : rows.single;
+    // A route recording across the schema 18 upgrade kept its newest
+    // generation's count in the summary row.
+    final previous = (existing?['step_count'] as num?)?.toInt() ??
+        (current['step_generation'] == key
+            ? (current['step_last_count'] as num?)?.toInt()
+            : null);
+    final delta = stepCount - (previous ?? 0);
+    final before = existing?['coverage_state'] as String?;
+    final stoppedBefore = existing?['stopped_at'] as String?;
+    final stoppedAt = _stepsStoppedAtAfter(
+      stoppedBefore,
+      coverage,
+      rose: delta > 0,
     );
+    final rowSegment = existing?['segment_id'] as String? ?? segmentId;
+    final values = <String, Object?>{
+      'step_count': math.max(stepCount, previous ?? 0),
+      if (coverage?.lastRiseAt case final rise?)
+        'last_rise_at': _timestamp(rise),
+      if (coverage?.countedThrough case final through?)
+        'counted_through': _timestamp(through),
+      if (coverage != null) 'coverage_state': coverage.state.name,
+      if (coverage != null) 'decided_by': 'native',
+      'stopped_at': stoppedAt,
+      'updated_at': _timestamp(now),
+    };
+    if (existing == null) {
+      await database.insert('track_step_generations', <String, Object?>{
+        'id': 'live:$trackId:$key',
+        'track_id': trackId,
+        'segment_id': rowSegment,
+        'capture_generation_id': key,
+        ...values,
+      });
+    } else if (delta > 0 ||
+        coverage != null && coverage.state.name != before ||
+        stoppedAt != stoppedBefore) {
+      await database.update(
+        'track_step_generations',
+        values,
+        where: 'id = ?',
+        whereArgs: <Object?>[existing['id']],
+      );
+    }
+    if (delta > 0) {
+      await database.rawUpdate(
+        '''
+        UPDATE track_segments SET step_count = COALESCE(step_count, 0) + ?
+        WHERE id = ?
+        ''',
+        <Object?>[delta, rowSegment],
+      );
+    }
+    if (delta > 0 || stoppedAt != stoppedBefore || existing == null) {
+      await database.update(
+        'track_summaries',
+        <String, Object?>{
+          'step_generation': key,
+          'step_last_count': math.max(stepCount, previous ?? 0),
+          'step_count': await _steps(database, trackId),
+          'step_count_stopped_at': await _stepsStoppedAt(database, trackId),
+          'updated_at': _timestamp(now),
+        },
+        where: 'track_id = ?',
+        whereArgs: <Object?>[trackId],
+      );
+    }
+    return (before, coverage?.state.name ?? before);
   }
+
+  /// Where a generation's count stops being complete after [coverage]
+  /// arrives: the last rise of a stalled counter or the last count of a
+  /// generation that ended unflushed, kept at its earliest; a rise while
+  /// counting with nothing uncounted clears it.
+  static String? _stepsStoppedAtAfter(
+    String? before,
+    StepCoverage? coverage, {
+    required bool rose,
+  }) {
+    if (coverage == null) return before;
+    final state = coverage.state;
+    if (state == StepCoverageState.stalled) {
+      return before ??
+          _optionalTimestamp(coverage.lastRiseAt ?? coverage.countedThrough);
+    }
+    if (state == StepCoverageState.endedUnflushed) {
+      return before ??
+          _optionalTimestamp(coverage.countedThrough ?? coverage.lastRiseAt);
+    }
+    if (state == StepCoverageState.counting &&
+        rose &&
+        coverage.uncounted == Duration.zero) {
+      return null;
+    }
+    return before;
+  }
+
+  static String? _optionalTimestamp(DateTime? value) =>
+      value == null ? null : _timestamp(value);
 
   /// After [trackId]'s segment step counts changed.
   static Future<void> onStepsChanged(
@@ -385,27 +528,34 @@ abstract final class RouteSummaryStore {
           ))
             .single['fastest']
         : null;
+    final (runWhere, runArgs) = hasRuns
+        ? await rowsOf(database, 'track_quality_runs', trackId)
+        : ('', const <Object?>[]);
     final runs = hasRuns
         ? (await database.rawQuery(
             '''
             SELECT
-              COALESCE(SUM(CASE WHEN stop_evidence = 1 THEN 0 ELSE 1 END), 0)
+              COALESCE(SUM(CASE WHEN stop_evidence = 1 THEN 0
+                WHEN severity = 'visibleGap' THEN 1 ELSE 0 END), 0)
                 AS quality_events,
               COALESCE(SUM(CASE WHEN stop_evidence = 1 THEN 1 ELSE 0 END), 0)
                 AS stop_evidence
-            FROM track_quality_runs WHERE track_id = ?
+            FROM track_quality_runs WHERE $runWhere
             ''',
-            <Object?>[trackId],
+            runArgs,
           ))
             .single
         : const <String, Object?>{};
+    final (gapWhere, gapArgs) = hasGaps
+        ? await rowsOf(database, 'track_continuity_gaps', trackId)
+        : ('', const <Object?>[]);
     final visibleGaps = hasGaps
         ? (await database.rawQuery(
             '''
             SELECT COUNT(*) AS count FROM track_continuity_gaps
-            WHERE track_id = ? AND visible = 1
+            WHERE $gapWhere AND visible = 1
             ''',
-            <Object?>[trackId],
+            gapArgs,
           ))
             .single['count']
         : 0;
@@ -423,6 +573,8 @@ abstract final class RouteSummaryStore {
       'stop_evidence_run_count': (runs['stop_evidence'] as num?)?.toInt() ?? 0,
       'visible_gap_count': (visibleGaps as num?)?.toInt() ?? 0,
       'step_count': hasSegments ? await _steps(database, trackId) : null,
+      if (tables.contains('track_step_generations'))
+        'step_count_stopped_at': await _stepsStoppedAt(database, trackId),
       'updated_at': _timestamp(now),
     };
     if (existing == null) {
@@ -486,6 +638,7 @@ abstract final class RouteSummaryStore {
         ...?await _summaryRow(database, trackId),
         'segment_count': tracks.single['segment_count'],
         'accepted_point_count': tracks.single['accepted_point_count'],
+        'total_distance_m': tracks.single['total_distance_m'],
       });
     }
     int sum(String key) => legs.fold(
@@ -499,7 +652,21 @@ abstract final class RouteSummaryStore {
     double? fastest;
     int? steps;
     double? cleaned = 0;
+    var corrected = 0.0;
+    var anyReviewed = false;
+    DateTime? stepsStoppedAt;
     for (final leg in legs) {
+      final legStopped = time(leg['step_count_stopped_at']);
+      if (legStopped != null &&
+          (stepsStoppedAt == null || legStopped.isBefore(stepsStoppedAt))) {
+        stepsStoppedAt = legStopped;
+      }
+      final legCorrected = leg['review_run_id'] == null
+          ? null
+          : (leg['corrected_distance_m'] as num?)?.toDouble();
+      if (legCorrected != null) anyReviewed = true;
+      corrected +=
+          legCorrected ?? (leg['total_distance_m'] as num?)?.toDouble() ?? 0;
       final first = time(leg['first_fix_at']);
       final last = time(leg['last_fix_at']);
       if (first != null && (firstFix == null || first.isBefore(firstFix))) {
@@ -526,6 +693,7 @@ abstract final class RouteSummaryStore {
       }
     }
     final trip = trips.single;
+    final tripSummaryColumns = await _columnNames(database, 'trip_summaries');
     final summary = TripSummary(
       tripId: tripId,
       startedAt: DateTime.parse(trip['started_at']! as String).toUtc(),
@@ -547,6 +715,8 @@ abstract final class RouteSummaryStore {
       visibleGapCount: sum('visible_gap_count'),
       stopEvidenceRunCount: sum('stop_evidence_run_count'),
       cleanedDistanceMeters: legs.isEmpty ? null : cleaned,
+      correctedDistanceMeters: anyReviewed ? corrected : null,
+      stepCountStoppedAt: stepsStoppedAt,
       updatedAt: now,
     );
     await database.insert(
@@ -568,6 +738,11 @@ abstract final class RouteSummaryStore {
         'stop_evidence_run_count': summary.stopEvidenceRunCount,
         'step_count': steps,
         'cleaned_distance_m': summary.cleanedDistanceMeters,
+        if (tripSummaryColumns.contains('corrected_distance_m'))
+          'corrected_distance_m': summary.correctedDistanceMeters,
+        if (tripSummaryColumns.contains('step_count_stopped_at'))
+          'step_count_stopped_at':
+              stepsStoppedAt == null ? null : _timestamp(stepsStoppedAt),
         'updated_at': _timestamp(now),
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
@@ -625,6 +800,10 @@ abstract final class RouteSummaryStore {
       distanceMeters: (track['total_distance_m'] as num?)?.toDouble() ?? 0,
       cleanedDistanceMeters: (row['cleaned_distance_m'] as num?)?.toDouble(),
       cleanedRunId: row['cleaned_run_id'] as String?,
+      correctedDistanceMeters: row['review_run_id'] == null
+          ? null
+          : (row['corrected_distance_m'] as num?)?.toDouble(),
+      stepCountStoppedAt: time(row['step_count_stopped_at']),
       acceptedPointCount: trackCount('accepted_point_count'),
       rejectedPointCount: trackCount('rejected_point_count'),
       segmentCount: trackCount('segment_count'),
@@ -657,6 +836,50 @@ abstract final class RouteSummaryStore {
     FixQualityIssue.stationaryHold,
     FixQualityIssue.stationaryOutlier,
   };
+
+  /// The review whose rows [trackId]'s totals and stops read, if one is
+  /// current (route database schema 18).
+  static Future<String?> currentReviewRunId(
+    DatabaseExecutor database,
+    String trackId,
+  ) async {
+    if (!(await _columnNames(database, 'track_summaries'))
+        .contains('review_run_id')) {
+      return null;
+    }
+    final rows = await database.query(
+      'track_summaries',
+      columns: <String>['review_run_id'],
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.single['review_run_id'] as String?;
+  }
+
+  /// SQL selecting the rows of the reviewed table aliased [alias] that count
+  /// for their track: those of its current review, or the rows recorded live
+  /// when it has none. Needs schema 18.
+  static String currentRowsSql(String alias) =>
+      "COALESCE($alias.review_run_id, '') = COALESCE(("
+      'SELECT summary.review_run_id FROM track_summaries summary '
+      "WHERE summary.track_id = $alias.track_id), '')";
+
+  /// The condition selecting [trackId]'s rows of [table] that count: those of
+  /// its current review, or the rows recorded live.
+  static Future<(String, List<Object?>)> rowsOf(
+    DatabaseExecutor database,
+    String table,
+    String trackId,
+  ) async {
+    if (!(await _columnNames(database, table)).contains('review_run_id')) {
+      return ('track_id = ?', <Object?>[trackId]);
+    }
+    final runId = await currentReviewRunId(database, trackId);
+    return runId == null
+        ? ('track_id = ? AND review_run_id IS NULL', <Object?>[trackId])
+        : ('track_id = ? AND review_run_id = ?', <Object?>[trackId, runId]);
+  }
 
   static Future<Map<String, Object?>?> _summaryRow(
     DatabaseExecutor database,
@@ -701,11 +924,12 @@ abstract final class RouteSummaryStore {
     DatabaseExecutor database,
     String trackId,
   ) async {
+    final (where, args) = await rowsOf(database, 'track_stops', trackId);
     final rows = await database.query(
       'track_stops',
       columns: <String>['started_at', 'last_seen_at', 'ended_at'],
-      where: 'track_id = ?',
-      whereArgs: <Object?>[trackId],
+      where: where,
+      whereArgs: args,
     );
     var stopped = 0;
     for (final row in rows) {
@@ -717,6 +941,23 @@ abstract final class RouteSummaryStore {
       if (duration > 0) stopped += duration;
     }
     return (rows.length, stopped);
+  }
+
+  /// The earliest time a capture generation of [trackId] stopped counting
+  /// while the device walked, from its live or current review rows.
+  static Future<String?> _stepsStoppedAt(
+    DatabaseExecutor database,
+    String trackId,
+  ) async {
+    final (where, args) =
+        await rowsOf(database, 'track_step_generations', trackId);
+    final row = (await database.rawQuery(
+      'SELECT MIN(stopped_at) AS stopped_at FROM track_step_generations '
+      'WHERE $where AND stopped_at IS NOT NULL',
+      args,
+    ))
+        .single;
+    return row['stopped_at'] as String?;
   }
 
   static Future<int?> _steps(DatabaseExecutor database, String trackId) async {

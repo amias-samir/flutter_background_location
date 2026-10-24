@@ -11,7 +11,7 @@
       <fbl:pausedSeconds>540</fbl:pausedSeconds>
       <fbl:stopCount>0</fbl:stopCount>
       <fbl:averageMovingSpeedMetersPerSecond>0.0</fbl:averageMovingSpeedMetersPerSecond>
-      <fbl:qualityEventCount>1</fbl:qualityEventCount>
+      <fbl:qualityEventCount>0</fbl:qualityEventCount>
       <fbl:visibleGapCount>0</fbl:visibleGapCount>
     </extensions>
   </metadata>

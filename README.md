@@ -413,15 +413,29 @@ Doppler speed is at least 5 m/s, or at least 2 m/s with a fresh in-vehicle or
 on-bicycle reading (quality policy 4). Walking and standing keep the walking
 limit, and an explicit `maximumAcceptedAccuracyMeters` still wins.
 
+Quality policy 5, the default for new adaptive routes, decides the same way
+on every phone. The first fix after a silence that lands far from the route
+is accepted at once only when its Doppler speed is precise and consistent;
+otherwise it waits for a fix that agrees with it, so a wrong re-acquisition
+fix never pulls the route 100–300 m off. A fix the route could not have
+reached is kept as rejected `kinematic_outlier` evidence. Reported accuracy
+may widen a decision's tolerance but never narrows it, because phones report
+it differently. Each fix is decided only from the evidence stored with it,
+so a route received live, recovered after a restart or drained from the
+native journal later gets the same stops and distance.
+
 The High and Precised presets also capture turns (`turnCaptureDegrees`, 45°).
 At riding speed a fix every 5 seconds lies tens of metres from the last, so a
 junction or hairpin between them would be cut across. When a fix moving at
 least 3 m/s with a reliable course has turned 45° since the last recorded
-fix, it is recorded at once. On Android the moving high-accuracy profile then
-requests a fix every second, batched up to the moving interval where the
-device supports it, and records only the regular and turning ones; iOS
-already records every fix that moved the distance filter. Set
-`turnCaptureDegrees: 0` to turn it off.
+fix, it is recorded at once. The moving High and Precised profile reads an
+unfiltered fix every second, batched up to the moving interval where the
+device supports it, and records one fix per moving interval or a turn,
+whatever the distance moved, on Android and iOS alike (sampling policy 2,
+`TrackingConfig.samplingPolicyVersion`, preset definition 6), so walking,
+standing and driving record at the same cadence on every phone. Set
+`turnCaptureDegrees: 0` to turn turn capture off. Routes recording across an
+upgrade keep the sampling they started with.
 
 `MotionFusionMode.platformActivityOnly` is the compatibility default.
 `lowPowerSensorFusion` adds step/pedometer and significant-motion evidence.
@@ -1160,7 +1174,7 @@ anything. The owner-scoped controllers implement `TrackingSummaryController`:
 ```dart
 final details = tracking as TrackingSummaryController;
 final summary = await details.routeSummary(trackId);
-print('${summary.distanceMeters} m, moving ${summary.moving}, '
+print('${summary.displayDistanceMeters} m, moving ${summary.moving}, '
     'stopped ${summary.stopped} at ${summary.stopCount} stops, '
     '${summary.stepCount ?? 'no'} steps');
 final trip = await details.tripSummary(tripId);
@@ -1178,7 +1192,10 @@ counts, segments, first and newest fix times, and these values:
 | `maxSpeedMetersPerSecond` | Fastest Doppler speed of an accepted fix with speed accuracy of 2 m/s or better, or unreported |
 | `averageMovingSpeedMetersPerSecond` | Distance over moving time |
 | `stepCount` | Steps counted while the route recorded; null when not counted |
-| `qualityEventCount` | Rejected-fix runs worth a look; runs made only of stop evidence are counted in `stopEvidenceRunCount` |
+| `stepCountStoppedAt` | When the step counter stopped counting while the person walked: the count is incomplete from then, never estimated; null when complete |
+| `correctedDistanceMeters` | The distance under the current rules, for a route recorded under older ones and reviewed (see below); null otherwise |
+| `displayDistanceMeters` | The distance to show: `correctedDistanceMeters` when present, otherwise `distanceMeters` |
+| `qualityEventCount` | Rejected-fix runs that left a visible hole in the route; runs made only of stop evidence are counted in `stopEvidenceRunCount` |
 | `visibleGapCount` | Holes in the route: lifecycle breaks, or gaps of at least 60 s or 150 m between accepted fixes |
 | `cleanedDistanceMeters` | Length of the current cleaned view, once one was derived |
 
@@ -1188,6 +1205,20 @@ it was. Each stored gap keeps this decision, and
 `isVisible` gaps agrees with the count. `TripSummary` holds the same totals
 over a Trip's legs. `TrackBundle.summary` and `TripBundle.summary` carry them
 too.
+
+**Routes recorded by an older version.** Two phones recording the same
+route should report the same stops, distance, quality events and visible
+gaps; the rules behind quality policy 5 and continuity policy 4 make them do
+so. A completed route recorded under older rules is decided again under the
+current ones, in the background after the client opens and when it is first
+read, and the review is stored beside what the route recorded: its stops,
+gaps, quality runs and step decisions come from the review, and
+`correctedDistanceMeters` reports its distance. The route's points, their
+acceptance, `distanceMeters` (the measured distance) and its uploads never
+change. `listDerivedGeometry` lists the reviewed route as a run with the
+algorithm `DerivedGeometryAlgorithm.routeQualityReview`; loading it shows
+exactly the fixes the review keeps, and deleting it restores the recorded
+stops, gaps and totals.
 
 `currentCleanedGeometry(trackId)` returns the route's current stop-aware
 cleaned view: the newest run when it covers the route's newest point under the
@@ -1204,10 +1235,24 @@ The package never prompts for steps on its own; without the permission, or
 on a phone without a step counter, `stepCount` stays null. A permission
 granted while a route records starts the count within a minute. Each location
 fix carries the count since its capture session started (`stepCount`), each
-point keeps it, and the route adds each session once, so a restart or
-recovery never counts steps twice. Steps taken after the newest fix count when
-the route pauses or completes. The native capability `step_count` reports a
-step counter.
+point keeps it, and the route counts each session once, at its highest count,
+so a restart or recovery never counts steps twice. Steps taken after the
+newest fix count when the route pauses or completes: the native side reads a
+final count on every way capture stops. The native capability `step_count`
+reports a step counter.
+
+Some phones stop delivering step counts while the person walks. Android
+prefers the wake-up step counter and repairs a counter that falls silent
+while other evidence shows walking (it flushes, re-registers and switches to
+the other counter); iOS reads the pedometer before pausing and stopping.
+`stepCoverage` on fixes and status reports the counter's state (capability
+`step_count_coverage`). A count that stopped and was not recovered keeps the
+steps counted so far and sets `stepCountStoppedAt`, so a UI can show
+"≥ 1,234 steps · counter stopped at 09:22"; nothing is estimated. Changes of
+the counter's state are recorded as count-free health events, and
+`StepCounterDiagnosticsController.stepCounterDiagnostics()` returns the
+counter's count-free event history for support (capability
+`step_counter_diagnostics`).
 
 Steps are fitness data. They are kept in the route database and its exports.
 Upload batches leave them out of `TrackUploadBatch.toMap()`, but the batch's

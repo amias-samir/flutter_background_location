@@ -212,8 +212,8 @@ final class TrackingConfig {
   /// Creates a configuration whose unset sampling values come from
   /// [accuracy]'s preset.
   ///
-  /// New configurations use the current motion policy; see
-  /// [motionPolicyVersion].
+  /// New configurations use the current motion and sampling policies; see
+  /// [motionPolicyVersion] and [samplingPolicyVersion].
   const TrackingConfig({
     TrackingAccuracy accuracy = TrackingAccuracy.high,
     TrackingAccuracy? locationAccuracy,
@@ -296,6 +296,7 @@ final class TrackingConfig {
           androidNotificationText: androidNotificationText,
           iosTerminationRecoveryMode: iosTerminationRecoveryMode,
           motionPolicyVersion: TrackingPolicyVersions.motionPolicy,
+          samplingPolicyVersion: TrackingPolicyVersions.samplingPolicy,
         );
 
   const TrackingConfig._resolve({
@@ -337,6 +338,7 @@ final class TrackingConfig {
     required this.androidNotificationText,
     required this.iosTerminationRecoveryMode,
     required this.motionPolicyVersion,
+    required this.samplingPolicyVersion,
   })  : firstFixTimeout = firstFixTimeout ??
             (accuracy == TrackingAccuracy.low
                 ? const Duration(minutes: 2)
@@ -586,6 +588,20 @@ final class TrackingConfig {
   /// recording across an upgrade is never reinterpreted.
   final int motionPolicyVersion;
 
+  /// Version of how native capture picks the fixes it records.
+  ///
+  /// Version 2 records one fix per [movingInterval], or a turn, from an
+  /// unfiltered 1 Hz stream in the High and Precised moving profile, whatever
+  /// the distance moved, so walking, standing and driving record at the same
+  /// cadence on Android and iOS. Version 1 also waited for
+  /// [movingDistanceFilterMeters] of movement.
+  ///
+  /// The package sets this like [motionPolicyVersion]: new configurations use
+  /// [TrackingPolicyVersions.samplingPolicy], and a configuration persisted
+  /// before the key existed keeps
+  /// [TrackingPolicyVersions.legacySamplingPolicy].
+  final int samplingPolicyVersion;
+
   ResolvedTrackingAccuracy get resolvedAccuracy => ResolvedTrackingAccuracy(
         movingInterval: movingInterval,
         distanceFilterMeters: movingDistanceFilterMeters,
@@ -697,6 +713,7 @@ final class TrackingConfig {
         iosTerminationRecoveryMode:
             iosTerminationRecoveryMode ?? this.iosTerminationRecoveryMode,
         motionPolicyVersion: motionPolicyVersion,
+        samplingPolicyVersion: samplingPolicyVersion,
       );
 
   /// This configuration with [accuracy]'s preset values; everything else is
@@ -870,6 +887,7 @@ final class TrackingConfig {
             IosTerminationRecoveryMode.interrupted)
           'iosTerminationRecoveryMode': iosTerminationRecoveryMode.name,
         'motionPolicyVersion': motionPolicyVersion,
+        'samplingPolicyVersion': samplingPolicyVersion,
       };
 
   String toJson() => jsonEncode(toMap());
@@ -991,6 +1009,10 @@ final class TrackingConfig {
       // existed are marked legacy where they are decoded from storage.
       motionPolicyVersion: TrackingPolicyVersions.resolveMotionPolicy(
         integer('motionPolicyVersion') ?? TrackingPolicyVersions.motionPolicy,
+      ),
+      samplingPolicyVersion: TrackingPolicyVersions.resolveSamplingPolicy(
+        integer('samplingPolicyVersion') ??
+            TrackingPolicyVersions.samplingPolicy,
       ),
     );
   }

@@ -169,6 +169,10 @@
     "motionPolicyVersion": {
       "android": "parsed",
       "ios": "parsed"
+    },
+    "samplingPolicyVersion": {
+      "android": "parsed",
+      "ios": "parsed"
     }
   },
   "nativeOnlyKeys": {

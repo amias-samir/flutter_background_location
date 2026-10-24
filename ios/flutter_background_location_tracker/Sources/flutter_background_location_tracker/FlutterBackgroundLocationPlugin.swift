@@ -204,6 +204,8 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         result(state["isTracking"] as? Bool ?? false)
       case "getState":
         service.flushStepCount { [service] in result(service.stateMap()) }
+      case "getStepCounterDiagnostics":
+        result(service.stepCounterDiagnostics())
       case "getLastLocation":
         result(service.lastLocationMap())
       case "getPendingLocations":
@@ -441,7 +443,11 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         "journal_nested_json_payload",
         "ios_probe_burst",
         "stationary_policy_v2",
-      ] + (StepCounter.isAvailable ? ["step_count"] : []),
+        "journaled_decision_inputs",
+        "profile_stamp_at_capture",
+        "fix_sampling_v2",
+        "step_counter_diagnostics",
+      ] + (StepCounter.isAvailable ? ["step_count", "step_count_coverage"] : []),
     ]
   }
 

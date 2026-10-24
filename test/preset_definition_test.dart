@@ -10,7 +10,7 @@ void main() {
             .readAsStringSync(),
       ) as Map)
           .cast<String, Object?>();
-  final fixture = load(5);
+  final fixture = load(6);
   final presets = (fixture['presets']! as Map).cast<String, Object?>();
 
   Iterable<(TrackingAccuracy, RouteCaptureIntent)> combinations() sync* {
@@ -26,15 +26,15 @@ void main() {
   Map<String, Object?> presetRecord(TrackingConfig config) =>
       config.toMap()..remove('motionPolicyVersion');
 
-  test('preset definition 5 resolves exactly as recorded', () {
+  test('preset definition 6 resolves exactly as recorded', () {
     // Changing a preset value means a new preset-definition version, a new
     // configuration epoch for new routes, and a new fixture. Old routes are
     // never reinterpreted, so this record stays frozen.
-    expect(fixture['presetDefinitionVersion'], 5);
+    expect(fixture['presetDefinitionVersion'], 6);
     expect(
       TrackingPolicyVersions.presetDefinition,
-      5,
-      reason: 'Add preset_definition_v6.json when bumping the version.',
+      6,
+      reason: 'Add preset_definition_v7.json when bumping the version.',
     );
     expect(presets, hasLength(combinations().length));
     for (final (accuracy, intent) in combinations()) {
@@ -48,12 +48,25 @@ void main() {
     }
   });
 
-  test('preset definition 5 adds only turn capture to version 4', () {
-    final version4 = (load(4)['presets']! as Map).cast<String, Object?>();
-    expect(version4.keys, presets.keys);
+  test('preset definition 6 adds only sampling policy 2 to version 5', () {
+    final version5 = (load(5)['presets']! as Map).cast<String, Object?>();
+    expect(version5.keys, presets.keys);
     for (final key in presets.keys) {
       final current = Map<String, Object?>.of(
         (presets[key]! as Map).cast<String, Object?>(),
+      );
+      expect(current.remove('samplingPolicyVersion'), 2, reason: key);
+      expect(current, version5[key], reason: key);
+    }
+  });
+
+  test('preset definition 5 adds only turn capture to version 4', () {
+    final version4 = (load(4)['presets']! as Map).cast<String, Object?>();
+    final version5 = (load(5)['presets']! as Map).cast<String, Object?>();
+    expect(version4.keys, version5.keys);
+    for (final key in version5.keys) {
+      final current = Map<String, Object?>.of(
+        (version5[key]! as Map).cast<String, Object?>(),
       );
       final degrees = current.remove('turnCaptureDegrees');
       expect(current, version4[key], reason: key);

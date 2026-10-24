@@ -11,7 +11,8 @@ import 'tracking_configuration_epoch.dart';
 /// [TrackingPolicyVersions.legacyMotionPolicy]: a route that was recording
 /// across a package upgrade resumes with the state machine it started with.
 /// Likewise one without `turnCaptureDegrees` keeps sampling without turn
-/// capture.
+/// capture, and one without `samplingPolicyVersion` keeps
+/// [TrackingPolicyVersions.legacySamplingPolicy].
 TrackingConfig decodePersistedTrackingConfig(String json) {
   final map = Map<String, Object?>.of(
     (jsonDecode(json) as Map).cast<String, Object?>(),
@@ -20,6 +21,10 @@ TrackingConfig decodePersistedTrackingConfig(String json) {
       'motionPolicyVersion',
       () => TrackingPolicyVersions.legacyMotionPolicy,
     )
-    ..putIfAbsent('turnCaptureDegrees', () => 0.0);
+    ..putIfAbsent('turnCaptureDegrees', () => 0.0)
+    ..putIfAbsent(
+      'samplingPolicyVersion',
+      () => TrackingPolicyVersions.legacySamplingPolicy,
+    );
   return TrackingConfig.fromMap(map);
 }

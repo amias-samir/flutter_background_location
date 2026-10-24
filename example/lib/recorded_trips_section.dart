@@ -175,13 +175,14 @@ class RecordedTripsSection extends StatelessWidget {
                 icon: Icons.calendar_view_day,
                 label: '${trip.legCount} day(s)',
               ),
-              _TripDetail(
-                icon: Icons.pin_drop_outlined,
-                label: '${trip.acceptedPointCount} points',
-              ),
+              // The corrected distance once a day was reviewed. The point
+              // count is a sampling statistic and stays on the map.
               _TripDetail(
                 icon: Icons.straighten_rounded,
-                label: kilometres(trip.measuredDistanceMeters),
+                label: kilometres(
+                  summary.totals?.displayDistanceMeters ??
+                      trip.measuredDistanceMeters,
+                ),
               ),
               if (summary.totals case final totals?) ...<Widget>[
                 _TripDetail(
@@ -199,10 +200,10 @@ class RecordedTripsSection extends StatelessWidget {
                         '${totals.stopCount} stop(s) • '
                         '${hoursMinutes(totals.stopped)}',
                   ),
-                if (totals.stepCount case final steps?)
+                if (totals.stepsText case final steps?)
                   _TripDetail(
                     icon: Icons.directions_walk_rounded,
-                    label: '$steps steps',
+                    label: steps,
                   ),
                 _TripDetail(
                   icon: Icons.warning_amber_rounded,

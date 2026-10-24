@@ -26,7 +26,7 @@
         "pausedSeconds": 540,
         "stopCount": 0,
         "averageMovingSpeedMetersPerSecond": 0.0,
-        "qualityEventCount": 1,
+        "qualityEventCount": 0,
         "visibleGapCount": 0
       },
       "geometry": {

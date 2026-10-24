@@ -1004,7 +1004,11 @@ final class FakeTrackingCall {
 
 /// Deterministic platform adapter for testing a real [TrackingClient].
 final class FakeTrackerAdapter
-    implements TrackerAdapter, StagedPermissionAdapter, NativeProtocolAdapter {
+    implements
+        TrackerAdapter,
+        StagedPermissionAdapter,
+        NativeProtocolAdapter,
+        StepCounterDiagnosticsAdapter {
   FakeTrackerAdapter({
     this.permissionState = fullyReadyPermissionState,
     this.capabilityReport = fullySupportedCapabilityReport,
@@ -1155,12 +1159,27 @@ final class FakeTrackerAdapter
         trackId: _trackId,
         stepCount: stepCount,
         captureGenerationId: stepCaptureGenerationId,
+        stepCoverage: stepCoverage,
+        stepFinal: stepFinal,
       );
 
   /// Steps the fake native counter reports in [runtimeState], with the
   /// capture generation they belong to; null reports no step counter.
   int? stepCount;
   String? stepCaptureGenerationId;
+
+  /// The counter's coverage and the newest stopped generation's final count
+  /// reported in [runtimeState].
+  StepCoverage? stepCoverage;
+  StepFinal? stepFinal;
+
+  /// Entries returned by [stepCounterDiagnostics].
+  final List<StepCounterDiagnostic> stepCounterDiagnosticEntries =
+      <StepCounterDiagnostic>[];
+
+  @override
+  Future<List<StepCounterDiagnostic>> stepCounterDiagnostics() async =>
+      List<StepCounterDiagnostic>.unmodifiable(stepCounterDiagnosticEntries);
 
   @override
   Future<LocationSample?> lastLocation() async => _lastLocation;

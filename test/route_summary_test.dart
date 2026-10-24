@@ -299,7 +299,7 @@ void main() {
         path,
         options: OpenDatabaseOptions(singleInstance: false),
       );
-      expect(await inspected.getVersion(), 17);
+      expect(await inspected.getVersion(), 18);
       expect(
         await inspected.rawQuery(
           'SELECT id FROM track_quality_runs WHERE stop_evidence IS NULL',

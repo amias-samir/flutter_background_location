@@ -173,10 +173,15 @@ void main() {
 
   test('a slow lane ride keeps moving fixes and holds stuck positions',
       () async {
-    // Quality policy 3: positions that stop following the vehicle are quiet
-    // fixes, held as a pause; fixes near a walking or vehicle transition
-    // move and stay in the route. No stay lasts long enough to be a stop.
-    final run = await StopReplay.start(t0, config: const TrackingConfig());
+    // Quality policies 3 and 4: positions that stop following the vehicle
+    // are quiet fixes, held as a pause; fixes near a walking or vehicle
+    // transition move and stay in the route. No stay lasts long enough to be
+    // a stop.
+    final run = await StopReplay.start(
+      t0,
+      config: const TrackingConfig(),
+      qualityPolicy: 4,
+    );
     final lane = SyntheticTrackingRoute.slowLaneRide(
       startedAt: t0,
       trackId: run.trackId,

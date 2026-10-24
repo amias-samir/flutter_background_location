@@ -4,8 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'stop_replay_support.dart';
 
-/// Every route's details are stored: stops derived once for routes recorded
-/// without live stop records, and the cleaned view's distance.
+/// Every route's details are stored: stops for routes recorded without live
+/// stop records (from their review), and the cleaned view's distance.
 void main() {
   final t0 = DateTime.utc(2026, 10, 20, 6);
 
@@ -71,7 +71,11 @@ void main() {
         .listTrackStops(run.trackId);
     expect(stops, hasLength(1));
     expect(stops.single.isOpen, isFalse);
-    expect(stops.single.qualityPolicyVersion, 2);
+    expect(
+      stops.single.qualityPolicyVersion,
+      RouteReview.qualityPolicyVersion,
+      reason: 'the route was reviewed under the current rules as it completed',
+    );
 
     // Deriving again stores nothing new.
     await controller.routeSummary(run.trackId);

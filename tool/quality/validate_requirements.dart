@@ -90,6 +90,22 @@ const _compatibilitySources = <String, List<_VersionSource>>{
       r'static let motionPolicyVersion = (\d+)',
     ),
   ],
+  'sampling_policy': [
+    _VersionSource(
+      'lib/src/domain/tracking_configuration_epoch.dart',
+      r'\bsamplingPolicy\s*=\s*(\d+);',
+    ),
+    _VersionSource(
+      'android/src/main/kotlin/com/samir/flutter_background_location/'
+          'TrackingConfiguration.kt',
+      r'CURRENT_SAMPLING_POLICY_VERSION\s*=\s*(\d+)',
+    ),
+    _VersionSource(
+      'ios/flutter_background_location_tracker/Sources/'
+          'flutter_background_location_tracker/TrackingConfiguration.swift',
+      r'static let currentSamplingPolicyVersion = (\d+)',
+    ),
+  ],
 };
 
 /// Package sources that raise error codes. Every literal code they raise must

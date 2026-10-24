@@ -171,12 +171,17 @@ final class StopReplay {
   final String? databasePath;
 
   /// Starts a route; with [qualityPolicy], its epoch is pinned to that
-  /// quality policy version, as for a route recorded by an older build.
+  /// quality policy version, as for a route recorded by an older build, and
+  /// to [continuityPolicy], by default the continuity policy such a build
+  /// shipped with.
   static Future<StopReplay> start(
     DateTime t0, {
     required TrackingConfig config,
     int? qualityPolicy,
+    int? continuityPolicy,
   }) async {
+    final pinnedContinuity = continuityPolicy ??
+        (qualityPolicy != null && qualityPolicy < 5 ? 3 : null);
     String? path;
     if (qualityPolicy != null) {
       final directory = await Directory.systemTemp.createTemp('fbl-stop-');
@@ -219,6 +224,13 @@ final class StopReplay {
         'WHERE track_id = ?',
         <Object?>[qualityPolicy, started.leg.trackId],
       );
+      if (pinnedContinuity != null) {
+        await raw.rawUpdate(
+          'UPDATE tracking_configuration_epochs '
+          'SET continuity_policy_version = ? WHERE track_id = ?',
+          <Object?>[pinnedContinuity, started.leg.trackId],
+        );
+      }
       for (final guard in guards) {
         await raw.execute(guard['sql']! as String);
       }

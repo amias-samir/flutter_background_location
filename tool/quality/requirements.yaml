@@ -3,14 +3,15 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 17
+  route_database_schema: 18
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
-  preset_definition: 5
-  quality_policy: 4
-  continuity_policy: 3
+  preset_definition: 6
+  quality_policy: 5
+  continuity_policy: 4
   motion_policy: 2
+  sampling_policy: 2
 change_classifications:
   additive: "Adds an API, payload key, schema object, test, or documentation without removing supported behavior."
   behavior_tightening: "Narrows unsafe behavior while keeping the public symbol available."
@@ -1162,6 +1163,118 @@ work_packages:
       - test/step_count_test.dart
       - android/src/test/kotlin/com/samir/flutter_background_location/StepCountSessionTest.kt
       - example/ios/RunnerTests/StepCounterTests.swift
+  - id: LBO-31
+    phase: LBO
+    title: Quality policy 5 and continuity policy 4 (the same decisions on every chipset)
+    release_gate: the first far fix after a silence is accepted at once only with a precise, consistent Doppler speed and otherwise waits for an agreeing fix; a fix the route could not have reached is held back as kinematic_outlier evidence until later fixes agree; speed accuracy never rejects; nothing inside the hold radius ends a stop, and a pause ends inside it only on walking that a Doppler lower bound and confirmed readings both show; the radius comes from effective uncertainty clamped to 25–60 m; a precise Doppler standstill outranks lagging moving readings; a stay counts its two minutes only over evidence (after a silence that followed a moving fix, from the fixes after it; at departure after a silence, until its last held fix or the departure the first fix after the silence shows); a stay anchored on the fix that left a stop continues that visit; a gap is expected stationary suppression only when a stay explains it, never from the native profile stamp; visible runs on the approach become informational when a stop opens; on the four field-test routes of 2026-10-24 both phones record the same stops per place (start and end within 90 s), distance within 1 percent, and equal quality events and visible gaps; routes recorded under quality policy 4 or continuity policy 3 decide as before
+    required_before: promoting quality policy 5 beyond the two-phone re-test
+    evidence:
+      - lib/src/domain/kinematic_policy.dart
+      - lib/src/domain/stop_site.dart
+      - lib/src/domain/fix_quality.dart
+      - lib/src/domain/quality_run_rules.dart
+      - lib/src/domain/track_stop_places.dart
+      - lib/src/domain/tracking_continuity.dart
+      - lib/src/domain/tracking_configuration_epoch.dart
+      - lib/src/application/route_decision_engine.dart
+      - lib/src/application/continuity_gap_detector.dart
+      - lib/src/application/tracking_client.dart
+      - test/kinematic_policy_test.dart
+      - test/route_decision_engine_test.dart
+      - test/two_phone_agreement_test.dart
+      - test/stop_site_pipeline_test.dart
+      - test/tracking_continuity_test.dart
+      - test/track_stop_places_test.dart
+  - id: LBO-32
+    phase: LBO
+    title: Step counts never stall silently
+    release_gate: on Android a step counter that stops reporting while the person walks is flushed, re-registered and switched to its other variant before it is reported stalled, its final count is read before every native stop path, and each stopped generation reports its final count; iOS reads the pedometer before pause and stop and on relaunch; a stalled or unflushed count shows as incomplete from the time it stopped, never estimated; a generation counts once at its highest count in any order; coverage changes leave count-free health events and a count-free diagnostics ring; on the re-test each phone's route steps are within 5 percent of its own step count or flagged with a stall
+    required_before: showing step counts as complete beyond the example app
+    evidence_mode: physical_manual
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/StepCounter.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/StepCounterWatchdog.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingStateStore.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StepCounterWatchdogTest.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StepCountSessionTest.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StepRecordCodecTest.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/StepCounter.swift
+      - example/ios/RunnerTests/StepCounterTests.swift
+      - lib/src/domain/step_coverage.dart
+      - lib/src/storage/route_review_store.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/application/route_reviewer.dart
+      - test/step_count_test.dart
+      - test/native_tracking_protocol_test.dart
+  - id: LBO-33
+    phase: LBO
+    title: Sampling parity (sampling policy 2, preset definition 6)
+    release_gate: the High and Precised moving profile records one fix per moving interval or a turn from an unfiltered 1 Hz stream on Android and iOS, whatever the distance moved, so walking, standing and driving record at the interval; on the re-test at least 95 percent of moving intervals are 5.0 ± 0.5 s on both phones; configurations persisted without samplingPolicyVersion keep sampling policy 1
+    required_before: promoting sampling policy 2 beyond the two-phone re-test
+    evidence_mode: physical_manual
+    evidence:
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/persisted_tracking_config.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationRequestPlan.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TurnCaptureSampler.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingConfiguration.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/LocationRequestPlanTest.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/TurnCaptureSamplerTest.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/TurnCaptureSampler.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/TrackingConfiguration.swift
+      - example/ios/RunnerTests/TurnCaptureSamplerTests.swift
+      - example/ios/RunnerTests/TrackingConfigurationTests.swift
+      - test/fixtures/cross_language/turn_capture_v2.json
+      - test/fixtures/presets/preset_definition_v6.json
+      - test/preset_definition_test.dart
+      - test/sampling_policy_config_test.dart
+  - id: LBO-34
+    phase: LBO
+    title: Live decisions equal replayed ones (journaled decision inputs)
+    release_gate: each journaled fix carries the activity readings and profile switches received since the previous one and the profile in effect when it was captured, on Android and iOS; quality policy 5 decides only from evidence stored with each fix, so a route received live, after a restart, drained from the journal or reviewed offline gets the same decisions; profile-switch health events are rebuilt from the journal once, at the time of the switch
+    required_before: relying on journal-drained routes for stop records
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/DecisionInputJournal.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/DecisionInputJournalTest.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/DecisionInputJournal.swift
+      - example/ios/RunnerTests/DecisionInputJournalTests.swift
+      - test/fixtures/cross_language/activity_reading_compaction_v1.json
+      - lib/src/domain/location_sample.dart
+      - lib/src/domain/track_point.dart
+      - lib/src/application/route_decision_engine.dart
+      - test/live_replay_determinism_test.dart
+      - test/route_decision_engine_test.dart
+      - test/sampling_profile_diagnostics_test.dart
+  - id: LBO-35
+    phase: LBO
+    title: Schema 18 route review (corrected results for recorded routes)
+    release_gate: a completed route recorded under quality policy 4 or earlier is decided again under the current rules in the background and on first read, owner-scoped, and stored beside what it recorded in one transaction; its points, their acceptance, its measured distance and its uploads stay byte-identical; readers, summaries and exports use the review's stops, gaps, quality runs and step decisions; RouteSummary and TripSummary report the corrected distance; the reviewed route is a derived-geometry run with exactly the kept fixes; deleting the review restores every recorded row; fresh databases equal upgraded ones from every supported version
+    required_before: corrected totals beyond the example app
+    evidence:
+      - lib/src/domain/route_review.dart
+      - lib/src/application/route_reviewer.dart
+      - lib/src/application/route_detail_service.dart
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/storage/route_review_store.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/domain/route_summary.dart
+      - test/route_review_test.dart
+      - test/route_detail_service_test.dart
+      - test/sqlite_track_repository_test.dart
+      - example/lib/route_map_page.dart
+      - example/lib/route_totals.dart
+      - example/test/route_review_test.dart
+  - id: LBO-36
+    phase: LBO
+    title: Two-phone physical qualification of the consistency rules
+    release_gate: two Android phones of different chipsets and an iPhone record the same walk and ride with pockets swapped and screens off, one run with the app swiped away, one in platformActivityOnly, each ending with notification Pause then Stop; the phones record the same stops per place (start and end within 60 s median, 120 s maximum), corrected distance within 2 percent where all had fixes, equal quality events, visible gaps only where a phone truly lacked travelling fixes, steps within 5 percent of each phone's own count or flagged with a stall, and the app-closed run shows still stops and profile health events
+    required_before: release of quality policy 5, sampling policy 2 and the step watchdog
+    evidence_mode: physical_manual
+    evidence:
+      - test/two_phone_agreement_test.dart
+      - tool/quality/validate_physical_qualification.dart
   - id: LBO-13B
     phase: LBO
     title: Stop-aware route cleaning version 2 (stays at a place, from held evidence too)

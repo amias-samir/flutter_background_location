@@ -149,6 +149,18 @@ final class FixQualityPolicy {
           appliedVersion: 4,
           maximumAccuracyMeters: _ridingAccuracyLimit(sample),
         ),
+      // Quality policy 5's kinematic and stay rules need the route's state;
+      // `RouteDecisionEngine` applies them on top of this decision.
+      5 => _evaluateVersion1(
+          sample: sample,
+          previous: previous,
+          now: now,
+          appliedVersion: 5,
+          maximumAccuracyMeters: _ridingAccuracyLimit(
+            sample,
+            credibleDopplerOnly: true,
+          ),
+        ),
       _ => throw StateError('Quality policy $applied has no evaluator.'),
     };
   }
@@ -168,7 +180,15 @@ final class FixQualityPolicy {
   /// See [ridingSpeedMetersPerSecond].
   static const double slowRidingSpeedMetersPerSecond = 2;
 
-  double _ridingAccuracyLimit(LocationSample sample) {
+  /// Quality policy 5 widens the envelope only for a credible Doppler speed:
+  /// a speed accuracy of at most [ridingMaximumSpeedAccuracy] and at most
+  /// half the speed. A chipset reporting 5 ± 11 m/s is not riding.
+  static const double ridingMaximumSpeedAccuracy = 3;
+
+  double _ridingAccuracyLimit(
+    LocationSample sample, {
+    bool credibleDopplerOnly = false,
+  }) {
     final limit = config.maximumAcceptedAccuracyMeters;
     if (config.captureIntent != RouteCaptureIntent.adaptive ||
         limit !=
@@ -180,6 +200,15 @@ final class FixQualityPolicy {
     }
     final speed = sample.speed;
     if (speed == null || !speed.isFinite) return limit;
+    if (credibleDopplerOnly) {
+      final speedAccuracy = sample.speedAccuracy;
+      if (speedAccuracy == null ||
+          !speedAccuracy.isFinite ||
+          speedAccuracy < 0 ||
+          speedAccuracy > math.min(ridingMaximumSpeedAccuracy, speed / 2)) {
+        return limit;
+      }
+    }
     final reading = sample.capturedActivity;
     final ridingReading = reading != null &&
         reading.evidenceState == ActivityEvidenceState.fresh &&

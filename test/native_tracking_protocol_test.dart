@@ -57,6 +57,80 @@ void main() {
     );
   });
 
+  test('native adapter reads the step counter diagnostics ring', () async {
+    final channel = const MethodChannel('test/step_diagnostics');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final at = DateTime.utc(2026, 10, 24, 3);
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      switch (call.method) {
+        case 'getProtocolInfo':
+          return <String, Object?>{
+            'version': 2,
+            'capabilityCodes': <String>[
+              NativeTrackingCapabilities.stepCounterDiagnostics,
+            ],
+          };
+        case 'getStepCounterDiagnostics':
+          return <Object?>[
+            <String, Object?>{
+              'at': at.millisecondsSinceEpoch,
+              'event': 'flush',
+              'sensor': 'step_counter_wakeup',
+              'registered': true,
+              'watchdogState': 'suspect',
+              'sinceDeliveryMs': 95000,
+              'sinceRiseMs': 120000,
+              'flushCompletedMs': null,
+              'replayOutcome': 'same',
+              'evidenceSource': 'activity',
+              'reregistrations': 1,
+            },
+            <String, Object?>{'event': 'no time'},
+            'not a map',
+          ];
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    final adapter = NativeTrackerAdapter(methodChannel: channel);
+    final entries = await (adapter as StepCounterDiagnosticsAdapter)
+        .stepCounterDiagnostics();
+
+    final entry = entries.single;
+    expect(entry.at, at);
+    expect(entry.event, 'flush');
+    expect(entry.sensor, 'step_counter_wakeup');
+    expect(entry.registered, isTrue);
+    expect(entry.watchdogState, 'suspect');
+    expect(entry.sinceDelivery, const Duration(seconds: 95));
+    expect(entry.sinceRise, const Duration(minutes: 2));
+    expect(entry.flushCompleted, isNull, reason: 'the flush timed out');
+    expect(entry.replayOutcome, 'same');
+    expect(entry.evidenceSource, 'activity');
+    expect(entry.reregistrations, 1);
+  });
+
+  test('native adapter reads no diagnostics without the capability', () async {
+    final channel = const MethodChannel('test/step_diagnostics_legacy');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final methods = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      methods.add(call.method);
+      throw MissingPluginException();
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    final adapter = NativeTrackerAdapter(methodChannel: channel);
+    expect(
+      await (adapter as StepCounterDiagnosticsAdapter).stepCounterDiagnostics(),
+      isEmpty,
+    );
+    expect(methods, isNot(contains('getStepCounterDiagnostics')));
+  });
+
   test('native adapter treats missing protocol method as legacy v1', () async {
     final channel = const MethodChannel('test/protocol_missing');
     final messenger =

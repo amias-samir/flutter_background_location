@@ -157,6 +157,7 @@ class FlutterBackgroundLocationPlugin :
                 result.success(stateStore.statusMap())
             }
             "getLastLocation" -> result.success(TrackingEventBus.lastLocation)
+            "getStepCounterDiagnostics" -> result.success(StepCounter.diagnostics())
             "getPendingLocations" -> pendingLocations(result)
             "getPendingLocationsPage" -> pendingLocationsPage(call, result)
             "getNativeJournalDiagnostic" -> nativeJournalDiagnostic(call, result)
@@ -1383,9 +1384,16 @@ class FlutterBackgroundLocationPlugin :
             false
         }
 
-    private fun protocolInfo(): Map<String, Any?> = linkedMapOf(
-        "version" to 2,
-        "capabilityCodes" to listOfNotNull(
+    private fun protocolInfo(): Map<String, Any?> {
+        val stepCounterPresent = StepCounter.isAvailable(applicationContext)
+        return linkedMapOf(
+            "version" to 2,
+            "capabilityCodes" to protocolCapabilityCodes(stepCounterPresent),
+        )
+    }
+
+    private fun protocolCapabilityCodes(stepCounterPresent: Boolean): List<String> =
+        listOfNotNull(
             "location_settings",
             "battery_optimization_settings",
             "shared_pending_location_coordinator",
@@ -1405,9 +1413,17 @@ class FlutterBackgroundLocationPlugin :
             "listen_replay_control",
             "status_fix_echo_control",
             "stationary_policy_v2",
-            "step_count".takeIf { StepCounter.isAvailable(applicationContext) },
-        ),
-    )
+            "step_count".takeIf { stepCounterPresent },
+            // `stepCoverage` on fixes and status, `stepFinal` in status.
+            "step_count_coverage".takeIf { stepCounterPresent },
+            "step_counter_diagnostics",
+            // `activityReadings` and `profileTransitions` on each journaled fix.
+            "journaled_decision_inputs",
+            // A fix's profile fields name the profile in effect when it was captured.
+            "profile_stamp_at_capture",
+            // `samplingPolicyVersion` 2: an unfiltered 1 Hz moving stream, sampled.
+            "fix_sampling_v2",
+        )
 
     private fun batteryOptimizationStatus(): Map<String, Any?> = linkedMapOf(
         "supported" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M),

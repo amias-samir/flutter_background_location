@@ -1268,10 +1268,13 @@ void main() {
       () async =>
           (await harness.repository.getTrack(trackId))!.acceptedPointCount == 1,
     );
+    // About 100 m on at a measured walking pace: plausible after the gap.
     tracker.locations.add(LocationSample(
-      latitude: 28.7,
-      longitude: 86.3,
+      latitude: 27.7009,
+      longitude: 85.3,
       horizontalAccuracy: 5,
+      speed: 1,
+      speedAccuracy: 0.5,
       capturedAt: harness.now.add(const Duration(minutes: 2)),
       provider: 'test',
       trackId: trackId,
@@ -1724,6 +1727,9 @@ void main() {
           longitude: 0.002,
           capturedAt: startedAt.add(const Duration(minutes: 6)),
           horizontalAccuracy: 5,
+          // A measured speed vouches for the distance covered since.
+          speed: 0.5,
+          speedAccuracy: 0.3,
           provider: 'test',
           eventId: 'after-downgrade',
           trackId: trackId,

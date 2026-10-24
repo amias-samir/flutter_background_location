@@ -148,6 +148,66 @@
   after the newest fix count when the route pauses or completes. Native code
   advertises the `step_count` capability. Steps are fitness data: a host
   that uploads them must declare that in its own privacy disclosures.
+- Two phones recording the same route now report the same results. A test
+  with two Xiaomi phones (one Qualcomm, one MediaTek) on four routes found a
+  frozen step counter, re-acquisition jumps of up to 286 m, different
+  sampling cadences, and stop, quality-event and gap rules that behaved
+  differently per chipset, per platform and between live and replayed data.
+  - **Quality policy 5** (the default for new adaptive routes). The first far
+    fix after a silence is accepted at once only with a precise, consistent
+    Doppler speed, and otherwise waits for a fix that agrees with it. A fix
+    the route could not have reached is kept as rejected `kinematic_outlier`
+    evidence. Speed accuracy never rejects a fix. Reported accuracy may widen
+    a tolerance but never narrows it. The stop hold radius is 25–60 m.
+    Nothing inside it ends a stop; a pause ends inside it only on walking
+    shown by both a Doppler speed and confirmed readings. A precise Doppler
+    standstill outranks lagging moving readings. A stay counts its two
+    minutes only over evidence, so a provider silence never becomes a stop
+    on one phone and nothing on the other. Each fix is decided only from the
+    evidence stored with it, so live, restarted, journal-drained and
+    offline decisions agree.
+  - **Continuity policy 4.** A gap counts as expected stationary suppression
+    only when a stay explains it, never because the native profile had
+    turned stationary. Every accepted gap of at least 60 s is decided.
+  - **Quality events** count only rejected-fix runs that left a visible hole
+    in the route. A run on the approach to a stop that opens soon after is
+    informational (summary version 2).
+  - **Recorded routes are corrected without being rewritten** (route database
+    schema 18). A completed route recorded under older rules is decided again
+    under the current ones, in the background and on first read. The review
+    is stored beside what the route recorded and is removable. Its stops,
+    gaps, quality runs and step decisions are what readers, summaries and
+    exports use. `RouteSummary` and `TripSummary` add `correctedDistanceMeters`
+    and `displayDistanceMeters`. `distanceMeters`, points, their acceptance
+    and uploads never change. The reviewed route is a derived run
+    (`DerivedGeometryAlgorithm.routeQualityReview`). The optional
+    `RouteReviewRepository` and `KeyedHealthEventRepository` capabilities
+    back this.
+  - **Steps never stall silently.** Android prefers the wake-up step counter,
+    flushes it every minute and repairs one that stays silent while the
+    person walks. Every way native capture stops reads a final count first,
+    and iOS reads the pedometer before pausing and stopping. Fixes and status
+    carry `stepCoverage`, and status carries `stepFinal` (capabilities
+    `step_count_coverage` and `step_counter_diagnostics`). A count that
+    stopped keeps the steps counted so far and sets
+    `RouteSummary.stepCountStoppedAt`; nothing is estimated. Each capture
+    generation counts once at its highest count. Coverage changes are
+    count-free health events, and `StepCounterDiagnosticsController` returns
+    the counter's count-free event history.
+  - **One sampling cadence** (sampling policy 2, preset definition 6). The
+    High and Precised moving profile records one fix per moving interval or
+    a turn, from an unfiltered stream, on Android and iOS alike.
+    `TrackingConfig.samplingPolicyVersion` is set by the package.
+    Configurations persisted without it keep sampling policy 1. Native code
+    advertises `fix_sampling_v2`.
+  - **Decision inputs are journaled.** Each journaled fix carries the
+    activity readings and profile switches since the previous one
+    (`LocationSample.activityReadings`, `profileTransitions`; capability
+    `journaled_decision_inputs`), stored with the point. Its profile stamp is
+    the profile at capture on both platforms (`profile_stamp_at_capture`).
+    Profile-switch health events are rebuilt from the journal once each.
+  - New routes only. Routes recording across the upgrade keep their
+    recorded policies, and the review corrects them once they complete.
 - `exportTrack` on the owner-scoped controllers now accepts
   `TrackGeometrySelection.derived` and writes the derived coordinates. It
   previously failed with `derived_geometry_requires_v2_export`.

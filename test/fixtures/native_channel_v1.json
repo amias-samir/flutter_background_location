@@ -153,7 +153,8 @@
           "firstFixTimeoutMs": 45000,
           "notificationTitle": "Location tracking active",
           "notificationText": "Recording your route",
-          "motionPolicyVersion": 2
+          "motionPolicyVersion": 2,
+          "samplingPolicyVersion": 2
         }
       }
     },
@@ -204,7 +205,8 @@
           "firstFixTimeoutMs": 45000,
           "notificationTitle": "Location tracking active",
           "notificationText": "Recording your route",
-          "motionPolicyVersion": 2
+          "motionPolicyVersion": 2,
+          "samplingPolicyVersion": 2
         }
       }
     },
@@ -256,7 +258,8 @@
           "firstFixTimeoutMs": 45000,
           "notificationTitle": "Location tracking active",
           "notificationText": "Recording your route",
-          "motionPolicyVersion": 2
+          "motionPolicyVersion": 2,
+          "samplingPolicyVersion": 2
         }
       }
     },

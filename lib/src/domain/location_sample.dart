@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'activity_snapshot.dart';
 import 'motion_evidence.dart';
+import 'step_coverage.dart';
 import 'tracker_status.dart';
 
 /// What the operating system reported about mock/simulated location.
@@ -53,6 +54,10 @@ final class LocationSample {
     this.nativeLifecycle,
     this.samplingProfile,
     this.stepCount,
+    this.activityReadings = const <ActivitySnapshot>[],
+    this.activityReadingsDropped,
+    this.stepCoverage,
+    this.profileTransitions = const <SamplingProfileTransition>[],
   });
 
   /// Latitude in decimal degrees.
@@ -156,6 +161,26 @@ final class LocationSample {
   /// activity permission is missing, or the native build predates it.
   final int? stepCount;
 
+  /// Activity readings native code received since the previous journaled fix
+  /// and journaled with this one (capability `journaled_decision_inputs`),
+  /// oldest first. Quality policy 5 decides from these and the attached
+  /// [capturedActivity] only, so a route drained from the journal later is
+  /// decided like one received live.
+  final List<ActivitySnapshot> activityReadings;
+
+  /// Readings native code dropped from [activityReadings] to keep the
+  /// journaled payload bounded; null when none were dropped.
+  final int? activityReadingsDropped;
+
+  /// How completely the step counter counted this capture generation when
+  /// the fix was captured (capability `step_count_coverage`); null without a
+  /// step counter or a native build that reports it.
+  final StepCoverage? stepCoverage;
+
+  /// Native sampling-profile switches since the previous journaled fix
+  /// (capability `journaled_decision_inputs`), oldest first.
+  final List<SamplingProfileTransition> profileTransitions;
+
   /// Three-state interpretation of the available mock-location evidence.
   MockLocationAssessment get mockAssessment {
     // A positive platform signal is authoritative even if an older adapter
@@ -243,6 +268,15 @@ final class LocationSample {
         _ => null,
       },
       stepCount: stepCountFromPayload(map['stepCount']),
+      activityReadings: _activityReadingsFromPayload(map['activityReadings']),
+      activityReadingsDropped: switch (map['activityReadingsDropped']) {
+        final num dropped when dropped.isFinite && dropped > 0 =>
+          dropped.toInt(),
+        _ => null,
+      },
+      stepCoverage: StepCoverage.fromPayload(map['stepCoverage']),
+      profileTransitions:
+          SamplingProfileTransition.listFromPayload(map['profileTransitions']),
       capturedActivity: _activityFromLocationPayload(map),
       capturedMotionState: switch (rawMotion?.toString().toLowerCase()) {
         'moving' => MotionState.moving,
@@ -290,6 +324,28 @@ ActivitySnapshot? _activityFromLocationPayload(Map<Object?, Object?> map) {
     'ageMs': map['activityAgeMs'],
     'probabilities': _nestedMap(map['activityProbabilities']),
   });
+}
+
+/// Decodes journaled `activityReadings`: a list of activity-channel maps,
+/// also accepted as JSON text. Malformed entries are skipped.
+List<ActivitySnapshot> _activityReadingsFromPayload(Object? value) {
+  Object? list = value;
+  if (list is String) {
+    try {
+      list = jsonDecode(list);
+    } on FormatException {
+      return const <ActivitySnapshot>[];
+    }
+  }
+  if (list is! List) return const <ActivitySnapshot>[];
+  final readings = <ActivitySnapshot>[];
+  for (final entry in list) {
+    final map = _nestedMap(entry);
+    if (map == null || map['timestamp'] is! num) continue;
+    readings.add(ActivitySnapshot.fromMap(map));
+  }
+  readings.sort((a, b) => a.recordedAt!.compareTo(b.recordedAt!));
+  return List<ActivitySnapshot>.unmodifiable(readings);
 }
 
 /// A nested payload map, also accepted as JSON text.

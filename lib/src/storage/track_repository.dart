@@ -1,7 +1,9 @@
 import '../domain/activity_snapshot.dart';
 import '../domain/export_models.dart';
 import '../domain/location_sample.dart';
+import '../domain/route_review.dart';
 import '../domain/route_summary.dart';
+import '../domain/step_coverage.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
@@ -112,6 +114,32 @@ abstract interface class TrackStopRepository {
   Future<List<TrackStop>> listTrackStops(String trackId);
 }
 
+/// Optional capability: the stored points quality policy 5's decision engine
+/// re-reads to rebuild its state for a route after a restart.
+abstract interface class DecisionTailRepository {
+  /// The newest points of [segmentId] of [trackId] in sequence order, from
+  /// the [contextAcceptedPoints]th last accepted point (or the segment's
+  /// first point) on, at most [maximumPoints] of them; null for an unknown
+  /// segment.
+  Future<DecisionTail?> decisionTail(
+    String trackId, {
+    required String segmentId,
+    int contextAcceptedPoints = 30,
+    int maximumPoints = 5000,
+  });
+}
+
+/// Points returned by [DecisionTailRepository.decisionTail].
+final class DecisionTail {
+  const DecisionTail({required this.segmentStartedAt, required this.points});
+
+  /// When the segment began recording.
+  final DateTime segmentStartedAt;
+
+  /// Points in sequence order.
+  final List<TrackPoint> points;
+}
+
 /// Optional capability: route details kept in the database as a route
 /// records ([RouteSummary], [TripSummary]).
 abstract interface class RouteSummaryRepository {
@@ -127,8 +155,11 @@ abstract interface class RouteSummaryRepository {
   Future<void> refreshRouteSummary(String trackId);
 
   /// Completed tracks whose stops are still [TrackStopSource.pending],
-  /// oldest first.
-  Future<List<String>> tracksAwaitingStops({int limit = 20});
+  /// oldest first; with [owner], only that owner's.
+  Future<List<String>> tracksAwaitingStops({
+    int limit = 20,
+    TrackingOwner? owner,
+  });
 
   /// Stores [stops], derived from [trackId]'s stored points, as its stop rows,
   /// one per place, and marks its stops [TrackStopSource.derived]. Does
@@ -136,13 +167,15 @@ abstract interface class RouteSummaryRepository {
   Future<void> storeDerivedStops(String trackId, List<TrackStop> stops);
 
   /// Records [stepCount], the native step count of capture generation
-  /// [captureGenerationId] read from status before capture stops, so the
-  /// steps after the route's newest fix count too. Adds to the current
-  /// segment; a count no higher than one already recorded adds nothing.
+  /// [captureGenerationId] read from status as capture stops, so the steps
+  /// after the route's newest fix count too, and the counter's [coverage].
+  /// A generation counts once, at its highest count: a count no higher than
+  /// one already recorded for it adds nothing.
   Future<void> recordStepCount(
     String trackId, {
     required String? captureGenerationId,
     required int stepCount,
+    StepCoverage? coverage,
   });
 
   /// Records [runId] as [trackId]'s current cleaned view, [distanceMeters]
@@ -151,6 +184,55 @@ abstract interface class RouteSummaryRepository {
     String trackId, {
     required String runId,
     required double distanceMeters,
+  });
+}
+
+/// Optional capability: routes recorded under older rules, decided again
+/// under the current ones ([RouteReview]) and stored beside what they
+/// recorded (route database schema 18).
+abstract interface class RouteReviewRepository {
+  /// Completed routes, oldest first, recorded entirely under quality
+  /// policies older than [RouteReview.qualityPolicyVersion] and without a
+  /// current review of [RouteReview.version]; with [owner], only that
+  /// owner's.
+  Future<List<String>> tracksAwaitingReview({
+    int limit = 20,
+    TrackingOwner? owner,
+  });
+
+  /// Whether [trackId] is one of [tracksAwaitingReview].
+  Future<bool> awaitsReview(String trackId);
+
+  /// [trackId]'s configuration epochs, oldest first.
+  Future<List<TrackingConfigurationEpoch>> configurationEpochsOf(
+    String trackId,
+  );
+
+  /// Ids of the fixes review run [runId] keeps.
+  Future<Set<String>> keptPointIdsOf(String runId);
+
+  /// Stores [review] as its route's current review in one transaction,
+  /// replacing an older one, and returns the id of its derived-geometry run
+  /// (the fixes the review keeps). The route's points, their acceptance, its
+  /// measured distance and its uploads stay as recorded. Returns null without
+  /// storing when the route is not completed or the review does not cover
+  /// its newest point.
+  Future<String?> storeRouteReview(RouteReview review);
+
+  /// Removes [trackId]'s review; the rows it recorded count again.
+  Future<void> deleteRouteReview(String trackId);
+}
+
+/// Optional capability: health events recorded once per key, so events
+/// rebuilt from journal payloads replayed after a restart never repeat.
+abstract interface class KeyedHealthEventRepository {
+  /// Records a health event under [key] unless one is already recorded.
+  Future<void> recordKeyedHealthEvent({
+    required String key,
+    String? trackId,
+    required String type,
+    required DateTime occurredAt,
+    Map<String, Object?>? details,
   });
 }
 

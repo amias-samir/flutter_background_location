@@ -245,11 +245,13 @@ let defaults = UserDefaults.standard
 }
 ''');
       _write(root, kotlin, '''
+const val CURRENT_SAMPLING_POLICY_VERSION = 2
 val a = map["shared"]
 val b = map["androidOnly"]
 val c = map["legacyAlias"]
 ''');
       _write(root, swift, '''
+static let currentSamplingPolicyVersion = 2
 let a = dictionary["shared"]
 // dictionary["dartOnly"] in a comment is not a read.
 ''');
@@ -359,6 +361,7 @@ compatibility:
   quality_policy: 1
   continuity_policy: 2
   motion_policy: 2
+  sampling_policy: 2
 change_classifications:
   additive: "Adds behavior."
 work_packages:
@@ -419,12 +422,25 @@ codes:
         'flutter_background_location_tracker/NativeLocationJournal.swift',
     'try execute("PRAGMA user_version = 1")\n',
   );
+  _write(
+    root,
+    'android/src/main/kotlin/com/samir/flutter_background_location/'
+        'TrackingConfiguration.kt',
+    'const val CURRENT_SAMPLING_POLICY_VERSION = 2\n',
+  );
+  _write(
+    root,
+    'ios/flutter_background_location_tracker/Sources/'
+        'flutter_background_location_tracker/TrackingConfiguration.swift',
+    'static let currentSamplingPolicyVersion = 2\n',
+  );
   _write(root, 'lib/src/domain/tracking_configuration_epoch.dart', '''
 abstract final class TrackingPolicyVersions {
   static const presetDefinition = 4;
   static const qualityPolicy = 1;
   static const continuityPolicy = 2;
   static const motionPolicy = 2;
+  static const samplingPolicy = 2;
 }
 ''');
 }

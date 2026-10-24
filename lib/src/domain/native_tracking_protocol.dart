@@ -100,4 +100,28 @@ abstract final class NativeTrackingCapabilities {
   /// step counter, when it has one and the activity permission is granted,
   /// and reports them as `stepCount` on location events and status.
   static const stepCount = 'step_count';
+
+  /// Native code reports how completely the step counter counted
+  /// (`stepCoverage` on location events and status), repairs a counter that
+  /// falls silent while the device walks, and reports each stopped
+  /// generation's final count (`stepFinal` in status).
+  static const stepCountCoverage = 'step_count_coverage';
+
+  /// Native code keeps a ring of count-free step counter events, read with
+  /// `getStepCounterDiagnostics`.
+  static const stepCounterDiagnostics = 'step_counter_diagnostics';
+
+  /// Each journaled fix carries the activity readings and profile switches
+  /// received since the previous one (`activityReadings`,
+  /// `profileTransitions`), so a route drained from the journal decides as
+  /// it did live.
+  static const journaledDecisionInputs = 'journaled_decision_inputs';
+
+  /// A fix's sampling profile is the one in effect when it was captured, on
+  /// both platforms.
+  static const profileStampAtCapture = 'profile_stamp_at_capture';
+
+  /// Native code applies `samplingPolicyVersion` 2: one fix per moving
+  /// interval or a turn from an unfiltered 1 Hz stream.
+  static const fixSamplingV2 = 'fix_sampling_v2';
 }

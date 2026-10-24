@@ -92,7 +92,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 17);
+    expect(await inspected.getVersion(), 18);
     final tables = await inspected.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
@@ -195,7 +195,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 17);
+    expect(await inspected.getVersion(), 18);
     final tripRows = await inspected.query(
       'trips',
       columns: const <String>['measured_distance_m'],
@@ -1363,7 +1363,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 17);
+    expect(version, 18);
     expect(
       tables.map((row) => row['name']),
       containsAll(<String>[
@@ -1521,7 +1521,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 17);
+    expect(version, 18);
     final preservedPoint = rows.singleWhere(
       (row) => row['id'] == 'preserved-point',
     );
@@ -1623,7 +1623,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 17);
+    expect(version, 18);
     expect(epoch['track_id'], 'v4-track');
     expect(point['id'], 'v4-point');
     expect(point['configuration_epoch_id'], epoch['id']);

@@ -3,9 +3,11 @@ import Foundation
 /// Chooses the fixes a moving profile records: one per interval, and one
 /// wherever the course has turned sharply since the last recorded fix, so a
 /// junction or hairpin is not cut between fixes tens of metres apart.
+/// `turnDegrees` 0 or less records no turns, leaving the interval.
 ///
 /// Shared with the Kotlin `TurnCaptureSampler` through
-/// `test/fixtures/cross_language/turn_capture_v1.json`.
+/// `test/fixtures/cross_language/turn_capture_v1.json` and, for sampling
+/// policy 2, `turn_capture_v2.json`.
 struct TurnCaptureSampler {
   struct Fix {
     let elapsedMs: Double
@@ -59,7 +61,8 @@ struct TurnCaptureSampler {
   }
 
   private func isTurn(_ fix: Fix, previous: Fix) -> Bool {
-    guard fix.elapsedMs > previous.elapsedMs,
+    guard turnDegrees > 0,
+      fix.elapsedMs > previous.elapsedMs,
       let course = Self.reliableCourse(fix),
       let reference = referenceCourse,
       Self.distanceMeters(previous, fix) >= minimumDistanceMeters
@@ -99,5 +102,26 @@ struct TurnCaptureSampler {
       sin(deltaPhi / 2) * sin(deltaPhi / 2)
       + cos(phi1) * cos(phi2) * sin(deltaLambda / 2) * sin(deltaLambda / 2)
     return 2 * 6_371_008.8 * asin(min(1, sqrt(h)))
+  }
+}
+
+/// Whether a provider fix is emitted after the previous emitted one.
+enum FixEmissionRule {
+  /// Sampling policy 2's moving profile emits exactly what its sampler
+  /// records: one fix per interval or a turn, whatever the distance moved.
+  /// Otherwise the interval or the distance filter is enough, and a turn too
+  /// while turn capture runs.
+  static func shouldEmit(
+    _ fix: TurnCaptureSampler.Fix,
+    elapsedMs: Double,
+    distanceMeters: Double,
+    intervalMs: Double,
+    distanceFilterMeters: Double,
+    sampler: TurnCaptureSampler?,
+    samplerOnly: Bool
+  ) -> Bool {
+    if samplerOnly, let sampler { return sampler.shouldRecord(fix) }
+    return elapsedMs >= intervalMs || distanceMeters >= distanceFilterMeters
+      || sampler?.shouldRecord(fix) == true
   }
 }

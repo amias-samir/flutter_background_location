@@ -65,6 +65,8 @@ final class TrackPoint {
     this.activityEvidenceState = ActivityEvidenceState.unavailable,
     this.activityAge,
     this.activityProbabilities = const <TrackingActivityType, int>{},
+    this.activityRecordedAt,
+    this.activityReadings = const <ActivitySnapshot>[],
     this.nativeForegroundState,
     this.screenInteractive,
     this.batterySaverActive,
@@ -92,6 +94,14 @@ final class TrackPoint {
   final String? activityRawType;
   final ActivityEvidenceState activityEvidenceState;
   final Duration? activityAge;
+
+  /// Time of the activity reading attached to the fix (route database schema
+  /// 18), so the reading can be judged again exactly as when the fix was
+  /// decided. Null on older rows.
+  final DateTime? activityRecordedAt;
+
+  /// Activity readings journaled with the fix (schema 18), oldest first.
+  final List<ActivitySnapshot> activityReadings;
   final Map<TrackingActivityType, int> activityProbabilities;
   final String? nativeForegroundState;
   final bool? screenInteractive;
@@ -143,13 +153,35 @@ final class TrackPoint {
     required double latitude,
     required double longitude,
   }) =>
+      _copy(latitude: latitude, longitude: longitude);
+
+  /// This fix as a view decided it, such as the fixes a route review keeps
+  /// ([RouteReview]): kept fixes count as accepted, the others as rejected
+  /// with [rejectionReason]. The stored fix never changes.
+  TrackPoint withAcceptance({
+    required bool accepted,
+    String? rejectionReason,
+  }) =>
+      _copy(
+        accepted: accepted,
+        rejectionReason: accepted ? null : rejectionReason,
+        replaceRejection: true,
+      );
+
+  TrackPoint _copy({
+    double? latitude,
+    double? longitude,
+    bool? accepted,
+    String? rejectionReason,
+    bool replaceRejection = false,
+  }) =>
       TrackPoint(
         id: id,
         trackId: trackId,
         segmentId: segmentId,
         sequence: sequence,
-        latitude: latitude,
-        longitude: longitude,
+        latitude: latitude ?? this.latitude,
+        longitude: longitude ?? this.longitude,
         altitude: altitude,
         horizontalAccuracy: horizontalAccuracy,
         verticalAccuracy: verticalAccuracy,
@@ -166,6 +198,8 @@ final class TrackPoint {
         activityEvidenceState: activityEvidenceState,
         activityAge: activityAge,
         activityProbabilities: activityProbabilities,
+        activityRecordedAt: activityRecordedAt,
+        activityReadings: activityReadings,
         nativeForegroundState: nativeForegroundState,
         screenInteractive: screenInteractive,
         batterySaverActive: batterySaverActive,
@@ -188,9 +222,10 @@ final class TrackPoint {
         samplingProfile: samplingProfile,
         stepCount: stepCount,
         qualityPolicyVersion: qualityPolicyVersion,
-        accepted: accepted,
+        accepted: accepted ?? this.accepted,
         qualityFlags: qualityFlags,
-        rejectionReason: rejectionReason,
+        rejectionReason:
+            replaceRejection ? rejectionReason : this.rejectionReason,
       );
 
   factory TrackPoint.fromDatabase(Map<String, Object?> row) => TrackPoint(
@@ -224,6 +259,11 @@ final class TrackPoint {
               ),
         activityProbabilities:
             _decodeActivityProbabilities(row['activity_probabilities_json']),
+        activityRecordedAt: row['activity_recorded_at'] == null
+            ? null
+            : DateTime.parse(row['activity_recorded_at']! as String).toUtc(),
+        activityReadings:
+            _decodeActivityReadings(row['activity_readings_json']),
         nativeForegroundState: row['native_foreground_state'] as String?,
         screenInteractive: _nullableBool(row['screen_interactive']),
         batterySaverActive: _nullableBool(row['battery_saver_active']),
@@ -281,6 +321,17 @@ Map<TrackingActivityType, int> _decodeActivityProbabilities(Object? value) {
       trackingActivityTypeFromValue(entry.key):
           ((entry.value as num?)?.toInt() ?? 0).clamp(0, 100),
   };
+}
+
+List<ActivitySnapshot> _decodeActivityReadings(Object? value) {
+  if (value is! String || value.isEmpty) return const <ActivitySnapshot>[];
+  final decoded = jsonDecode(value);
+  if (decoded is! List) return const <ActivitySnapshot>[];
+  return List<ActivitySnapshot>.unmodifiable(<ActivitySnapshot>[
+    for (final entry in decoded)
+      if (entry is Map)
+        ActivitySnapshot.fromMap(entry.cast<Object?, Object?>()),
+  ]);
 }
 
 bool? _nullableBool(Object? value) => switch (value) {

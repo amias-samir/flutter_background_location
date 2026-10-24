@@ -164,7 +164,13 @@ void main() {
 
     final current = await ride();
     expect(current.every((point) => point.accepted), isTrue);
-    expect(current.map((point) => point.qualityPolicyVersion).toSet(), {4});
+    expect(
+      current.map((point) => point.qualityPolicyVersion).toSet(),
+      {TrackingPolicyVersions.qualityPolicy},
+    );
+    final quality4 = await ride(qualityPolicy: 4);
+    expect(quality4.every((point) => point.accepted), isTrue);
+    expect(quality4.map((point) => point.qualityPolicyVersion).toSet(), {4});
     final recorded = await ride(qualityPolicy: 3);
     expect(
       recorded.where((point) => !point.accepted).map((p) => p.rejectionReason),

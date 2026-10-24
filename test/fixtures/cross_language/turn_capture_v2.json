@@ -1,0 +1,1486 @@
+{
+  "version": 2,
+  "note": "Sampling contract (sampling policy 2) shared by Kotlin and Swift TurnCaptureSampler. Fixes are one second apart (t in seconds); positions are generated around a synthetic origin. A fix is recorded when the interval has elapsed since the last recorded fix (less a 500 ms tolerance), or when it moves at least 3 m/s with a course known to 30 degrees or better that has turned turnDegrees since the last recorded course, at least minimumDistanceMeters from the last recorded fix. recorded lists the indices of recorded fixes. Version 2 runs on an unfiltered 1 Hz provider stream: one fix per interval or a turn, whatever the distance moved; a scenario config overrides the shared config, and turnDegrees 0 turns turn capture off (the interval still applies).",
+  "config": {
+    "intervalMs": 5000,
+    "turnDegrees": 45,
+    "minimumDistanceMeters": 5
+  },
+  "scenarios": [
+    {
+      "name": "a straight road keeps the interval cadence",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.500089932,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500179864,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500269796,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.50044966,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500539592,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500629524,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500719456,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500809388,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.50089932,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500989252,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.501079184,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 13,
+          "latitude": 0.501169116,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 14,
+          "latitude": 0.501259049,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 15,
+          "latitude": 0.501348981,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 16,
+          "latitude": 0.501438913,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 17,
+          "latitude": 0.501528845,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 18,
+          "latitude": 0.501618777,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 19,
+          "latitude": 0.501708709,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 20,
+          "latitude": 0.501798641,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10,
+        15,
+        20
+      ]
+    },
+    {
+      "name": "a junction records a fix in the turn",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.500089932,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500179864,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500269796,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.50044966,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500539592,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500629524,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500707408,
+          "longitude": 0.500044968,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500752374,
+          "longitude": 0.500122854,
+          "speed": 10,
+          "bearing": 60.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.500752374,
+          "longitude": 0.50021279,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500752374,
+          "longitude": 0.500302725,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.500752374,
+          "longitude": 0.500392661,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 13,
+          "latitude": 0.500752374,
+          "longitude": 0.500482596,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 14,
+          "latitude": 0.500752374,
+          "longitude": 0.500572531,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 15,
+          "latitude": 0.500752374,
+          "longitude": 0.500662467,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 16,
+          "latitude": 0.500752374,
+          "longitude": 0.500752402,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        9,
+        14
+      ]
+    },
+    {
+      "name": "a hairpin records the bend",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 8,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.500071946,
+          "longitude": 0.5,
+          "speed": 8,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500143891,
+          "longitude": 0.5,
+          "speed": 8,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500215837,
+          "longitude": 0.5,
+          "speed": 8,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500287783,
+          "longitude": 0.5,
+          "speed": 8,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 8,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500410601,
+          "longitude": 0.500050875,
+          "speed": 8,
+          "bearing": 45.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500410601,
+          "longitude": 0.500122824,
+          "speed": 8,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500359728,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 135.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500287783,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.500215837,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500143891,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.500071946,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 13,
+          "latitude": 0.5,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 14,
+          "latitude": 0.499928054,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 15,
+          "latitude": 0.499856109,
+          "longitude": 0.500173699,
+          "speed": 8,
+          "bearing": 180.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        6,
+        7,
+        8,
+        9,
+        14
+      ]
+    },
+    {
+      "name": "walking turns are left to the interval",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 1.4,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.50001259,
+          "longitude": 0.5,
+          "speed": 1.4,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500025181,
+          "longitude": 0.5,
+          "speed": 1.4,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500037771,
+          "longitude": 0.5,
+          "speed": 1.4,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500050362,
+          "longitude": 0.5,
+          "speed": 1.4,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.500062952,
+          "longitude": 0.5,
+          "speed": 1.4,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500062952,
+          "longitude": 0.500012591,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500062952,
+          "longitude": 0.500025182,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500062952,
+          "longitude": 0.500037773,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500062952,
+          "longitude": 0.500050364,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.500062952,
+          "longitude": 0.500062955,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500062952,
+          "longitude": 0.500075546,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.500062952,
+          "longitude": 0.500088137,
+          "speed": 1.4,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10
+      ]
+    },
+    {
+      "name": "an uncertain course is ignored",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.500089932,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500179864,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500269796,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.50044966,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500539592,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500629524,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500707408,
+          "longitude": 0.500044968,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500752374,
+          "longitude": 0.500122854,
+          "speed": 10,
+          "bearing": 60.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.500752374,
+          "longitude": 0.50021279,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500752374,
+          "longitude": 0.500302725,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.500752374,
+          "longitude": 0.500392661,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 13,
+          "latitude": 0.500752374,
+          "longitude": 0.500482596,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 14,
+          "latitude": 0.500752374,
+          "longitude": 0.500572531,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 15,
+          "latitude": 0.500752374,
+          "longitude": 0.500662467,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        },
+        {
+          "t": 16,
+          "latitude": 0.500752374,
+          "longitude": 0.500752402,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 60.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10,
+        15
+      ]
+    },
+    {
+      "name": "a fix without a course is ignored",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 1,
+          "latitude": 0.500089932,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 2,
+          "latitude": 0.500179864,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 3,
+          "latitude": 0.500269796,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 4,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 5,
+          "latitude": 0.50044966,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 6,
+          "latitude": 0.500539592,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 7,
+          "latitude": 0.500629524,
+          "longitude": 0.5,
+          "speed": 10
+        },
+        {
+          "t": 8,
+          "latitude": 0.500707408,
+          "longitude": 0.500044968,
+          "speed": 10
+        },
+        {
+          "t": 9,
+          "latitude": 0.500752374,
+          "longitude": 0.500122854,
+          "speed": 10
+        },
+        {
+          "t": 10,
+          "latitude": 0.500752374,
+          "longitude": 0.50021279,
+          "speed": 10
+        },
+        {
+          "t": 11,
+          "latitude": 0.500752374,
+          "longitude": 0.500302725,
+          "speed": 10
+        },
+        {
+          "t": 12,
+          "latitude": 0.500752374,
+          "longitude": 0.500392661,
+          "speed": 10
+        },
+        {
+          "t": 13,
+          "latitude": 0.500752374,
+          "longitude": 0.500482596,
+          "speed": 10
+        },
+        {
+          "t": 14,
+          "latitude": 0.500752374,
+          "longitude": 0.500572531,
+          "speed": 10
+        },
+        {
+          "t": 15,
+          "latitude": 0.500752374,
+          "longitude": 0.500662467,
+          "speed": 10
+        },
+        {
+          "t": 16,
+          "latitude": 0.500752374,
+          "longitude": 0.500752402,
+          "speed": 10
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10,
+        15
+      ]
+    },
+    {
+      "name": "a turn waits for the distance filter",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 3.5,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.5,
+          "longitude": 0.500031477,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.5,
+          "longitude": 0.500062955,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.5,
+          "longitude": 0.500094432,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.5,
+          "longitude": 0.50012591,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.5,
+          "longitude": 0.500157387,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.5,
+          "longitude": 0.500188864,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.5,
+          "longitude": 0.500220342,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.5,
+          "longitude": 0.500251819,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.5,
+          "longitude": 0.500283297,
+          "speed": 3.5,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        2,
+        7
+      ]
+    },
+    {
+      "name": "a gentle bend is not a turn",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.500089932,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500179864,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500269796,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.50044966,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500539592,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500617476,
+          "longitude": 0.500044968,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500695359,
+          "longitude": 0.500089935,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500773243,
+          "longitude": 0.500134903,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.500851126,
+          "longitude": 0.500179871,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500929009,
+          "longitude": 0.500224839,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.501006893,
+          "longitude": 0.500269806,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 13,
+          "latitude": 0.501084776,
+          "longitude": 0.500314774,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 14,
+          "latitude": 0.50116266,
+          "longitude": 0.500359742,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 15,
+          "latitude": 0.501240543,
+          "longitude": 0.50040471,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10,
+        15
+      ]
+    },
+    {
+      "name": "turns off at 0 degrees keep only the interval",
+      "config": {
+        "turnDegrees": 0
+      },
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 1,
+          "latitude": 0.500089932,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 2,
+          "latitude": 0.500179864,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 3,
+          "latitude": 0.500269796,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 4,
+          "latitude": 0.500359728,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 5,
+          "latitude": 0.50044966,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 6,
+          "latitude": 0.500539592,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 7,
+          "latitude": 0.500629524,
+          "longitude": 0.5,
+          "speed": 10,
+          "bearing": 0.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 8,
+          "latitude": 0.500707408,
+          "longitude": 0.500044968,
+          "speed": 10,
+          "bearing": 30.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 9,
+          "latitude": 0.500752374,
+          "longitude": 0.500122854,
+          "speed": 10,
+          "bearing": 60.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 10,
+          "latitude": 0.500752374,
+          "longitude": 0.50021279,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 11,
+          "latitude": 0.500752374,
+          "longitude": 0.500302725,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 12,
+          "latitude": 0.500752374,
+          "longitude": 0.500392661,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 13,
+          "latitude": 0.500752374,
+          "longitude": 0.500482596,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 14,
+          "latitude": 0.500752374,
+          "longitude": 0.500572531,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 15,
+          "latitude": 0.500752374,
+          "longitude": 0.500662467,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        },
+        {
+          "t": 16,
+          "latitude": 0.500752374,
+          "longitude": 0.500752402,
+          "speed": 10,
+          "bearing": 90.0,
+          "bearingAccuracy": 5.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10,
+        15
+      ]
+    },
+    {
+      "name": "jittered provider times keep one fix per interval",
+      "fixes": [
+        {
+          "t": 0.0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 1.31,
+          "latitude": 0.5,
+          "longitude": 0.500011691,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 1.78,
+          "latitude": 0.5,
+          "longitude": 0.500023382,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 3.18,
+          "latitude": 0.5,
+          "longitude": 0.500035073,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 3.65,
+          "latitude": 0.5,
+          "longitude": 0.500046765,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 5.27,
+          "latitude": 0.5,
+          "longitude": 0.500058456,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 5.6,
+          "latitude": 0.5,
+          "longitude": 0.500070147,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 7.12,
+          "latitude": 0.5,
+          "longitude": 0.500081838,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 8.33,
+          "latitude": 0.5,
+          "longitude": 0.500093529,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 8.72,
+          "latitude": 0.5,
+          "longitude": 0.50010522,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 10.21,
+          "latitude": 0.5,
+          "longitude": 0.500116912,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 10.83,
+          "latitude": 0.5,
+          "longitude": 0.500128603,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 12.38,
+          "latitude": 0.5,
+          "longitude": 0.500140294,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 12.7,
+          "latitude": 0.5,
+          "longitude": 0.500151985,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 14.05,
+          "latitude": 0.5,
+          "longitude": 0.500163676,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        },
+        {
+          "t": 15.24,
+          "latitude": 0.5,
+          "longitude": 0.500175367,
+          "speed": 1.3,
+          "bearing": 90.0,
+          "bearingAccuracy": 40.0
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10,
+        15
+      ]
+    },
+    {
+      "name": "a phone standing in the moving profile records one fix per interval",
+      "fixes": [
+        {
+          "t": 0,
+          "latitude": 0.5,
+          "longitude": 0.5,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 1,
+          "latitude": 0.499992805,
+          "longitude": 0.500010792,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 2,
+          "latitude": 0.500014389,
+          "longitude": 0.499995503,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 3,
+          "latitude": 0.500003597,
+          "longitude": 0.500018886,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 4,
+          "latitude": 0.499990107,
+          "longitude": 0.499984711,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 5,
+          "latitude": 0.500019785,
+          "longitude": 0.500008094,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 6,
+          "latitude": 0.500002698,
+          "longitude": 0.499978415,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 7,
+          "latitude": 0.499982913,
+          "longitude": 0.50001349,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 8,
+          "latitude": 0.499976618,
+          "longitude": 0.499998201,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 9,
+          "latitude": 0.500008993,
+          "longitude": 0.500025182,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 10,
+          "latitude": 0.50001259,
+          "longitude": 0.499990107,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 11,
+          "latitude": 0.499994604,
+          "longitude": 0.500003597,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        },
+        {
+          "t": 12,
+          "latitude": 0.499996403,
+          "longitude": 0.499982013,
+          "speed": 0.1,
+          "bearing": null,
+          "bearingAccuracy": null
+        }
+      ],
+      "recorded": [
+        0,
+        5,
+        10
+      ]
+    }
+  ]
+}

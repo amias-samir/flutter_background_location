@@ -158,13 +158,14 @@ class RecordedTracksSection extends StatelessWidget {
                 label: track.status.name,
                 color: statusColor,
               ),
-              _RouteDetail(
-                icon: Icons.pin_drop_outlined,
-                label: '${track.acceptedPointCount} points',
-              ),
+              // The corrected distance once the route was reviewed. The
+              // point count is a sampling statistic and stays on the map.
               _RouteDetail(
                 icon: Icons.straighten_rounded,
-                label: kilometres(track.totalDistanceMeters),
+                label: kilometres(
+                  totals[track.id]?.displayDistanceMeters ??
+                      track.totalDistanceMeters,
+                ),
               ),
               _RouteDetail(
                 icon: Icons.polyline_outlined,
@@ -183,10 +184,10 @@ class RecordedTracksSection extends StatelessWidget {
                         '${totals.stopCount} stop(s) • '
                         '${hoursMinutes(totals.stopped)}',
                   ),
-                if (totals.stepCount case final steps?)
+                if (totals.stepsText case final steps?)
                   _RouteDetail(
                     icon: Icons.directions_walk_rounded,
-                    label: '$steps steps',
+                    label: steps,
                   ),
               ],
             ],

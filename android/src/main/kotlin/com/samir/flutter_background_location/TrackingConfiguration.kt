@@ -31,6 +31,10 @@ internal data class TrackingConfiguration(
     // legacy state machine, so a route recording across an upgrade resumes
     // with the policy it started with.
     val motionPolicyVersion: Int = LEGACY_MOTION_POLICY_VERSION,
+    // A configuration without the key predates sampling policy 2 and keeps
+    // its provider request, so a route resumes with the sampling it started
+    // with.
+    val samplingPolicyVersion: Int = LEGACY_SAMPLING_POLICY_VERSION,
     val notificationChannelId: String = "active_location_tracking",
     val notificationChannelName: String = "Active location tracking",
     val notificationChannelDescription: String =
@@ -62,6 +66,7 @@ internal data class TrackingConfiguration(
         put(KEY_MAXIMUM_ACCEPTED_ACCURACY, maximumAcceptedAccuracyMeters)
         put(KEY_TURN_CAPTURE_DEGREES, turnCaptureDegrees.toDouble())
         put(KEY_MOTION_POLICY_VERSION, motionPolicyVersion)
+        put(KEY_SAMPLING_POLICY_VERSION, samplingPolicyVersion)
         put(KEY_NOTIFICATION_CHANNEL_ID, notificationChannelId)
         put(KEY_NOTIFICATION_CHANNEL_NAME, notificationChannelName)
         put(KEY_NOTIFICATION_CHANNEL_DESCRIPTION, notificationChannelDescription)
@@ -77,11 +82,23 @@ internal data class TrackingConfiguration(
     val usesStationaryPolicyV2: Boolean
         get() = motionPolicyVersion >= 2 && captureIntent == "adaptive"
 
+    /**
+     * Whether sampling policy 2 applies: the high-accuracy moving profile
+     * samples an unfiltered 1 Hz stream, one fix per interval or a turn.
+     */
+    val usesSamplingPolicyV2: Boolean
+        get() = samplingPolicyVersion >= 2
+
     companion object {
         const val LEGACY_MOTION_POLICY_VERSION = 1
 
         /** Newest motion policy this build applies; newer values fall back to it. */
         const val CURRENT_MOTION_POLICY_VERSION = 2
+
+        const val LEGACY_SAMPLING_POLICY_VERSION = 1
+
+        /** Newest sampling policy this build applies; newer values fall back to it. */
+        const val CURRENT_SAMPLING_POLICY_VERSION = 2
 
         private const val KEY_MOVING_INTERVAL = "movingIntervalMs"
         private const val KEY_MOVING_DISTANCE = "movingDistanceFilterMeters"
@@ -108,6 +125,7 @@ internal data class TrackingConfiguration(
         private const val KEY_MAXIMUM_ACCEPTED_ACCURACY = "maximumAcceptedAccuracyMeters"
         private const val KEY_TURN_CAPTURE_DEGREES = "turnCaptureDegrees"
         private const val KEY_MOTION_POLICY_VERSION = "motionPolicyVersion"
+        private const val KEY_SAMPLING_POLICY_VERSION = "samplingPolicyVersion"
         private const val KEY_NOTIFICATION_CHANNEL_ID = "notificationChannelId"
         private const val KEY_NOTIFICATION_CHANNEL_NAME = "notificationChannelName"
         private const val KEY_NOTIFICATION_CHANNEL_DESCRIPTION = "notificationChannelDescription"
@@ -198,6 +216,12 @@ internal data class TrackingConfiguration(
                         CURRENT_MOTION_POLICY_VERSION
                     }
                 },
+                // Versions start at 1: an invalid value keeps today's sampling,
+                // a newer one falls back to the newest this build applies.
+                samplingPolicyVersion = values.int(
+                    KEY_SAMPLING_POLICY_VERSION,
+                    LEGACY_SAMPLING_POLICY_VERSION,
+                ).coerceIn(LEGACY_SAMPLING_POLICY_VERSION, CURRENT_SAMPLING_POLICY_VERSION),
                 notificationChannelId =
                     values.string(KEY_NOTIFICATION_CHANNEL_ID, defaults.notificationChannelId)
                         .ifBlank { defaults.notificationChannelId },

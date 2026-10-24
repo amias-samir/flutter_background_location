@@ -1,3 +1,5 @@
+import 'dart:isolate';
+
 import '../domain/derived_geometry.dart';
 import '../domain/motion_policy.dart';
 import '../domain/route_summary.dart';
@@ -5,12 +7,15 @@ import '../domain/stop_site.dart';
 import '../domain/track.dart';
 import '../domain/track_geodesy.dart';
 import '../domain/track_point.dart';
+import '../domain/track_segment.dart';
 import '../domain/track_stop.dart';
 import '../domain/tracking_config.dart';
+import '../domain/tracking_configuration_epoch.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
 import 'derived_geometry_service.dart';
+import 'route_reviewer.dart';
 import 'stop_episode_detector.dart';
 
 /// Optional facade capability: route details kept in the route database
@@ -62,15 +67,76 @@ final class RouteDetailService {
     );
   }
 
+  /// Decides [trackId] again under the current rules ([RouteReviewer]) once
+  /// it has completed under older ones, and stores the review beside what it
+  /// recorded: its stops, gaps, quality runs, step decisions and corrected
+  /// distance then come from the review. Its points, their acceptance, its
+  /// measured distance and its uploads never change.
+  Future<void> ensureReviewed(String trackId) async {
+    final store = repository;
+    if (store is! RouteReviewRepository) return;
+    final reviews = store as RouteReviewRepository;
+    if (!await reviews.awaitsReview(trackId)) return;
+    final track = await repository.getTrack(trackId);
+    if (track == null) return;
+    final bundle = await repository.loadTrackBundle(trackId);
+    final epochs = await reviews.configurationEpochsOf(trackId);
+    final points = <TrackPoint>[
+      for (final segment in bundle.segments) ...segment.points,
+    ];
+    final segments = <TrackSegment>[
+      for (final segment in bundle.segments) segment.segment,
+    ];
+    final epochsById = <String, TrackingConfigurationEpoch>{
+      for (final epoch in epochs) epoch.id: epoch,
+    };
+    final config = track.config;
+    // A long route's replay runs off the UI isolate.
+    final review = await Isolate.run(
+      () => const RouteReviewer().review(
+        trackId: trackId,
+        points: points,
+        segments: segments,
+        epochs: epochsById,
+        fallbackConfig: config,
+      ),
+    );
+    await reviews.storeRouteReview(review);
+  }
+
+  /// Reviews completed routes still waiting for it, oldest first, [batch] at
+  /// a time; with [owner], only that owner's.
+  Future<void> backfillReviews({TrackingOwner? owner, int batch = 10}) async {
+    final store = repository;
+    if (store is! RouteReviewRepository) return;
+    final reviews = store as RouteReviewRepository;
+    final seen = <String>{};
+    while (true) {
+      final pending = (await reviews.tracksAwaitingReview(
+        limit: batch,
+        owner: owner,
+      ))
+          .where(seen.add)
+          .toList();
+      if (pending.isEmpty) return;
+      for (final trackId in pending) {
+        await ensureReviewed(trackId);
+      }
+    }
+  }
+
   /// Derives stops for completed routes still waiting for them, oldest
-  /// first, [batch] at a time.
-  Future<void> backfillStops({int batch = 20}) async {
+  /// first, [batch] at a time; with [owner], only that owner's.
+  Future<void> backfillStops({int batch = 20, TrackingOwner? owner}) async {
     final store = repository;
     if (store is! RouteSummaryRepository) return;
     final summaries = store as RouteSummaryRepository;
     final seen = <String>{};
     while (true) {
-      final pending = (await summaries.tracksAwaitingStops(limit: batch))
+      final pending = (await summaries.tracksAwaitingStops(
+        limit: batch,
+        owner: owner,
+      ))
           .where(seen.add)
           .toList();
       if (pending.isEmpty) return;

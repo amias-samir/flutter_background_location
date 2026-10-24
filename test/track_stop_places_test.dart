@@ -23,6 +23,8 @@ void main() {
     double radius = 25,
     String segmentId = 'segment-1',
     bool open = false,
+    int policy = 3,
+    String? arrival,
   }) =>
       TrackStop(
         id: id,
@@ -37,10 +39,10 @@ void main() {
         lastSeenAt: t0.add(Duration(seconds: toSecond - 5)),
         endedAt: open ? null : t0.add(Duration(seconds: toSecond)),
         evidenceCount: evidence,
-        qualityPolicyVersion: 3,
+        qualityPolicyVersion: policy,
         firstSequence: fromSecond,
         lastSequence: toSecond,
-        arrivalPointId: 'arrival-$id',
+        arrivalPointId: arrival ?? 'arrival-$id',
         departurePointId: open ? null : 'departure-$id',
       );
 
@@ -114,6 +116,60 @@ void main() {
         ]),
         hasLength(2),
         reason: 'a pause and resume separates the stays',
+      );
+    });
+
+    test(
+        'from quality policy 5, a stay anchored on the fix that left the '
+        'place continues it at any distance', () {
+      // A visit drifted 77 m across its radius and stopped again at the
+      // departure fix (bhotechaur 14:02).
+      final first = stop('a', fromSecond: 0, toSecond: 600, policy: 5);
+      expect(
+        TrackStopPlaces.merge(<TrackStop>[
+          first,
+          stop('b',
+              fromSecond: 600,
+              toSecond: 1200,
+              eastMeters: 77,
+              policy: 5,
+              arrival: 'departure-a'),
+        ]),
+        hasLength(1),
+      );
+      expect(
+        TrackStopPlaces.merge(<TrackStop>[
+          first,
+          stop('b', fromSecond: 600, toSecond: 1200, eastMeters: 77, policy: 5),
+        ]),
+        hasLength(2),
+        reason: 'anchored on a later fix, 77 m away',
+      );
+      expect(
+        TrackStopPlaces.merge(<TrackStop>[
+          stop('a', fromSecond: 0, toSecond: 600, policy: 4),
+          stop('b',
+              fromSecond: 600,
+              toSecond: 1200,
+              eastMeters: 77,
+              policy: 4,
+              arrival: 'departure-a'),
+        ]),
+        hasLength(2),
+        reason: 'older policies keep the 75 m rule alone',
+      );
+      expect(
+        TrackStopPlaces.merge(<TrackStop>[
+          first,
+          stop('b',
+              fromSecond: 600 + 181,
+              toSecond: 1200,
+              eastMeters: 77,
+              policy: 5,
+              arrival: 'departure-a'),
+        ]),
+        hasLength(2),
+        reason: 'more than three minutes later',
       );
     });
 

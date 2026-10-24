@@ -1,5 +1,6 @@
 import 'location_sample.dart';
 import 'motion_evidence.dart';
+import 'step_coverage.dart';
 
 /// Native capture lifecycle independent of the Flutter widget lifecycle.
 enum TrackerLifecycle {
@@ -60,6 +61,8 @@ final class TrackerStatus {
     this.profileTransitionReason,
     this.stepCount,
     this.captureGenerationId,
+    this.stepCoverage,
+    this.stepFinal,
   });
 
   /// Current native capture lifecycle.
@@ -96,6 +99,15 @@ final class TrackerStatus {
 
   /// The native capture generation the status describes.
   final String? captureGenerationId;
+
+  /// How completely the step counter is counting [captureGenerationId]
+  /// (capability `step_count_coverage`).
+  final StepCoverage? stepCoverage;
+
+  /// The final step count of the newest capture generation that stopped,
+  /// read as it stopped; present after a pause or stop until capture starts
+  /// again.
+  final StepFinal? stepFinal;
 
   /// Decodes a native status-channel payload.
   factory TrackerStatus.fromMap(Map<Object?, Object?> map) {
@@ -144,6 +156,8 @@ final class TrackerStatus {
         final String id when id.isNotEmpty => id,
         _ => null,
       },
+      stepCoverage: StepCoverage.fromPayload(map['stepCoverage']),
+      stepFinal: StepFinal.fromPayload(map['stepFinal']),
     );
   }
 }

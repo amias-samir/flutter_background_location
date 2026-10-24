@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -47,6 +48,8 @@ class LocationTrackingService : Service() {
     private lateinit var workerThread: HandlerThread
     private lateinit var motionSensorFusion: MotionSensorFusion
     private lateinit var stepCounter: StepCounter
+    // Read by step-counter diagnostics on the worker thread.
+    @Volatile
     private var captureWakeLock: PowerManager.WakeLock? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -63,6 +66,22 @@ class LocationTrackingService : Service() {
      */
     @Volatile
     private var turnSampler: TurnCaptureSampler? = null
+
+    /**
+     * Sampling policy 2 feeds the stationary policy every provider fix as it
+     * arrives, not only the recorded ones after journaling.
+     */
+    @Volatile
+    private var stationaryPolicyFedPerProviderFix = false
+    private var lastPolicyFixNanos = 0L
+
+    // Activity readings and profile switches journaled with the next fix.
+    private val decisionInputs = DecisionInputJournal()
+
+    // A stop waiting for the step counter's final reading; see stopAfterFinalSteps.
+    private var pendingStop: PendingStop? = null
+    private var pendingStopToken = 0
+    private var stepFinalPersistedFor: String? = null
     private var currentActivityPendingIntent: PendingIntent? = null
     private var currentActivityTransitionPendingIntent: PendingIntent? = null
     private val monotonicDomainId = "android_process_${UUID.randomUUID()}"
@@ -116,10 +135,14 @@ class LocationTrackingService : Service() {
             stateStore.markServiceHeartbeat(captureActive = true)
             // Entry can come due while neither fixes nor readings arrive.
             stationaryPolicy?.let { applyStationaryPolicy(it.evaluate(System.currentTimeMillis())) }
+            evaluateStepCounter()
             stateStore.emitCurrentStatus()
             mainHandler.postDelayed(this, SERVICE_HEARTBEAT_INTERVAL_MS)
         }
     }
+
+    // The extra step-counter check after a stationary exit.
+    private val stepCounterEvaluation = Runnable { evaluateStepCounter() }
 
     private val prerequisiteMonitor = object : Runnable {
         override fun run() {
@@ -138,11 +161,19 @@ class LocationTrackingService : Service() {
             // A delivery proves the provider alive even when no fix of it is
             // recorded.
             if (sampler != null) stateStore.markProviderCallback(System.currentTimeMillis())
+            val feedsPolicy = stationaryPolicyFedPerProviderFix
             // Batched and flushed deliveries are not guaranteed to be in
             // capture order; journal them oldest first.
             result.locations.sortedBy { it.elapsedRealtimeNanos }.forEach { location ->
+                noteStepWatchdogFix(location)
                 if (sampler == null || sampler.accept(location.toTurnFix())) {
                     handleLocation(location)
+                }
+                // After the fix's event is built: a switch this fix causes is
+                // journaled with the next one.
+                if (feedsPolicy) {
+                    val delivered = Location(location)
+                    mainHandler.post { feedStationaryPolicyOnDelivery(delivered) }
                 }
             }
         }
@@ -156,6 +187,12 @@ class LocationTrackingService : Service() {
             mainHandler.post {
                 if (!captureStarted) return@post
                 TrackingEventBus.emitMotionEvidence(evidence)
+                // Motion evidence for the step-counter watchdog, ahead of any
+                // profile switch it causes. Steps never decide motion.
+                when (evidence["reason"]) {
+                    MotionSensorFusion.REASON_FRESH_STEP -> stepCounter.onFusionStep()
+                    MotionSensorFusion.REASON_SIGNIFICANT_MOTION -> stepCounter.onSignificantMotion()
+                }
                 val policy = stationaryPolicy
                 if (policy != null && evidence["state"] == "moving") {
                     applyStationaryPolicy(policy.onMovingEvidence(System.currentTimeMillis()))
@@ -170,7 +207,7 @@ class LocationTrackingService : Service() {
                 stateStore.emitCurrentStatus()
             }
         }
-        stepCounter = StepCounter(this, workerHandler, mainHandler)
+        stepCounter = StepCounter(this, workerHandler, mainHandler, ::stepCounterEnvironment)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         activityRecognitionClient = ActivityRecognition.getClient(this)
         isServiceAliveNow = true
@@ -230,7 +267,8 @@ class LocationTrackingService : Service() {
         if (!::stateStore.isInitialized) {
             false
         } else {
-            TrackingServiceLifecycle.shouldRemainStarted(
+            // A stop waiting for the final steps must not be undone by a restart.
+            pendingStop == null && TrackingServiceLifecycle.shouldRemainStarted(
                 captureStarted = captureStarted || journalPrepareInProgress,
                 trackingEnabled = stateStore.trackingEnabled,
                 isPaused = stateStore.isPaused,
@@ -239,9 +277,24 @@ class LocationTrackingService : Service() {
         }
 
     override fun onDestroy() {
+        if (::stateStore.isInitialized) {
+            // A stop still waiting for the step counter's final reading ends
+            // now with the steps counted so far, as does a capture destroyed
+            // without a stop (best effort).
+            val pending = pendingStop
+            if (pending != null) {
+                pendingStop = null
+                pendingStopToken += 1
+                persistUnflushedStepFinal()
+                pending.stop()
+            } else if (captureStarted) {
+                persistUnflushedStepFinal()
+            }
+        }
         mainHandler.removeCallbacks(stationaryTransition)
         mainHandler.removeCallbacks(heartbeat)
         mainHandler.removeCallbacks(prerequisiteMonitor)
+        mainHandler.removeCallbacks(stepCounterEvaluation)
         requestGeneration += 1
         captureStarted = false
         isCaptureAliveNow = false
@@ -352,28 +405,80 @@ class LocationTrackingService : Service() {
     }
 
     private fun pauseTrack(intent: Intent) {
+        // A pause or stop already waiting for the final steps covers this one.
+        if (pendingStop?.let { it.kind >= STOP_KIND_PAUSE } == true) return
         recordNotificationActionIfNeeded(intent, action = "pause", fallbackReason = "notification_paused")
         ensureForeground()
         stateStore.markState(TrackingStateStore.STATE_STOPPING, currentProfile)
         stateStore.emitCurrentStatus()
-        stopCapture()
-        stateStore.pause()
-        stateStore.emitCurrentStatus()
-        removeForegroundNotification()
-        stopSelf()
+        stopAfterFinalSteps(STOP_KIND_PAUSE) {
+            stopCapture()
+            stateStore.pause()
+            stateStore.emitCurrentStatus()
+            removeForegroundNotification()
+            stopSelf()
+        }
     }
 
     private fun stopTrack(intent: Intent) {
+        // A stop already waiting for the final steps covers this one; a
+        // waiting pause becomes this stop.
+        if (pendingStop?.let { it.kind >= STOP_KIND_STOP } == true) return
         val reason = intent.getStringExtra(EXTRA_STOP_REASON) ?: "user_stopped"
         recordNotificationActionIfNeeded(intent, action = "stop", fallbackReason = reason)
         ensureForeground()
         stateStore.markState(TrackingStateStore.STATE_STOPPING, currentProfile)
         stateStore.emitCurrentStatus()
-        stopCapture()
-        stateStore.stop(reason)
-        stateStore.emitCurrentStatus()
-        removeForegroundNotification()
-        stopSelf()
+        stopAfterFinalSteps(STOP_KIND_STOP) {
+            stopCapture()
+            stateStore.stop(reason)
+            stateStore.emitCurrentStatus()
+            removeForegroundNotification()
+            stopSelf()
+        }
+    }
+
+    /**
+     * Runs [stop] once the step counter has delivered the generation's final
+     * reading and the final steps are durable: about a second at most, while
+     * capture runs on. A later request of a higher [kind] (stop over pause
+     * over failure) replaces the waiting one; a start or resume cancels it
+     * through [stopCapture].
+     */
+    private fun stopAfterFinalSteps(kind: Int, stop: () -> Unit) {
+        val pending = pendingStop
+        if (pending != null) {
+            if (kind > pending.kind) pendingStop = PendingStop(kind, stop)
+            return
+        }
+        if (!captureStarted || !stepCounter.isCounting(stateStore.captureGenerationId)) {
+            // A generation whose process died left its checkpoint behind.
+            runCatching { stateStore.endUnflushedSteps() }
+            stop()
+            return
+        }
+        val token = ++pendingStopToken
+        pendingStop = PendingStop(kind, stop)
+        stepCounter.finalize { snapshot ->
+            if (token != pendingStopToken) return@finalize
+            val waiting = pendingStop ?: return@finalize
+            pendingStop = null
+            persistStepFinal(snapshot)
+            waiting.stop()
+        }
+    }
+
+    private fun persistStepFinal(snapshot: StepSnapshot?) {
+        snapshot ?: return
+        runCatching { stateStore.finalizeSteps(snapshot) }
+        stepFinalPersistedFor = snapshot.generationId
+    }
+
+    /** A generation ending without its final flush keeps the steps counted so far. */
+    private fun persistUnflushedStepFinal() {
+        val generationId = stateStore.captureGenerationId ?: return
+        if (stepFinalPersistedFor == generationId) return
+        persistStepFinal(stepCounter.snapshot(generationId))
     }
 
     private fun receiveActivity(intent: Intent) {
@@ -525,6 +630,8 @@ class LocationTrackingService : Service() {
         stateStore.beginCaptureGeneration(nextCaptureStartReason)
         nextCaptureStartReason = CAPTURE_REASON_PROCESS_RECOVERY
         recentFixDeduplicator.clear()
+        decisionInputs.reset(currentProfile)
+        lastPolicyFixNanos = 0L
 
         registerPowerReceiver()
         requestActivityUpdates()
@@ -544,6 +651,12 @@ class LocationTrackingService : Service() {
 
     private fun stopCapture() {
         val wasCapturing = captureStarted
+        // A start or resume replaces a stop still waiting for the final steps.
+        if (pendingStop != null) {
+            pendingStop = null
+            pendingStopToken += 1
+        }
+        if (wasCapturing) persistUnflushedStepFinal()
         journalPrepareGeneration += 1
         journalPrepareInProgress = false
         captureStarted = false
@@ -552,12 +665,15 @@ class LocationTrackingService : Service() {
         mainHandler.removeCallbacks(stationaryTransition)
         mainHandler.removeCallbacks(heartbeat)
         mainHandler.removeCallbacks(prerequisiteMonitor)
+        mainHandler.removeCallbacks(stepCounterEvaluation)
         if (wasCapturing) {
             runCatching { fusedLocationClient.removeLocationUpdates(locationCallback) }
         }
         removeCurrentActivityUpdates(clearGeneration = true)
         motionSensorFusion.stop()
         stepCounter.stop()
+        decisionInputs.reset(TrackingStateStore.PROFILE_MOVING)
+        lastPolicyFixNanos = 0L
         unregisterPowerReceiver()
         releaseCaptureWakeLock()
         TrackingEventBus.clearMotionEvidence()
@@ -615,61 +731,18 @@ class LocationTrackingService : Service() {
     private fun requestLocationUpdates(profile: String) {
         if (!captureStarted) return
         val generation = ++requestGeneration
-        val interval = if (profile == TrackingStateStore.PROFILE_STATIONARY) {
-            configuration.stationaryIntervalMs
-        } else {
-            configuration.movingIntervalMs
-        }
-        val distance = if (profile == TrackingStateStore.PROFILE_STATIONARY) {
-            configuration.stationaryDistanceFilterMeters
-        } else {
-            configuration.movingDistanceFilterMeters
-        }
-        val priority = when (configuration.desiredAccuracy.lowercase()) {
-            "best", "high", "navigation", "precise", "precised" ->
-                Priority.PRIORITY_HIGH_ACCURACY
-            "low", "lowpower", "low_power" -> Priority.PRIORITY_LOW_POWER
-            "passive" -> Priority.PRIORITY_PASSIVE
-            else -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
-        }
-
-        val highFidelity = profile != TrackingStateStore.PROFILE_STATIONARY &&
-            (priority == Priority.PRIORITY_HIGH_ACCURACY ||
-                configuration.captureIntent != "adaptive")
-        // Turn capture asks for a fix every second, batched up to the moving
-        // interval where the device supports it, and records the regular
-        // fixes and those where the course turns sharply.
-        val captureTurns = profile != TrackingStateStore.PROFILE_STATIONARY &&
-            priority == Priority.PRIORITY_HIGH_ACCURACY &&
-            configuration.capturesTurns &&
-            interval > TurnCaptureSampler.PROVIDER_INTERVAL_MS
-        turnSampler = if (captureTurns) {
-            TurnCaptureSampler(
-                intervalMs = interval,
-                turnDegrees = configuration.turnCaptureDegrees,
-                minimumDistanceMeters = distance,
-            )
-        } else {
-            null
-        }
-        val providerInterval = if (captureTurns) TurnCaptureSampler.PROVIDER_INTERVAL_MS else interval
-        val request = LocationRequest.Builder(priority, providerInterval)
-            .setMinUpdateIntervalMillis(
-                if (captureTurns) providerInterval else (interval / 2L).coerceAtLeast(1_000L),
-            )
-            // Live walking capture must not be hidden in a long provider batch,
-            // and on a low battery a batch could die with the phone.
-            .setMaxUpdateDelayMillis(
-                if (highFidelity || batteryLow) interval else (interval * 2L),
-            )
-            // Never satisfy a new high-fidelity request with a cached fix.
-            .setMaxUpdateAgeMillis(if (highFidelity) 0L else interval)
-            .setMinUpdateDistanceMeters(distance)
-            .setGranularity(
-                if (highFidelity) Granularity.GRANULARITY_FINE
-                else Granularity.GRANULARITY_PERMISSION_LEVEL,
-            )
-            .setWaitForAccurateLocation(highFidelity)
+        // The request, and the sampler choosing which stream fixes to record,
+        // follow the configuration's sampling policy (LocationRequestPlan).
+        val plan = LocationRequestPlan.forProfile(profile, configuration, batteryLow)
+        turnSampler = plan.sampler?.create()
+        stationaryPolicyFedPerProviderFix = configuration.usesSamplingPolicyV2
+        val request = LocationRequest.Builder(plan.priority, plan.providerIntervalMs)
+            .setMinUpdateIntervalMillis(plan.minUpdateIntervalMs)
+            .setMaxUpdateDelayMillis(plan.maxUpdateDelayMs)
+            .setMaxUpdateAgeMillis(plan.maxUpdateAgeMs)
+            .setMinUpdateDistanceMeters(plan.minUpdateDistanceMeters)
+            .setGranularity(plan.granularity)
+            .setWaitForAccurateLocation(plan.waitForAccurateLocation)
             .build()
 
         // Requesting again with the same callback replaces the active request
@@ -708,7 +781,7 @@ class LocationTrackingService : Service() {
                 "isAutomotive" to false,
             )
             latestActivity = event
-            TrackingEventBus.emitActivity(event)
+            publishActivity(event)
             return
         }
         if (trackId == null) return
@@ -744,7 +817,7 @@ class LocationTrackingService : Service() {
                     "evidenceState" to "unavailable",
                 )
                 latestActivity = event
-                TrackingEventBus.emitActivity(event)
+                publishActivity(event)
                 stationaryPolicy?.let {
                     applyStationaryPolicy(it.onActivityUnavailable(System.currentTimeMillis()))
                 }
@@ -763,6 +836,44 @@ class LocationTrackingService : Service() {
             pendingIntent?.cancel()
             runCatching { stateStore.clearActivityRecognitionGeneration() }
         }
+    }
+
+    /** Emits an activity reading and journals it with the next fix. */
+    private fun publishActivity(event: Map<String, Any?>) {
+        decisionInputs.onActivityReading(event)
+        TrackingEventBus.emitActivity(event)
+    }
+
+    /** Doppler speed of every provider fix, as step-counter watchdog evidence. */
+    private fun noteStepWatchdogFix(location: Location) {
+        stepCounter.onFix(
+            speed = location.speed.toDouble().takeIf { location.hasSpeed() },
+            speedAccuracy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                location.hasSpeedAccuracy()
+            ) {
+                location.speedAccuracyMetersPerSecond.toDouble()
+            } else {
+                null
+            },
+            observedAtMs = location.elapsedRealtimeNanos.takeIf { it > 0L }
+                ?.div(1_000_000L)
+                ?: SystemClock.elapsedRealtime(),
+        )
+    }
+
+    /**
+     * Sampling policy 2: the stationary policy sees every provider fix as it
+     * arrives, in capture order and once, whether or not it is recorded.
+     */
+    private fun feedStationaryPolicyOnDelivery(location: Location) {
+        if (!captureStarted) return
+        val policy = stationaryPolicy ?: return
+        val capturedAt = location.elapsedRealtimeNanos
+        if (capturedAt > 0L) {
+            if (capturedAt <= lastPolicyFixNanos) return
+            lastPolicyFixNanos = capturedAt
+        }
+        handleStationaryPolicyFix(policy, location)
     }
 
     private fun Location.toTurnFix() = TurnCaptureSampler.Fix(
@@ -821,6 +932,12 @@ class LocationTrackingService : Service() {
         }
 
         val (activityEvidenceState, activityAgeMs) = activityEvidenceAt(nativeReceivedAt)
+        // The profile in effect when the fix was captured: a batch delivered
+        // after a switch holds fixes from before it.
+        val capturedProfile = decisionInputs.profileAt(location.elapsedRealtimeNanos)
+        // Readings and switches since the previous journaled fix, so a route
+        // replayed from the journal decides as live capture did.
+        val inputs = decisionInputs.drain()
         val event = linkedMapOf<String, Any?>(
             "eventId" to eventId,
             "trackId" to trackId,
@@ -879,16 +996,22 @@ class LocationTrackingService : Service() {
             "activityProbabilities" to latestActivity?.get("probabilities"),
             "motionEvidence" to TrackingEventBus.lastMotionEvidence,
             "stepCount" to stepCounter.steps(captureGenerationId),
-            "motionState" to if (currentProfile == TrackingStateStore.PROFILE_STATIONARY) {
+            "stepCoverage" to stepCounter.coverage(captureGenerationId)?.toMap(),
+            "motionState" to if (capturedProfile == TrackingStateStore.PROFILE_STATIONARY) {
                 "stationary"
             } else {
                 "moving"
             },
-            "trackingProfile" to currentProfile,
-            "samplingProfile" to currentProfile,
-            "batteryMode" to currentProfile,
+            "trackingProfile" to capturedProfile,
+            "samplingProfile" to capturedProfile,
+            "batteryMode" to capturedProfile,
             "provider" to location.provider,
+            "activityReadings" to inputs.activityReadings,
+            "profileTransitions" to inputs.profileTransitions,
         )
+        if (inputs.activityReadingsDropped > 0) {
+            event["activityReadingsDropped"] = inputs.activityReadingsDropped
+        }
 
         val locationCopy = Location(location)
         val accepted = PendingLocationCoordinator.execute(
@@ -937,7 +1060,8 @@ class LocationTrackingService : Service() {
 
         val policy = stationaryPolicy
         if (policy != null) {
-            handleStationaryPolicyFix(policy, location)
+            // Sampling policy 2 fed the policy when the fix arrived.
+            if (!stationaryPolicyFedPerProviderFix) handleStationaryPolicyFix(policy, location)
             updateNotification(force = false, pointTimestamp = timestamp)
             return
         }
@@ -1032,9 +1156,16 @@ class LocationTrackingService : Service() {
             if (episodeStartedAt != null) put("episodeStartedAt", episodeStartedAt)
         }
         latestActivity = event
-        TrackingEventBus.emitActivity(event)
+        publishActivity(event)
 
         val type = event["type"] as String
+        // Walking and vehicle readings are step-counter watchdog evidence,
+        // fed before any profile switch the reading causes.
+        stepCounter.onActivity(
+            type,
+            confidence.coerceIn(0, 100),
+            SystemClock.elapsedRealtime() - age,
+        )
         val policy = stationaryPolicy
         if (policy != null) {
             val confidentStill =
@@ -1210,6 +1341,17 @@ class LocationTrackingService : Service() {
         currentProfile = profile
         val exitedStationary = previousProfile == TrackingStateStore.PROFILE_STATIONARY &&
             profile == TrackingStateStore.PROFILE_MOVING
+        // Journaled with the next fix; fixes captured before now keep the
+        // previous profile.
+        decisionInputs.onProfileSwitch(
+            atElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+            atEpochMs = System.currentTimeMillis(),
+            from = previousProfile,
+            to = profile,
+            reason = reason,
+        )
+        stepCounter.onProfileSwitch(exitedStationary)
+        if (exitedStationary) scheduleStepCounterEvaluation()
         if (profile == TrackingStateStore.PROFILE_STATIONARY) {
             stationaryReferenceLocation = lastLocation?.let(::Location)
             stationaryDisplacementWindow.reset()
@@ -1240,6 +1382,9 @@ class LocationTrackingService : Service() {
         val token = stationaryExitProbeCoordinator.begin()
         stateStore.markStationaryExitProbeRequested()
         stateStore.emitCurrentStatus()
+        // Some step counters went silent after this AP-waking request.
+        stepCounter.onExitProbe()
+        scheduleStepCounterEvaluation()
 
         // Deliver batched fixes before asking for a fresh one. A fresh fix
         // journaled ahead of older flushed fixes made Dart reject those as
@@ -1343,15 +1488,23 @@ class LocationTrackingService : Service() {
         }
         stateStore.markShutdownObserved()
         mainHandler.postDelayed(finish, SHUTDOWN_FLUSH_WAIT_MS)
+        // The final steps and the journal fence both complete inside the same
+        // bounded wait.
+        var partsLeft = 2
+        val partDone = Runnable { if (--partsLeft == 0) finish.run() }
+        stepCounter.finalize { snapshot ->
+            persistStepFinal(snapshot)
+            partDone.run()
+        }
         fusedLocationClient.flushLocations().addOnCompleteListener {
             // Flushed deliveries are already queued on the worker looper; the
             // journal fence follows the writes they enqueue.
             workerHandler.post {
                 val fenced = PendingLocationCoordinator.execute(
                     applicationContext,
-                    onFailure = { mainHandler.post(finish) },
-                ) { mainHandler.post(finish) }
-                if (!fenced) mainHandler.post(finish)
+                    onFailure = { mainHandler.post(partDone) },
+                ) { mainHandler.post(partDone) }
+                if (!fenced) mainHandler.post(partDone)
             }
         }
     }
@@ -1403,9 +1556,11 @@ class LocationTrackingService : Service() {
                 if (location == null) {
                     completeStationaryExitProbe(token, "no_fix")
                 } else {
+                    noteStepWatchdogFix(location)
                     handleLocation(location, CAPTURE_ORIGIN_EXIT_PROBE) {
                         completeStationaryExitProbe(token, "succeeded")
                     }
+                    if (stationaryPolicyFedPerProviderFix) feedStationaryPolicyOnDelivery(location)
                 }
             }.addOnFailureListener { error ->
                 stateStore.markLocationRequestFailure(
@@ -1433,19 +1588,42 @@ class LocationTrackingService : Service() {
     }
 
     private fun failCapture(message: String) {
-        stopCapture()
-        stateStore.fail(message)
-        stateStore.emitCurrentStatus()
-        runCatching { removeForegroundNotification() }
-        stopSelf()
+        if (deferredToMainThread { failCapture(message) }) return
+        // Capture is already ending; the waiting stop decides how.
+        if (pendingStop != null) return
+        stopAfterFinalSteps(STOP_KIND_FAILURE) {
+            stopCapture()
+            stateStore.fail(message)
+            stateStore.emitCurrentStatus()
+            runCatching { removeForegroundNotification() }
+            stopSelf()
+        }
     }
 
     private fun interruptCapture(message: String) {
-        stopCapture()
-        stateStore.interrupt(message)
-        stateStore.emitCurrentStatus()
-        runCatching { removeForegroundNotification() }
-        stopSelf()
+        if (deferredToMainThread { interruptCapture(message) }) return
+        if (pendingStop != null) return
+        stopAfterFinalSteps(STOP_KIND_FAILURE) {
+            stopCapture()
+            stateStore.interrupt(message)
+            stateStore.emitCurrentStatus()
+            runCatching { removeForegroundNotification() }
+            stopSelf()
+        }
+    }
+
+    /**
+     * Failures found on the provider thread end capture on the main thread,
+     * which owns the stop path; [action] runs there only if the same capture
+     * generation is still running. False when already on the main thread.
+     */
+    private fun deferredToMainThread(action: () -> Unit): Boolean {
+        if (Looper.myLooper() == Looper.getMainLooper()) return false
+        val generationId = stateStore.captureGenerationId
+        mainHandler.post {
+            if (captureStarted && stateStore.captureGenerationId == generationId) action()
+        }
+        return true
     }
 
     /**
@@ -1712,13 +1890,56 @@ class LocationTrackingService : Service() {
 
     /**
      * Counts the capture generation's steps when the device has a step
-     * counter and, from Android 10, activity recognition is granted.
+     * counter and, from Android 10, activity recognition is granted. Called
+     * again by the prerequisite monitor, which retries a failed registration.
      */
     private fun startStepCounter() {
         val generationId = stateStore.captureGenerationId ?: return
         if (captureStarted && hasActivityRecognitionPermission()) {
-            stepCounter.start(generationId)
+            stepCounter.start(generationId, configuration.movingConfidenceThreshold)
         }
+    }
+
+    /**
+     * Flushes the step counter as a liveness probe, lets its watchdog compare
+     * it with the motion evidence, and checkpoints the generation's steps so
+     * a process death leaves them behind.
+     */
+    private fun evaluateStepCounter() {
+        if (!captureStarted) return
+        stepCounter.evaluate(flushFirst = FLUSH_STEPS_ON_HEARTBEAT) { snapshot ->
+            if (captureStarted &&
+                snapshot.generationId == stateStore.captureGenerationId &&
+                snapshot.generationId != stepFinalPersistedFor
+            ) {
+                stateStore.checkpointSteps(snapshot)
+            }
+        }
+    }
+
+    /** Checks the step counter again 60 s after a stationary exit or exit probe. */
+    private fun scheduleStepCounterEvaluation() {
+        mainHandler.removeCallbacks(stepCounterEvaluation)
+        mainHandler.postDelayed(stepCounterEvaluation, STEP_COUNTER_EVALUATION_DELAY_MS)
+    }
+
+    /** Device state for step-counter diagnostics; read on the worker thread. */
+    private fun stepCounterEnvironment(): StepCounterEnvironment {
+        val power = getSystemService(POWER_SERVICE) as PowerManager
+        return StepCounterEnvironment(
+            wakeLockHeld = captureWakeLock?.isHeld == true,
+            screenOn = power.isInteractive,
+            deviceIdle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                power.isDeviceIdleMode
+            } else {
+                null
+            },
+            standbyBucket = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                (getSystemService(USAGE_STATS_SERVICE) as? UsageStatsManager)?.appStandbyBucket
+            } else {
+                null
+            },
+        )
     }
 
     private fun hasHighConfidenceStillActivity(): Boolean {
@@ -1785,6 +2006,9 @@ class LocationTrackingService : Service() {
         stateStore.recordPendingUserAction(trackId, action, reason)
     }
 
+    /** A stop path of [kind] waiting for the final steps. */
+    private class PendingStop(val kind: Int, val stop: () -> Unit)
+
     companion object {
         internal const val ACTION_START =
             "com.samir.flutter_background_location.action.START"
@@ -1830,6 +2054,15 @@ class LocationTrackingService : Service() {
         private const val SHUTDOWN_FLUSH_WAIT_MS = 4_000L
         private const val PREREQUISITE_FIX_CHECK_INTERVAL_MS = 30_000L
         private const val FIX_STATUS_LIVENESS_INTERVAL_MS = 10_000L
+        private const val STEP_COUNTER_EVALUATION_DELAY_MS = 60_000L
+
+        // Kill switch for the heartbeat's step-counter flush (a liveness probe).
+        private const val FLUSH_STEPS_ON_HEARTBEAT = true
+
+        // Stop paths by rank: a waiting stop is replaced only by a higher one.
+        private const val STOP_KIND_FAILURE = 0
+        private const val STOP_KIND_PAUSE = 1
+        private const val STOP_KIND_STOP = 2
         private const val LOW_BATTERY_PERCENT = 15
         // Fast-boot power-off on some OEM builds instead of ACTION_SHUTDOWN.
         private const val ACTION_QUICKBOOT_POWEROFF = "android.intent.action.QUICKBOOT_POWEROFF"
@@ -1862,6 +2095,10 @@ class LocationTrackingService : Service() {
         /** Steps of capture generation [generationId]; null when not counted. */
         internal fun stepCount(generationId: String?): Long? =
             liveService?.takeIf { it.captureStarted }?.stepCounter?.steps(generationId)
+
+        /** The `stepCoverage` map of live generation [generationId]; null when not capturing. */
+        internal fun stepCoverage(generationId: String?): Map<String, Any?>? =
+            liveService?.takeIf { it.captureStarted }?.stepCounter?.coverage(generationId)?.toMap()
 
         /**
          * Delivers the step counter's batched readings, then runs [then] on

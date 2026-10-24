@@ -3,6 +3,7 @@ import '../domain/capability_report.dart';
 import '../domain/location_sample.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
+import '../domain/step_coverage.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_readiness.dart';
@@ -124,6 +125,13 @@ abstract interface class NativeJournalDiagnosticsAdapter {
   Future<Map<String, Object?>> nativeJournalDiagnostic({
     bool performMaintenance = false,
   });
+}
+
+/// Optional adapter capability for the native step counter's count-free
+/// diagnostics ring (capability `step_counter_diagnostics`), oldest first;
+/// empty when the native side keeps none.
+abstract interface class StepCounterDiagnosticsAdapter {
+  Future<List<StepCounterDiagnostic>> stepCounterDiagnostics();
 }
 
 /// Optional destructive native-journal capability used by confirmed erase.

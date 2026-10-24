@@ -56,7 +56,7 @@ internal class MotionSensorFusion(
                     state = "moving",
                     confidence = 85,
                     supporting = listOf("significantMotion"),
-                    reason = "significant_motion",
+                    reason = REASON_SIGNIFICANT_MOTION,
                     significantMotion = true,
                 )
                 armSignificantMotion()
@@ -181,7 +181,7 @@ internal class MotionSensorFusion(
                     state = "moving",
                     confidence = 95,
                     supporting = listOf("step"),
-                    reason = "fresh_step",
+                    reason = REASON_FRESH_STEP,
                     stepDetected = true,
                 )
             }
@@ -325,6 +325,10 @@ internal class MotionSensorFusion(
         if (count <= 0) 0.0 else sqrt(sum / count)
 
     companion object {
+        /** Evidence reasons the step-counter watchdog reads. */
+        const val REASON_FRESH_STEP = "fresh_step"
+        const val REASON_SIGNIFICANT_MOTION = "significant_motion"
+
         private const val POLICY_VERSION = 1
         private const val MODE_PLATFORM_ACTIVITY_ONLY = "platformActivityOnly"
         private const val MODE_ENHANCED_SENSOR_FUSION = "enhancedSensorFusion"

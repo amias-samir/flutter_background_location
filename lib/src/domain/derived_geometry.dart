@@ -109,6 +109,12 @@ abstract final class DerivedGeometryAlgorithm {
   /// minutes within the hold radius without net progress, with walking
   /// inside the radius part of the stop.
   static const stopAwareRouteCleaningVersion = '2';
+
+  /// A route recorded under older rules, decided again under the current
+  /// ones (`RouteReview`): the run holds exactly the fixes the review keeps,
+  /// at their recorded coordinates. The package stores it beside the
+  /// recorded route; loading it shows the reviewed route.
+  static const routeQualityReview = 'route_quality_review';
 }
 
 /// Input to an offline derivation. The package ships EMA, spike smoothing and

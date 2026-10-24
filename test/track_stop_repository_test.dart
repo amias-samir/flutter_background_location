@@ -226,11 +226,12 @@ void main() {
       await repository.close();
       expect(await stopSchema('fresh'), <String>[
         'idx_track_stops_open',
+        'idx_track_stops_review',
         'idx_track_stops_track_started',
         'track_stops',
       ]);
       final raw = await openRaw('fresh');
-      expect(await raw.getVersion(), 17);
+      expect(await raw.getVersion(), 18);
       await raw.close();
     });
 

@@ -1,6 +1,7 @@
 import '../domain/derived_geometry.dart';
 import '../domain/route_geometry.dart';
 import '../domain/route_geometry_processor.dart';
+import '../domain/route_review.dart';
 import '../domain/track_point.dart';
 import '../domain/track_data_page.dart';
 import '../domain/tracking_error.dart';
@@ -490,6 +491,39 @@ final class DerivedGeometryService {
       );
     }
     final derived = geometry as DerivedTrackGeometry;
+    final run =
+        await (repository as DerivedGeometryRepository).getDerivedGeometryRun(
+      owner: owner,
+      trackId: trackId,
+      runId: derived.runId,
+    );
+    if (run?.algorithm == DerivedGeometryAlgorithm.routeQualityReview &&
+        repository is RouteReviewRepository) {
+      // A review keeps fixes at their recorded coordinates: its view is the
+      // route with exactly the kept fixes accepted.
+      final kept =
+          await (repository as RouteReviewRepository).keptPointIdsOf(run!.id);
+      return TrackBundle(
+        track: bundle.track,
+        segments: <TrackSegmentWithPoints>[
+          for (final segment in bundle.segments)
+            TrackSegmentWithPoints(
+              segment: segment.segment,
+              points: <TrackPoint>[
+                for (final point in segment.points)
+                  point.accepted == kept.contains(point.id)
+                      ? point
+                      : point.withAcceptance(
+                          accepted: kept.contains(point.id),
+                          rejectionReason: RouteReview.notKeptReason,
+                        ),
+              ],
+            ),
+        ],
+        stops: bundle.stops,
+        summary: bundle.summary,
+      );
+    }
     final rawPoints = <TrackPoint>[
       for (final segment in bundle.segments)
         for (final point in segment.points)

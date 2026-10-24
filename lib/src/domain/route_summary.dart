@@ -47,6 +47,8 @@ final class RouteSummary {
     this.stepCount,
     this.cleanedDistanceMeters,
     this.cleanedRunId,
+    this.correctedDistanceMeters,
+    this.stepCountStoppedAt,
   });
 
   final String trackId;
@@ -66,6 +68,21 @@ final class RouteSummary {
   /// Distance of the route's current cleaned view, when one was derived.
   final double? cleanedDistanceMeters;
   final String? cleanedRunId;
+
+  /// Measured length of the fixes the current rules keep, for a route
+  /// recorded under older rules and reviewed since (route database schema
+  /// 18); null when [distanceMeters] already is that length, as for routes
+  /// recorded under quality policy 5.
+  final double? correctedDistanceMeters;
+
+  /// The distance to show for the route: [correctedDistanceMeters] when the
+  /// route was reviewed, else [distanceMeters]. Comparable across phones.
+  double get displayDistanceMeters => correctedDistanceMeters ?? distanceMeters;
+
+  /// When the phone's step counter stopped counting although the device was
+  /// still walking: [stepCount] is then a lower bound ("at least"). Null when
+  /// the count is complete or unmeasured. Steps are never estimated.
+  final DateTime? stepCountStoppedAt;
 
   final int acceptedPointCount;
   final int rejectedPointCount;
@@ -90,8 +107,9 @@ final class RouteSummary {
   /// counter or the activity permission was not granted.
   final int? stepCount;
 
-  /// Rejected-fix runs worth a look: runs made only of stop evidence are left
-  /// out and counted in [stopEvidenceRunCount].
+  /// Rejected-fix runs that left a visible hole in the route. Informational
+  /// runs, such as one dropped fix, are left out, and runs made only of stop
+  /// evidence are counted in [stopEvidenceRunCount].
   final int qualityEventCount;
   final int stopEvidenceRunCount;
 
@@ -117,10 +135,10 @@ final class RouteSummary {
     return value.isNegative ? Duration.zero : value;
   }
 
-  /// [distanceMeters] over [moving]; null before the route has moved.
+  /// [displayDistanceMeters] over [moving]; null before the route has moved.
   double? get averageMovingSpeedMetersPerSecond => moving.inMilliseconds <= 0
       ? null
-      : distanceMeters / (moving.inMilliseconds / 1000);
+      : displayDistanceMeters / (moving.inMilliseconds / 1000);
 }
 
 /// [RouteSummary] totals over a multi-day Trip's legs, kept in the route
@@ -148,6 +166,8 @@ final class TripSummary {
     this.maxSpeedMetersPerSecond,
     this.stepCount,
     this.cleanedDistanceMeters,
+    this.correctedDistanceMeters,
+    this.stepCountStoppedAt,
   });
 
   final String tripId;
@@ -161,6 +181,18 @@ final class TripSummary {
   /// Sum of the legs' cleaned distances; null unless every leg with fixes
   /// has one.
   final double? cleanedDistanceMeters;
+
+  /// Sum of the legs' [RouteSummary.displayDistanceMeters] when any leg was
+  /// reviewed; null when [distanceMeters] already is that length.
+  final double? correctedDistanceMeters;
+
+  /// The distance to show for the Trip: [correctedDistanceMeters], else
+  /// [distanceMeters].
+  double get displayDistanceMeters => correctedDistanceMeters ?? distanceMeters;
+
+  /// The earliest time a leg's step counter stopped counting while the device
+  /// was still walking; [stepCount] is then a lower bound.
+  final DateTime? stepCountStoppedAt;
   final int acceptedPointCount;
   final int rejectedPointCount;
   final int segmentCount;
@@ -185,8 +217,8 @@ final class TripSummary {
     return value.isNegative ? Duration.zero : value;
   }
 
-  /// [distanceMeters] over [moving]; null before the Trip has moved.
+  /// [displayDistanceMeters] over [moving]; null before the Trip has moved.
   double? get averageMovingSpeedMetersPerSecond => moving.inMilliseconds <= 0
       ? null
-      : distanceMeters / (moving.inMilliseconds / 1000);
+      : displayDistanceMeters / (moving.inMilliseconds / 1000);
 }

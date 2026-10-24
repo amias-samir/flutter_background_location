@@ -41,13 +41,29 @@ struct TrackingConfiguration {
   /// motion policy 2 and keeps the legacy state machine, so a route that was
   /// recording across an upgrade resumes with the policy it started with.
   let motionPolicyVersion: Int
+  /// Fix sampling version. A configuration without the key predates sampling
+  /// policy 2 and keeps sampling as it did, so a route that was recording
+  /// across an upgrade resumes with the sampling it started with.
+  let samplingPolicyVersion: Int
 
   static let legacyMotionPolicyVersion = 1
   static let currentMotionPolicyVersion = 2
+  static let legacySamplingPolicyVersion = 1
+  static let currentSamplingPolicyVersion = 2
 
   /// Whether motion policy 2 decides the moving/stationary profile.
   var usesStationaryPolicyV2: Bool {
     motionPolicyVersion >= 2 && captureIntent == "adaptive"
+  }
+
+  /// Whether the moving profile samples an unfiltered stream and records one
+  /// fix per interval or a turn (sampling policy 2). Only the high-accuracy
+  /// presets with an interval above a second do; the stationary profile and
+  /// the Medium and Low presets keep their distance filter.
+  var samplesUnfilteredMovingStream: Bool {
+    samplingPolicyVersion >= 2
+      && movingDesiredAccuracy <= kCLLocationAccuracyBest
+      && movingIntervalMs > 1_000
   }
 
   static let defaults = TrackingConfiguration(dictionary: [:])
@@ -179,6 +195,7 @@ struct TrackingConfiguration {
       (Self.legacyMotionPolicyVersion...Self.currentMotionPolicyVersion)
         .contains(requestedMotionPolicy)
       ? requestedMotionPolicy : Self.currentMotionPolicyVersion
+    samplingPolicyVersion = Self.samplingPolicy(dictionary["samplingPolicyVersion"])
   }
 
   var dictionary: [String: Any] {
@@ -212,7 +229,25 @@ struct TrackingConfiguration {
       "sensorProbeMaximumDurationPerHourMs": sensorProbeMaximumDurationPerHourMs,
       "iosTerminationRecoveryMode": terminationRecoveryMode.rawValue,
       "motionPolicyVersion": motionPolicyVersion,
+      "samplingPolicyVersion": samplingPolicyVersion,
     ]
+  }
+
+  /// A missing or invalid sampling version keeps the legacy sampling; one
+  /// newer than this side knows samples with the newest it does.
+  private static func samplingPolicy(_ value: Any?) -> Int {
+    let requested: Int?
+    if let number = value as? NSNumber {
+      requested = number.intValue
+    } else if let string = value as? String {
+      requested = Int(string)
+    } else {
+      requested = nil
+    }
+    guard let requested, requested >= legacySamplingPolicyVersion else {
+      return legacySamplingPolicyVersion
+    }
+    return min(requested, currentSamplingPolicyVersion)
   }
 
   private static func number(
