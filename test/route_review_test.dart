@@ -83,7 +83,7 @@ void main() {
           accuracy: 10.9,
           speed: 2.81,
           speedAccuracy: 5.8),
-      for (var i = 0; i < 9; i += 1)
+      for (var i = 0; i < 19; i += 1)
         fix(trackId, arrivedAt + 48 + i * 18,
             east: (i.isEven ? -6.0 : 8.0) + i * 0.3,
             north: i.isEven ? 4.0 : -3.0,
@@ -95,7 +95,7 @@ void main() {
       trackId: trackId,
       from: 0,
       to: 70,
-      startedAt: t0.add(Duration(seconds: arrivedAt + 48 + 9 * 18)),
+      startedAt: t0.add(Duration(seconds: arrivedAt + 48 + 19 * 18)),
       eventPrefix: 'out',
     );
     return SyntheticTrackingRoute(

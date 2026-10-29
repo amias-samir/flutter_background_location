@@ -451,13 +451,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   }
 
   Future<void> _exportTrack(String trackId, TrackExportFormat format) async {
+    final index = _tracks.indexWhere((track) => track.id == trackId);
+    final routeName = index < 0 ? trackId : _tracks[index].routeId ?? trackId;
     final name = await showDialog<String>(
       context: context,
-      builder: (_) => ExportNameDialog(
-        format: format,
-        initialFileName:
-            'route_${DateTime.now().toUtc().millisecondsSinceEpoch}',
-      ),
+      builder: (_) =>
+          ExportNameDialog(format: format, initialFileName: routeName),
     );
     if (name == null) return;
     await _run(() async {
@@ -505,13 +504,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   }
 
   Future<void> _exportTrip(String tripId, TrackExportFormat format) async {
+    final index = _trips.indexWhere((item) => item.trip.id == tripId);
+    final routeName = index < 0 ? tripId : _trips[index].trip.routeId ?? tripId;
     final name = await showDialog<String>(
       context: context,
-      builder: (_) => ExportNameDialog(
-        format: format,
-        initialFileName:
-            'trip_${DateTime.now().toUtc().millisecondsSinceEpoch}',
-      ),
+      builder: (_) =>
+          ExportNameDialog(format: format, initialFileName: routeName),
     );
     if (name == null) return;
     await _run(() async {

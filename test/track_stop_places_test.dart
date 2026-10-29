@@ -270,13 +270,13 @@ void main() {
       qualityPolicy: TrackingPolicyVersions.qualityPolicy,
     );
     final first = SyntheticTrackingRoute.pocketStop(
-      duration: const Duration(minutes: 4),
+      duration: const Duration(minutes: 6),
       startedAt: t0,
       seed: 3,
       eventPrefix: 'shrine-1',
       trackId: run.trackId,
     );
-    final walkAt = t0.add(const Duration(minutes: 4, seconds: 5));
+    final walkAt = t0.add(const Duration(minutes: 6, seconds: 5));
     final walk = syntheticWalk(
       trackId: run.trackId,
       from: 0,
@@ -287,7 +287,7 @@ void main() {
     );
     final secondAt = walkAt.add(const Duration(seconds: 35));
     final second = SyntheticTrackingRoute.pocketStop(
-      duration: const Duration(minutes: 4),
+      duration: const Duration(minutes: 6),
       startedAt: secondAt,
       origin: (
         latitude: syntheticOrigin.latitude,
@@ -304,7 +304,7 @@ void main() {
       trackId: run.trackId,
       from: 35,
       to: 200,
-      startedAt: secondAt.add(const Duration(minutes: 4, seconds: 5)),
+      startedAt: secondAt.add(const Duration(minutes: 6, seconds: 5)),
       eventPrefix: 'leave',
       enterTransition: true,
     );

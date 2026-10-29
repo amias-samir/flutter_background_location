@@ -23,8 +23,9 @@ void main() {
 
   // The motion policy is versioned on its own (TrackingPolicyVersions), not by
   // the preset definition, so the frozen preset record leaves it out.
-  Map<String, Object?> presetRecord(TrackingConfig config) =>
-      config.toMap()..remove('motionPolicyVersion');
+  Map<String, Object?> presetRecord(TrackingConfig config) => config.toMap()
+    ..remove('motionPolicyVersion')
+    ..remove('minimumStopDurationMs');
 
   test('preset definition 6 resolves exactly as recorded', () {
     // Changing a preset value means a new preset-definition version, a new

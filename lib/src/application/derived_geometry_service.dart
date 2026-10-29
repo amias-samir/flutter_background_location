@@ -55,12 +55,11 @@ final class DerivedGeometryService {
     );
     final cleaning =
         request.algorithm == DerivedGeometryAlgorithm.stopAwareRouteCleaning;
-    final detector = cleaning
-        ? StopEpisodeDetector(
-            (await repository.getTrack(trackId))?.config ??
-                const TrackingConfig(),
-          )
+    final stopConfig = cleaning
+        ? (await repository.getTrack(trackId))?.config ?? const TrackingConfig()
         : null;
+    final detector =
+        stopConfig == null ? null : StopEpisodeDetector(stopConfig);
     final run = await store.beginDerivedGeometryRun(
       owner: owner,
       trackId: trackId,
@@ -89,7 +88,7 @@ final class DerivedGeometryService {
                     'stopMovingEvidenceWindowSeconds':
                         StopSitePolicy.movingEvidenceWindow.inSeconds,
                     'stopDwellMinimumSeconds':
-                        StopSitePolicy.dwellMinimumDuration.inSeconds,
+                        stopConfig!.minimumStopDuration.inSeconds,
                     'stopDwellMaximumTrendMetersPerSecond':
                         StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond,
                     'stopMaximumCollapseDistanceMeters':

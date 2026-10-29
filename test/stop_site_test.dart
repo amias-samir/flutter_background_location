@@ -5,7 +5,7 @@ import 'package:flutter_background_location_tracker/src/domain/stop_site.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Quality policy 3's dwell rule: fixes that stay within the hold radius for
-/// two minutes with no net progress make a stop.
+/// five minutes with no net progress make a stop.
 void main() {
   const metersPerDegree = 111195.07973436875;
   const originLatitude = 0.5;
@@ -21,15 +21,15 @@ void main() {
         capturedAt: t0.add(Duration(seconds: seconds)),
       );
 
-  test('fixes confined for two minutes without progress are a dwell', () {
+  test('fixes confined for five minutes without progress are a dwell', () {
     final run = DwellRun();
     final random = math.Random(1);
-    for (var second = 0; second < 120; second += 10) {
+    for (var second = 0; second < 300; second += 10) {
       run.add(fix((random.nextDouble() - 0.5) * 20,
           (random.nextDouble() - 0.5) * 20, second));
       expect(run.dwellAnchor(), isNull, reason: 'at $second s');
     }
-    run.add(fix(3, -2, 125));
+    run.add(fix(3, -2, 300));
     final anchor = run.dwellAnchor();
     expect(anchor, isNotNull);
     expect(
@@ -43,7 +43,7 @@ void main() {
       ..add(fix(0, 0, 0))
       ..add(fix(4, 3, 8));
     expect(run.dwellAnchor(), isNull);
-    run.add(fix(-3, 2, 150));
+    run.add(fix(-3, 2, 300));
     expect(run.dwellAnchor(), isNotNull);
   });
 

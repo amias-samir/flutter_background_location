@@ -6,14 +6,14 @@ abstract final class TrackStopKind {
   /// Activity evidence showed the device was still.
   static const still = 'still';
 
-  /// Fixes stayed within the hold radius for two minutes without net
+  /// Fixes stayed within the hold radius for the configured duration without net
   /// progress, as a phone in a pocket reports at a place.
   static const dwell = 'dwell';
 }
 
 /// A stay at one place during a route: where it was and how long it lasted.
 ///
-/// Quality policy 3 records a stop once a stay has lasted two minutes. The
+/// A stop is recorded once a stay reaches its configured minimum duration. The
 /// fixes held during it are kept on the device as rejected evidence and never
 /// enter the route, its distance or default exports; the stop record is what
 /// remains of the stay. Coordinates are the robust centre of the held fixes,

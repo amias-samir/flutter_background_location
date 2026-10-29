@@ -45,6 +45,11 @@
       "android": "parsed",
       "ios": "parsed"
     },
+    "minimumStopDurationMs": {
+      "android": "ignored",
+      "ios": "ignored",
+      "reason": "Enforced by the Dart stop detection and route cleaning policies."
+    },
     "stationaryProbeDisplacementMeters": {
       "android": "parsed",
       "ios": "parsed"

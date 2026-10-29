@@ -226,6 +226,7 @@ final class TrackingConfig {
     double? turnCaptureDegrees,
     double maximumPlausibleSpeedMetersPerSecond = 70,
     Duration stationaryConfirmationDuration = const Duration(seconds: 90),
+    Duration minimumStopDuration = const Duration(minutes: 5),
     double stationaryProbeDisplacementMeters = 30,
     int stationaryConfidenceThreshold = 75,
     int movingConfidenceThreshold = 60,
@@ -269,6 +270,7 @@ final class TrackingConfig {
           maximumPlausibleSpeedMetersPerSecond:
               maximumPlausibleSpeedMetersPerSecond,
           stationaryConfirmationDuration: stationaryConfirmationDuration,
+          minimumStopDuration: minimumStopDuration,
           stationaryProbeDisplacementMeters: stationaryProbeDisplacementMeters,
           stationaryConfidenceThreshold: stationaryConfidenceThreshold,
           movingConfidenceThreshold: movingConfidenceThreshold,
@@ -311,6 +313,7 @@ final class TrackingConfig {
     required double? turnCaptureDegrees,
     required this.maximumPlausibleSpeedMetersPerSecond,
     required this.stationaryConfirmationDuration,
+    required this.minimumStopDuration,
     required this.stationaryProbeDisplacementMeters,
     required this.stationaryConfidenceThreshold,
     required this.movingConfidenceThreshold,
@@ -497,6 +500,10 @@ final class TrackingConfig {
   /// [movingDistanceFilterMeters].
   final double turnCaptureDegrees;
 
+  /// Minimum stationary or confined-dwell duration required to record a stop.
+  /// Defaults to five minutes. This does not control native sampling cadence.
+  final Duration minimumStopDuration;
+
   /// Minimum platform confidence required to accept stationary evidence.
   final int stationaryConfidenceThreshold;
 
@@ -623,6 +630,7 @@ final class TrackingConfig {
     double? turnCaptureDegrees,
     double? maximumPlausibleSpeedMetersPerSecond,
     Duration? stationaryConfirmationDuration,
+    Duration? minimumStopDuration,
     double? stationaryProbeDisplacementMeters,
     int? stationaryConfidenceThreshold,
     int? movingConfidenceThreshold,
@@ -669,6 +677,7 @@ final class TrackingConfig {
                 this.maximumPlausibleSpeedMetersPerSecond,
         stationaryConfirmationDuration: stationaryConfirmationDuration ??
             this.stationaryConfirmationDuration,
+        minimumStopDuration: minimumStopDuration ?? this.minimumStopDuration,
         stationaryProbeDisplacementMeters: stationaryProbeDisplacementMeters ??
             this.stationaryProbeDisplacementMeters,
         stationaryConfidenceThreshold:
@@ -753,6 +762,9 @@ final class TrackingConfig {
     }
     _positiveDuration(errors, 'movingInterval', movingInterval);
     _positiveDuration(errors, 'stationaryInterval', stationaryInterval);
+    if (minimumStopDuration.inMilliseconds <= 0) {
+      errors.add('minimumStopDuration must be at least one millisecond');
+    }
     _positiveDuration(
       errors,
       'stationaryConfirmationDuration',
@@ -850,6 +862,7 @@ final class TrackingConfig {
             maximumPlausibleSpeedMetersPerSecond,
         'stationaryConfirmationMs':
             stationaryConfirmationDuration.inMilliseconds,
+        'minimumStopDurationMs': minimumStopDuration.inMilliseconds,
         'stationaryProbeDisplacementMeters': stationaryProbeDisplacementMeters,
         'turnCaptureDegrees': turnCaptureDegrees,
         'stationaryConfidenceThreshold': stationaryConfidenceThreshold,
@@ -932,6 +945,9 @@ final class TrackingConfig {
           decimal('maximumPlausibleSpeedMetersPerSecond') ?? 70,
       stationaryConfirmationDuration: Duration(
         milliseconds: integer('stationaryConfirmationMs') ?? 90000,
+      ),
+      minimumStopDuration: Duration(
+        milliseconds: integer('minimumStopDurationMs') ?? 300000,
       ),
       stationaryProbeDisplacementMeters:
           decimal('stationaryProbeDisplacementMeters') ?? 30,

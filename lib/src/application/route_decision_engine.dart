@@ -473,7 +473,7 @@ final class RouteDecisionEngine {
         ),
       );
 
-  /// Without activity evidence, two minutes of confined accepted fixes with
+  /// Without activity evidence, the configured duration of confined fixes with
   /// no net progress make a stop; its fixes until then stay in the route.
   void _trackFallbackDwell(TrackPoint stored, {required bool unknown}) {
     if (!unknown || _gate.policyVersion < 2) {
@@ -489,7 +489,9 @@ final class RouteDecisionEngine {
         capturedAt: stored.capturedAt,
       ),
     );
-    final dwell = _fallbackDwell.dwellAnchor();
+    final dwell = _fallbackDwell.dwellAnchor(
+      minimumDuration: config.minimumStopDuration,
+    );
     if (dwell == null) return;
     final members = _fallbackDwell.fixes;
     _fallbackDwell.reset();
@@ -880,7 +882,7 @@ final class RouteDecisionEngine {
     if (startedAt.isAfter(capturedAt)) startedAt = capturedAt;
     // The anchor was still moving and the provider then fell silent: the
     // movement may have gone on for the whole silence, so only the fixes
-    // after it count towards the two minutes.
+    // after it count towards the configured minimum.
     var clockStartedAt = startedAt;
     if (!still &&
         startedAt == anchor.capturedAt &&
@@ -933,8 +935,7 @@ final class RouteDecisionEngine {
     required bool stillSeen,
     required bool silentArrival,
   }) {
-    if (until.difference(stay.clockStartedAt) <
-        StopSitePolicy.dwellMinimumDuration) {
+    if (until.difference(stay.clockStartedAt) < config.minimumStopDuration) {
       return false;
     }
     if (stillSeen && members.length >= StopSitePolicyV5.stillPromotionMembers) {
@@ -970,7 +971,7 @@ final class RouteDecisionEngine {
         !(silentUntil != null &&
             members.isNotEmpty &&
             silentUntil.difference(stay.clockStartedAt) >=
-                StopSitePolicy.dwellMinimumDuration)) {
+                config.minimumStopDuration)) {
       return null;
     }
     final centre = _centreOf(members);
@@ -1696,7 +1697,7 @@ final class _Stay {
   final String? anchorPointId;
   final DateTime startedAt;
 
-  /// Where the two minutes that make a stop start counting: [startedAt],
+  /// Where the configured stop duration starts counting: [startedAt],
   /// unless the movement may have gone on into a silence after the anchor.
   final DateTime clockStartedAt;
   final List<DwellFix> members = <DwellFix>[];

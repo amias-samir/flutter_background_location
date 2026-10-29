@@ -63,6 +63,12 @@ void main() {
       operationId: 'complete-export-trip',
     );
 
+    final defaultName = await controller.exportTrip(
+      tripId: started.trip.id,
+      format: TrackExportFormat.gpx,
+    );
+    expect(defaultName.fileName, '${started.trip.routeId}.gpx');
+
     for (final format in TrackExportFormat.values) {
       final result = await controller.exportTrip(
         tripId: started.trip.id,

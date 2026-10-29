@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Make the minimum recorded-stop duration configurable through
+  `TrackingConfig.minimumStopDuration` (default: five minutes).
+- Default route and trip export filenames to the route identifier; callers can
+  still provide an explicit filename.
+
+- Require at least five minutes of stationary or confined dwell evidence
+  before recording a stop. Shorter pauses still suppress stationary jitter.
+
 - Adaptive capture now holds stops (motion policy 2 and quality policy 2). A
   field test recorded about 1.1 km of phantom distance and a dense scribble
   of fixes while a phone sat in a pocket indoors for three hours. Activity
@@ -36,7 +44,7 @@
     last 30 s and no measured walking-pace Doppler speed. Its fixes are held
     from then on. A moving fix ends a pause at once, so walking on keeps its
     distance.
-  - Once a stay lasts two minutes with no net progress (least-squares
+  - Once a stay lasts five minutes with no net progress (least-squares
     velocity less twice its standard error, at most 0.15 m/s), or with still
     evidence, it is a stop and the hold centres on its fixes. Walking inside
     the radius stays part of the stop. It ends when a fix leaves the radius
@@ -48,7 +56,7 @@
     new `TrackPointQualityFlag.duringStop` bit and no longer mark visible gaps.
   - With no activity readings at all (iOS reports only changes, and some
     Android devices have no Activity Recognition) and no precise Doppler
-    speed, a fix is neither moving nor quiet: only two minutes of accepted
+    speed, a fix is neither moving nor quiet: only five minutes of accepted
     fixes confined with no net progress start a stop.
   - Routes recorded under quality policies 1 and 2 decide exactly as before.
 - A two-phone motorbike test (one phone in the rider's jacket pocket, one in

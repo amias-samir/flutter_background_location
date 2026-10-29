@@ -1272,10 +1272,5 @@ String _mimeType(TrackExportFormat format) => switch (format) {
     };
 
 String _defaultFileName(Track track, String extension) {
-  final date = track.startedAt.toUtc().toIso8601String().split('T').first;
-  final safeId = (track.routeId ?? track.id).replaceAll(
-    RegExp(r'[^A-Za-z0-9_-]'),
-    '_',
-  );
-  return 'track_${date}_$safeId.$extension';
+  return defaultRouteExportName(track, extension);
 }

@@ -384,7 +384,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   bool _stopActivityEvidenceSeen = false;
   ActivitySnapshot? _latestChangeOnlyReading;
 
-  // Without activity evidence, a stay is recognised only from two minutes of
+  // Without activity evidence, a stay is recognised only from the configured
   // confined accepted fixes, as before quiet fixes could be told apart.
   final DwellRun _dwellRun = DwellRun();
   String? _dwellRunSegmentId;
@@ -2555,7 +2555,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     }
     if (site.isStop && !recordStops) return null;
     final stay = sample.capturedAt.difference(site.startedAt);
-    if (stay < StopSitePolicy.dwellMinimumDuration) return null;
+    if (stay < config.minimumStopDuration) return null;
     if (site.promoted) {
       // Recognised from accepted fixes alone: open its record around the
       // centre it already holds.
@@ -2581,7 +2581,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
           capturedAt: sample.capturedAt,
         ),
     ];
-    if (!site.stillSeen && !_isDwell(members, stay)) return null;
+    if (!site.stillSeen && !_isDwell(members, stay, config)) return null;
     final centre = DwellRun.centreOf(members);
     return _StopTransition(
       promote: centre,
@@ -2604,9 +2604,9 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     final lastHeldAt = site.lastHeldAt;
     if (lastHeldAt == null) return null;
     final stay = departure.capturedAt.difference(site.startedAt);
-    if (stay < StopSitePolicy.dwellMinimumDuration) return null;
+    if (stay < config.minimumStopDuration) return null;
     final members = <DwellFix>[site.anchorFix, ...site.insideFixes];
-    if (!site.isStop && !_isDwell(members, stay)) return null;
+    if (!site.isStop && !_isDwell(members, stay, config)) return null;
     final centre = site.promoted ? site.anchor : DwellRun.centreOf(members);
     final distance = TrackGeodesy.sphericalHaversineMeters(
       centre.latitude,
@@ -2665,10 +2665,11 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       );
 
   /// Whether [members], over a stay of [stay], made no net progress.
-  static bool _isDwell(List<DwellFix> members, Duration stay) {
+  static bool _isDwell(
+      List<DwellFix> members, Duration stay, TrackingConfig config) {
     if (members.length < 2) return false;
     final span = members.last.capturedAt.difference(members.first.capturedAt);
-    if (span >= StopSitePolicy.dwellMinimumDuration) {
+    if (span >= config.minimumStopDuration) {
       return DwellRun.progressSpeedMetersPerSecond(members) <=
           StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond;
     }
@@ -2764,7 +2765,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     _dwellRun.reset();
   }
 
-  /// Without activity evidence, two minutes of confined accepted fixes with no
+  /// Without activity evidence, the configured duration of confined fixes with no
   /// net progress make a stop; its fixes until then stay in the route.
   void _trackFallbackDwell(
     TrackPoint stored,
@@ -2783,7 +2784,9 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
         capturedAt: stored.capturedAt,
       ),
     );
-    final dwell = _dwellRun.dwellAnchor();
+    final dwell = _dwellRun.dwellAnchor(
+      minimumDuration: config.minimumStopDuration,
+    );
     if (dwell == null) return;
     final first = _dwellRun.fixes.first;
     _dwellRun.reset();

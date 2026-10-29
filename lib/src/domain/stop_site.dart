@@ -18,7 +18,7 @@ import 'track_geodesy.dart';
 /// motion policy 2.
 abstract final class StopSitePolicy {
   /// How long a stay must last before it is a stop.
-  static const dwellMinimumDuration = Duration(minutes: 2);
+  static const dwellMinimumDuration = Duration(minutes: 5);
 
   /// A moving reading this recent makes a fix a moving one. Activity
   /// Recognition reports every few seconds while its owner walks or rides.
@@ -321,10 +321,12 @@ final class DwellRun {
       _fixes.removeWhere((fix) => !fix.capturedAt.isAfter(at));
 
   /// The stop centre when the run is a dwell, otherwise null.
-  StopSiteAnchor? dwellAnchor() {
+  StopSiteAnchor? dwellAnchor({
+    Duration minimumDuration = StopSitePolicy.dwellMinimumDuration,
+  }) {
     if (_fixes.length < 2) return null;
     final span = _fixes.last.capturedAt.difference(_fixes.first.capturedAt);
-    if (span < StopSitePolicy.dwellMinimumDuration) return null;
+    if (span < minimumDuration) return null;
     if (progressSpeedMetersPerSecond(_fixes) >
         StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond) {
       return null;

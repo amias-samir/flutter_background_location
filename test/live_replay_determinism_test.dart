@@ -73,7 +73,7 @@ void main() {
       const Duration(seconds: 5),
     );
     final stop = SyntheticTrackingRoute.pocketStop(
-      duration: const Duration(minutes: 5),
+      duration: const Duration(minutes: 6),
       startedAt: stopAt,
       trackId: trackId,
     );
@@ -81,7 +81,7 @@ void main() {
       trackId: trackId,
       from: 0,
       to: 120,
-      startedAt: stopAt.add(const Duration(minutes: 5, seconds: 5)),
+      startedAt: stopAt.add(const Duration(minutes: 6, seconds: 5)),
       eventPrefix: 'leave',
       enterTransition: true,
     );

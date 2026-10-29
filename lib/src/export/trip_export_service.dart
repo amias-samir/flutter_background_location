@@ -197,7 +197,7 @@ final class TripExportService {
       options: options,
       report: report,
     );
-    final fallback = trackArtifact.fileName.replaceFirst('track_', 'trip_');
+    final fallback = trackArtifact.fileName;
     final resolvedName = resolveExportFileName(
       format: format,
       fallbackFileName: fallback,

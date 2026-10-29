@@ -826,16 +826,11 @@ final class TrackExportService {
     List<List<TrackPoint>> segments,
     RouteGeometryReport report,
   ) {
-    final date =
-        bundle.track.startedAt.toUtc().toIso8601String().split('T').first;
-    final safeId = (bundle.track.routeId ?? bundle.track.id).replaceAll(
-      RegExp(r'[^A-Za-z0-9_-]'),
-      '_',
-    );
+    final name = defaultRouteExportName(bundle.track, extension);
     return TrackExportArtifact(
       trackId: bundle.track.id,
       format: format,
-      fileName: 'track_${date}_$safeId.$extension',
+      fileName: name,
       mimeType: mimeType,
       contents: contents,
       pointCount: segments.fold<int>(0, (sum, points) => sum + points.length),
@@ -850,6 +845,19 @@ final class TrackExportService {
 
   static String _trackName(Track track) =>
       track.routeId == null ? 'Track ${track.id}' : 'Route ${track.routeId}';
+}
+
+/// Default export name, using the route identifier when one is available.
+String defaultRouteExportName(Track track, String extension) {
+  final routeName = track.routeId?.trim();
+  final base =
+      routeName == null || routeName.isEmpty ? 'track_${track.id}' : routeName;
+  final safe = base.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_');
+  try {
+    return '${sanitizeExportFileName(safe)}.$extension';
+  } on ArgumentError {
+    return '${sanitizeExportFileName('track_${track.id}')}.$extension';
+  }
 }
 
 String resolveExportFileName({

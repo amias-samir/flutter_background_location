@@ -354,7 +354,14 @@ class _TripDetail extends StatelessWidget {
         children: <Widget>[
           Icon(icon, size: 11, color: foreground),
           const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 11, color: foreground)),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: foreground),
+            ),
+          ),
         ],
       ),
     );

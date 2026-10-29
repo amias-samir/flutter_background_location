@@ -43,7 +43,7 @@ final class StopEpisode {
 ///   moving evidence on a second outside point, or for good.
 ///
 /// Unlike the causal pipeline, a stop also covers the points before it was
-/// recognised: a dwell's first two minutes, a stay whose fixes the provider
+/// recognised: a dwell's initial configured minimum, a stay whose fixes the provider
 /// withheld, and the arrival inside the hold radius. Routes recorded under
 /// any policy are cleaned the same way; their canonical points are never
 /// changed.
@@ -139,7 +139,7 @@ final class StopEpisodeDetector {
   }
 
   /// Stays as inclusive index ranges. A stay of a single point or shorter
-  /// than [MotionPolicyV2.stillEpisodeMinimumSpan] is not reported.
+  /// than the configured minimum stop duration is not reported.
   List<(int, int)> _stays(List<TrackPoint> points, List<DwellFix> fixes) {
     final gate = MotionGate(_config);
     final stays = <(int, int)>[];
@@ -162,8 +162,8 @@ final class StopEpisodeDetector {
       final first = points[run.first].capturedAt;
       final stay = at.difference(first);
       final span = points[run.last].capturedAt.difference(first);
-      if (stay < StopSitePolicy.dwellMinimumDuration ||
-          span >= StopSitePolicy.dwellMinimumDuration) {
+      if (stay < _config.minimumStopDuration ||
+          span >= _config.minimumStopDuration) {
         return;
       }
       final net = TrackGeodesy.sphericalHaversineMeters(
@@ -186,7 +186,7 @@ final class StopEpisodeDetector {
             ? points[last + 1].capturedAt
             : points[last].capturedAt;
         if (leftAt.difference(points[first].capturedAt) >=
-            MotionPolicyV2.stillEpisodeMinimumSpan) {
+            _config.minimumStopDuration) {
           stays.add((first, last));
         }
       }
@@ -269,7 +269,7 @@ final class StopEpisodeDetector {
         final members = <DwellFix>[for (final member in run) fixes[member]];
         if (members.length >= 2 &&
             members.last.capturedAt.difference(members.first.capturedAt) >=
-                StopSitePolicy.dwellMinimumDuration &&
+                _config.minimumStopDuration &&
             DwellRun.progressSpeedMetersPerSecond(members) <=
                 StopSitePolicy.dwellMaximumTrendSpeedMetersPerSecond) {
           start = run.first;

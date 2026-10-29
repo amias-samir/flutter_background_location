@@ -2,6 +2,24 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('stop duration defaults, validates, copies and persists', () {
+    expect(
+        const TrackingConfig().minimumStopDuration, const Duration(minutes: 5));
+    const config = TrackingConfig(minimumStopDuration: Duration(minutes: 2));
+    expect(TrackingConfig.fromJson(config.toJson()).minimumStopDuration,
+        const Duration(minutes: 2));
+    expect(
+        config
+            .copyWith(minimumStopDuration: const Duration(minutes: 8))
+            .minimumStopDuration,
+        const Duration(minutes: 8));
+    expect(TrackingConfig.fromMap(const {}).minimumStopDuration,
+        const Duration(minutes: 5));
+    expect(
+        () =>
+            const TrackingConfig(minimumStopDuration: Duration.zero).validate(),
+        throwsA(isA<TrackingConfigurationException>()));
+  });
   test('high is the default accuracy profile', () {
     const config = TrackingConfig();
 

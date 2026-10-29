@@ -8,6 +8,7 @@ import 'package:flutter_background_location_tracker/src/domain/derived_geometry.
 import 'package:flutter_background_location_tracker/src/domain/route_geometry.dart';
 import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_error.dart';
+import 'package:flutter_background_location_tracker/src/domain/tracking_config.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracking_start.dart';
 import 'package:flutter_background_location_tracker/src/export/incremental_track_export.dart';
 import 'package:flutter_background_location_tracker/src/export/track_export_service.dart';
@@ -70,6 +71,31 @@ void main() {
   });
 
   tearDown(() => harness.repository.close());
+
+  test('incremental export defaults to the route name', () async {
+    final trackId = await harness.repository.createTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: const TrackingConfig(),
+      routeId: 'Morning ride',
+      requestedTrackId: 'named-stream-route',
+    );
+    await harness.repository.markTrackActive(trackId);
+    await harness.append(trackId: trackId, latitude: 27.7, longitude: 85.3);
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+    final service = IncrementalTrackExportService(
+      repository: harness.repository,
+      sinkFactory: () => _MemoryIncrementalSink(),
+    );
+    final result = await service
+        .start(
+          owner: const TrackingOwner(userId: 'user-1', organizationId: 'org-1'),
+          trackId: trackId,
+          format: TrackExportFormat.geoJson,
+        )
+        .result;
+    expect(result.destination.displayName, 'Morning ride.geojson');
+  });
 
   test('S1-01 incremental formats parse and match legacy route semantics',
       () async {

@@ -20,6 +20,24 @@ const _stopReasons = <String>{
 void main() {
   final t0 = DateTime.utc(2026, 10, 19, 3);
 
+  test('stored custom minimum controls stop recording', () async {
+    final run = await StopReplay.start(t0,
+        config:
+            const TrackingConfig(minimumStopDuration: Duration(minutes: 2)));
+    expect(
+        (await run.harness.repository.getTrack(run.trackId))!
+            .config
+            .minimumStopDuration,
+        const Duration(minutes: 2));
+    await run.replay(SyntheticTrackingRoute.pocketStop(
+      duration: const Duration(minutes: 3),
+      startedAt: t0,
+      trackId: run.trackId,
+    ));
+    expect(
+        await run.harness.repository.listTrackStops(run.trackId), hasLength(1));
+  });
+
   test('a pocket stop is held from its first quiet fix and recorded', () async {
     final run = await StopReplay.start(t0, config: const TrackingConfig());
     final arrival = syntheticWalk(
@@ -169,7 +187,7 @@ void main() {
   test('walking about inside the place stays part of the stop', () async {
     final run = await StopReplay.start(t0, config: const TrackingConfig());
     final first = SyntheticTrackingRoute.pocketStop(
-      duration: const Duration(minutes: 5),
+      duration: const Duration(minutes: 6),
       startedAt: t0,
       trackId: run.trackId,
     );
@@ -248,7 +266,7 @@ void main() {
     );
   });
 
-  test('a roadside bike stop is held once it lasts two minutes', () async {
+  test('a roadside bike stop is held once it lasts five minutes', () async {
     final run = await StopReplay.start(t0, config: const TrackingConfig());
     const stopLength = Duration(minutes: 6);
     final roadside = SyntheticTrackingRoute.roadsideStop(
@@ -271,7 +289,7 @@ void main() {
               .isAfter(stopAt.add(const Duration(seconds: 150))))
           .where((point) => point.accepted),
       isEmpty,
-      reason: 'the jacket-pocket stop is a stop after two minutes',
+      reason: 'the jacket-pocket stop lasts over five minutes',
     );
     final departing =
         points.where((point) => !point.capturedAt.isBefore(leftAt)).toList();
@@ -680,13 +698,13 @@ void main() {
   test('pausing the route ends a current stop at its last fix', () async {
     final run = await StopReplay.start(t0, config: const TrackingConfig());
     final stop = SyntheticTrackingRoute.pocketStop(
-      duration: const Duration(minutes: 5),
+      duration: const Duration(minutes: 6),
       startedAt: t0,
       trackId: run.trackId,
     );
     final points = await run.replay(stop);
     final open = await run.harness.repository.findOpenTrackStop(run.trackId);
-    expect(open, isNotNull, reason: 'five minutes in, the stay is a stop');
+    expect(open, isNotNull, reason: 'the stay exceeds five minutes');
 
     await run.client.pauseCurrentTrack(reason: 'synthetic_pause');
     expect(await run.harness.repository.findOpenTrackStop(run.trackId), isNull);
@@ -700,7 +718,7 @@ void main() {
       () async {
     final run = await StopReplay.start(t0, config: const TrackingConfig());
     final stop = SyntheticTrackingRoute.pocketStop(
-      duration: const Duration(minutes: 4),
+      duration: const Duration(minutes: 6),
       startedAt: t0,
       trackId: run.trackId,
     );

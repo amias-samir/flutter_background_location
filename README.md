@@ -344,8 +344,9 @@ uploads.
 - **What starts a stay:** a quiet fix, with no moving reading in the last
   30 s and no measured walking-pace Doppler speed. A moving fix ends a short
   pause at once, so walking on keeps its distance.
-- **What makes it a stop:** two minutes within the hold radius with no net
-  progress, or activity evidence that the device is still, which also lets
+- **What makes it a stop:** at least `minimumStopDuration` (five minutes by
+  default) within the hold radius with no net progress, or still evidence.
+  Still evidence also lets
   the native stationary profile engage. A stay the provider sent no fixes in
   is a stop when the first fix afterwards is still at the place.
 - **What keeps it:** unknown, tilting or low-confidence readings, activity
@@ -357,6 +358,16 @@ uploads.
   site smaller than the hold radius (at least 25 m) is not measured.
 - **Scope:** new routes with the adaptive intent only. Explicit travel intents
   record every fix.
+
+Set the minimum stop duration in the route's `TrackingConfig`. It is persisted
+with the route and is distinct from the native stationary sampling interval:
+
+```dart
+const config = TrackingConfig(minimumStopDuration: Duration(minutes: 3));
+```
+
+The duration must be at least one millisecond. Existing recorded stops are not rewritten when
+the setting changes. Stop-aware derived geometry uses the route's stored value.
 
 Each stop is recorded with its place and its start and end times. The
 owner-scoped controllers implement `TrackingStopController`:
@@ -1282,7 +1293,8 @@ final mapBundle = await geometry.loadTrackGeometry(
 );
 ```
 
-For a cleaned map, use the stop-aware algorithm. Each stay of two minutes or
+For a cleaned map, use the stop-aware algorithm. Each stay of the configured
+minimum stop duration or
 more collapses to one point, and spikes elsewhere are projected away. It reads
 held fixes as stop evidence and also cleans routes recorded before the stop
 hold existed. Runs record the version they applied; derive again when
@@ -1370,8 +1382,9 @@ set. The package adds no sharing dependency.
 The compatibility exporter below materializes a complete route and returns its
 legacy required `path`. Keep it for existing integrations and bounded routes.
 
-Ask the user for a name, then pass the selected format and name to
-`exportTrack()`. The correct extension is added or repaired automatically.
+Without a filename, track and trip exports use their route identifier. An
+explicit `fileName` overrides it; the correct extension is added or repaired
+automatically, and destinations may add a suffix to avoid collisions.
 
 ```dart
 Future<TrackExportResult> exportCompletedTrip({

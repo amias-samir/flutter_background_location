@@ -268,6 +268,48 @@ List<LocationSample> _walk(
     ];
 
 void main() {
+  test('custom stop duration survives engine restart', () {
+    final route = _Route(
+      segmentStartedAt: _t0,
+      config: const TrackingConfig(minimumStopDuration: Duration(minutes: 2)),
+    );
+    for (final second in <int>[0, 30, 60, 90, 119]) {
+      route.add(_fix(second,
+          east: 0,
+          speed: 0.05,
+          speedAccuracy: 0.1,
+          activity: _reading(TrackingActivityType.stationary, 99,
+              _t0.add(Duration(seconds: second)))));
+    }
+    expect(route.stops, isEmpty);
+    route.restart();
+    route.add(_fix(120,
+        east: 0,
+        speed: 0.05,
+        speedAccuracy: 0.1,
+        activity: _reading(TrackingActivityType.stationary, 99,
+            _t0.add(const Duration(seconds: 120)))));
+    expect(route.stops, hasLength(1));
+  });
+  test('stationary stay is not recorded before five minutes', () {
+    final route = _Route(segmentStartedAt: _t0);
+    for (final second in <int>[0, 60, 120, 180, 240, 299]) {
+      route.add(_fix(second,
+          east: 0,
+          speed: 0.05,
+          speedAccuracy: 0.1,
+          activity: _reading(TrackingActivityType.stationary, 99,
+              _t0.add(Duration(seconds: second)))));
+      expect(route.stops, isEmpty);
+    }
+    route.add(_fix(300,
+        east: 0,
+        speed: 0.05,
+        speedAccuracy: 0.1,
+        activity: _reading(TrackingActivityType.stationary, 99,
+            _t0.add(const Duration(seconds: 300)))));
+    expect(route.stops, hasLength(1));
+  });
   test('a re-acquisition excursion after a silence is held back (walk 09:08)',
       () {
     final route = _Route();
@@ -301,8 +343,8 @@ void main() {
       expect(point.accepted, isFalse);
       expect(point.rejectionReason, KinematicPolicy.kinematicOutlierReason);
     }
-    // The true place: fixes within 20 m for 2.5 minutes, no moving readings.
-    for (var i = 0; i < 9; i += 1) {
+    // The true place: fixes within 20 m for over five minutes.
+    for (var i = 0; i < 19; i += 1) {
       final point = route.add(
         _fix(
           arrivedAt + 48 + i * 18,
@@ -324,7 +366,7 @@ void main() {
     expect(route.stops, hasLength(1));
     expect(route.openStop, isNotNull);
     // Walk on: the departure leaves the radius with a measured speed.
-    final departAt = arrivedAt + 48 + 9 * 18;
+    final departAt = arrivedAt + 48 + 19 * 18;
     final onward = _walk(departAt, 10, fromEast: 0);
     final points = onward.map(route.add).toList();
     expect(points.where((point) => point.accepted), isNotEmpty);
@@ -403,7 +445,7 @@ void main() {
     // The last walking reading is at 30 s; Activity Recognition lags for up
     // to 30 s after a stop, during which fixes still move the route.
     final afterLag = <TrackPoint>[];
-    for (var i = 0; i < 14; i += 1) {
+    for (var i = 0; i < 30; i += 1) {
       final second = 36 + i * 12;
       final point = route.add(
         _fix(
@@ -428,7 +470,7 @@ void main() {
       reason: 'a 0.64-0.75 m/s pocket-sway speed measured to 0.24-0.30 m/s '
           'has a lower bound below 0.4 m/s: it never ends the pause',
     );
-    expect(route.stops, hasLength(1), reason: 'two quiet minutes make a stop');
+    expect(route.stops, hasLength(1), reason: 'five quiet minutes make a stop');
   });
 
   test(
@@ -481,7 +523,7 @@ void main() {
     ActivitySnapshot still(int at) => _reading(
         TrackingActivityType.stationary, 99, _t0.add(Duration(seconds: at)));
     // A confirmed still stop.
-    for (var i = 0; i < 10; i += 1) {
+    for (var i = 0; i < 17; i += 1) {
       route.add(_fix(second,
           east: i.isEven ? 3 : -2,
           north: i.isEven ? -2 : 2,
@@ -554,7 +596,7 @@ void main() {
   });
 
   test(
-      'without any evidence a walk keeps its fixes and two confined minutes '
+      'without any evidence a walk keeps its fixes and five confined minutes '
       'make a stop', () {
     final route = _Route();
     final walk = _walk(0, 12, speed: 1, every: 5, readings: false)
@@ -565,7 +607,7 @@ void main() {
         .toList();
     final walked = walk.map(route.add).toList();
     expect(walked.every((point) => point.accepted), isTrue);
-    for (var i = 0; i < 30; i += 1) {
+    for (var i = 0; i < 65; i += 1) {
       route.add(
           _fix(60 + i * 5, east: 55 + (i % 3) * 1.5, north: (i % 2) * 2.0));
     }
@@ -575,7 +617,7 @@ void main() {
   test('a stay at the start of a segment counts from when recording began', () {
     final startedAt = _t0;
     final route = _Route(segmentStartedAt: startedAt);
-    for (var i = 0; i < 9; i += 1) {
+    for (var i = 0; i < 19; i += 1) {
       route.add(_fix(44 + i * 15,
           east: (i % 3) * 3.0,
           north: (i % 2) * 2.0,
@@ -605,14 +647,14 @@ void main() {
     expect(still.accepted, isFalse,
         reason: 'the standstill is newer than the readings');
     expect(still.rejectionReason, FixQualityIssue.stationaryHold);
-    // 202 s without fixes, then a ride 55 m from the place at 6.27 m/s.
-    final departure = route.add(_fix(332,
+    // More than five minutes without fixes, then a ride from the place.
+    final departure = route.add(_fix(452,
         east: 55,
         accuracy: 3.8,
         speed: 6.27,
         speedAccuracy: 1.09,
         activity: _reading(TrackingActivityType.inVehicle, 100,
-            _t0.add(const Duration(seconds: 325)))));
+            _t0.add(const Duration(seconds: 445)))));
     expect(departure.accepted, isTrue);
     expect(route.steps.last.stopChange, isA<TrackStopRecord>());
     final stop = route.stops.single;
@@ -693,15 +735,15 @@ void main() {
           activity: _reading(TrackingActivityType.unknown, 40,
               _t0.add(Duration(seconds: second)))));
     }
-    expect(route.stops, isEmpty, reason: 'not yet two minutes');
-    // 130 s later a ride 213 m away at 8.3 m/s.
-    final departure = route.add(_fix(240,
+    expect(route.stops, isEmpty, reason: 'not yet five minutes');
+    // Later a ride 213 m away at 8.3 m/s.
+    final departure = route.add(_fix(400,
         east: 213,
         accuracy: 4.8,
         speed: 8.3,
         speedAccuracy: 0.13,
         activity: _reading(TrackingActivityType.inVehicle, 96,
-            _t0.add(const Duration(seconds: 235)))));
+            _t0.add(const Duration(seconds: 395)))));
     expect(departure.accepted, isTrue);
     expect(route.steps.last.stopChange, isA<TrackStopRecord>());
     expect(route.steps.last.stayExplainsGap, isTrue,
