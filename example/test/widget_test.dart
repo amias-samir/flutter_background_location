@@ -69,6 +69,44 @@ void main() {
     expect(find.text('Battery settings'), findsOne);
   });
 
+  test('each capture intent describes how it really captures', () {
+    String detail(RouteCaptureIntent intent, TrackingAccuracy accuracy) =>
+        PreferenceLabels.intentDetail(intent, accuracy);
+
+    expect(
+      detail(RouteCaptureIntent.adaptive, TrackingAccuracy.high),
+      'Moving: a fix every 5 s or 5 m and at each turn. Still: slows to '
+      'every 20 s or 20 m. Records stops; keeps fixes within 20 m (35 m '
+      'while riding).',
+    );
+    expect(
+      detail(RouteCaptureIntent.walking, TrackingAccuracy.high),
+      'Always a fix every 3 s or 3 m and at each turn, never slowing when '
+      'still. Keeps fixes within 20 m; no stop records. Walking and cycling '
+      'capture alike.',
+    );
+    expect(
+      detail(RouteCaptureIntent.cycling, TrackingAccuracy.high),
+      detail(RouteCaptureIntent.walking, TrackingAccuracy.high),
+      reason: 'the package captures walking and cycling alike',
+    );
+    expect(
+      detail(RouteCaptureIntent.vehicle, TrackingAccuracy.high),
+      'Always a fix every 3 s or 3 m and at each turn, never slowing when '
+      'still. Keeps fixes within 35 m, wider for urban streets; no stop '
+      'records.',
+    );
+    expect(
+      detail(RouteCaptureIntent.vehicle, TrackingAccuracy.low),
+      isNot(contains('wider')),
+      reason: 'low keeps 100 m for every intent',
+    );
+    expect(
+      detail(RouteCaptureIntent.adaptive, TrackingAccuracy.low),
+      isNot(contains('while riding')),
+    );
+  });
+
   testWidgets('start asks for a non-empty route identifier', (tester) async {
     await tester.pumpWidget(testApp());
     await tester.pumpAndSettle();

@@ -216,11 +216,55 @@ abstract final class PreferenceLabels {
     RouteCaptureIntent.vehicle => 'Vehicle',
   };
 
-  static String intentDetail(RouteCaptureIntent value) => switch (value) {
-    RouteCaptureIntent.adaptive =>
-      'Samples less while stationary, from motion evidence.',
-    _ => 'Keeps dense 3 s / 3 m moving requests.',
-  };
+  /// How [intent] captures a route at [accuracy], from the configuration
+  /// the package resolves for the two: its fix rate while moving and still,
+  /// the fixes it keeps, and whether it records stops.
+  static String intentDetail(
+    RouteCaptureIntent intent,
+    TrackingAccuracy accuracy,
+  ) {
+    final config = TrackingConfig(accuracy: accuracy, captureIntent: intent);
+    final moving =
+        'a fix every ${_every(config.movingInterval)} or '
+        '${config.movingDistanceFilterMeters} m'
+        '${config.turnCaptureDegrees > 0 ? ' and at each turn' : ''}';
+    final keeps =
+        'keeps fixes within '
+        '${config.maximumAcceptedAccuracyMeters.round()} m';
+    final limit = config.maximumAcceptedAccuracyMeters.round();
+    final riding = TrackingConfig.defaultMaximumAcceptedAccuracyMeters(
+      accuracy,
+      RouteCaptureIntent.vehicle,
+    ).round();
+    final wider = TrackingConfig.defaultMaximumAcceptedAccuracyMeters(
+      accuracy,
+      RouteCaptureIntent.walking,
+    ).round();
+    return switch (intent) {
+      RouteCaptureIntent.adaptive =>
+        'Moving: $moving. Still: slows to every '
+            '${_every(config.stationaryInterval)} or '
+            '${config.stationaryDistanceFilterMeters} m. Records stops; '
+            '$keeps${riding > limit ? ' ($riding m while riding)' : ''}.',
+      RouteCaptureIntent.walking || RouteCaptureIntent.cycling =>
+        'Always $moving, never slowing when still. '
+            '${_capitalized(keeps)}; no stop records. Walking and cycling '
+            'capture alike.',
+      RouteCaptureIntent.vehicle =>
+        'Always $moving, never slowing when still. '
+            '${_capitalized(keeps)}'
+            '${limit > wider ? ', wider for urban streets' : ''}; no stop '
+            'records.',
+    };
+  }
+
+  /// "5 s", "1 min".
+  static String _every(Duration duration) => duration.inSeconds < 60
+      ? '${duration.inSeconds} s'
+      : '${duration.inMinutes} min';
+
+  static String _capitalized(String text) =>
+      '${text[0].toUpperCase()}${text.substring(1)}';
 
   static String motion(MotionFusionMode value) => switch (value) {
     MotionFusionMode.platformActivityOnly => 'Activity only',
@@ -370,11 +414,13 @@ class TrackingConfigurationControls extends StatelessWidget {
                 context,
                 title: 'Capture intent',
                 description:
-                    'Travel intents keep dense 3 s / 3 m moving requests.',
+                    'How each intent captures a route at '
+                    '${PreferenceLabels.accuracy(accuracy)} accuracy.',
                 values: RouteCaptureIntent.values,
                 selected: captureIntent,
                 labelOf: PreferenceLabels.intent,
-                detailOf: PreferenceLabels.intentDetail,
+                detailOf: (intent) =>
+                    PreferenceLabels.intentDetail(intent, accuracy),
                 onChanged: onCaptureIntentChanged,
               ),
             ),
