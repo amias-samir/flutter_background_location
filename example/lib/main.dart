@@ -19,6 +19,27 @@ typedef ExampleTrackingControllerFactory =
       TrackRecordRetentionPolicy retention,
     );
 
+/// The Trip whose current leg is [trackId]. A Trip is active while its leg
+/// records and suspended while the leg is paused or interrupted, so Complete
+/// Trip looks in both.
+Future<Trip?> findOpenTrip(
+  MultiDayTripController tracking,
+  TrackingOwner owner,
+  String trackId,
+) async {
+  final open = await tracking.listTripPage(
+    TripQuery(
+      owner: owner,
+      limit: 10,
+      statuses: const <TripStatus>{TripStatus.active, TripStatus.suspended},
+    ),
+  );
+  for (final trip in open.items) {
+    if (trip.currentLegTrackId == trackId) return trip;
+  }
+  return null;
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const TrackingExampleApp());
@@ -432,18 +453,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final tracking = _tracking;
     final trackId = _session?.currentTrack?.id;
     if (tracking is! MultiDayTripController || trackId == null) return null;
-    final tripTracking = tracking as MultiDayTripController;
-    final active = await tripTracking.listTripPage(
-      const TripQuery(
-        owner: _owner,
-        limit: 10,
-        statuses: <TripStatus>{TripStatus.active},
-      ),
-    );
-    for (final trip in active.items) {
-      if (trip.currentLegTrackId == trackId) return trip;
-    }
-    return null;
+    return findOpenTrip(tracking as MultiDayTripController, _owner, trackId);
   }
 
   Future<void> _endDay() => _run(() async {

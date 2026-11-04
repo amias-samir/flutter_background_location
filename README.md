@@ -11,14 +11,24 @@ then export it as GeoJSON, KML or GPX.
 
 <table>
   <tr>
-    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/home.png" width="200" alt="Home screen with the current session, tracking preferences and the action bar"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/home.png" width="200" alt="Home screen, idle, with tracking preferences and the Start button"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/tracking.png" width="200" alt="Recording a Trip, with Pause, End day and Complete Trip"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/paused.png" width="200" alt="Paused Trip, with Resume, End day and Complete Trip"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/complete.png" width="200" alt="Confirmation before completing the whole Trip"/></td>
+  </tr>
+  <tr>
+    <td align="center">Ready to start</td>
+    <td align="center">Recording</td>
+    <td align="center">Paused</td>
+    <td align="center">Complete Trip</td>
+  </tr>
+  <tr>
     <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/preferences.png" width="200" alt="Accuracy picker"/></td>
     <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/history.png" width="200" alt="Recorded Trips with distance, moving and stopped time, and steps"/></td>
     <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/map.png" width="200" alt="Route map with start, stops and end"/></td>
     <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/map_stops.png" width="200" alt="Route sheet with figures, legend and stop list"/></td>
   </tr>
   <tr>
-    <td align="center">Session and controls</td>
     <td align="center">Tracking preferences</td>
     <td align="center">Recorded Trips</td>
     <td align="center">Route map</td>

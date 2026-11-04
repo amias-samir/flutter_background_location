@@ -385,6 +385,37 @@ void main() {
     expect(geometry.hasDistinctEndpoints, isFalse);
   });
 
+  test('Complete Trip finds the Trip of a paused leg', () async {
+    const owner = TrackingOwner(
+      userId: 'example-user',
+      organizationId: 'example-organization',
+    );
+    // Pausing a leg suspends its Trip.
+    final tracking = _OpenTrips(<Trip>[
+      Trip(
+        id: 'trip-1',
+        organizationId: 'example-organization',
+        userId: 'example-user',
+        routeId: 'multi_day_route',
+        status: TripStatus.suspended,
+        startedAt: DateTime.utc(2026),
+        currentLegTrackId: 'track-1',
+        legCount: 1,
+        acceptedPointCount: 5,
+        rejectedPointCount: 0,
+        measuredDistanceMeters: 120,
+        lifecycleRevision: 2,
+        createdAt: DateTime.utc(2026),
+        updatedAt: DateTime.utc(2026),
+      ),
+    ]);
+
+    final trip = await findOpenTrip(tracking, owner, 'track-1');
+
+    expect(trip?.id, 'trip-1');
+    expect(await findOpenTrip(tracking, owner, 'track-2'), isNull);
+  });
+
   testWidgets('completed Trip menu exposes export, map, continue, and delete', (
     tester,
   ) async {
@@ -984,4 +1015,20 @@ TrackSegmentWithPoints _segment(
         ),
     ],
   );
+}
+
+/// Lists Trips the way the route database does: only those whose status the
+/// query asks for.
+final class _OpenTrips implements MultiDayTripController {
+  _OpenTrips(this.trips);
+
+  final List<Trip> trips;
+
+  @override
+  Future<TripPage> listTripPage(TripQuery query) async => TripPage(
+    items: trips.where((trip) => query.statuses.contains(trip.status)),
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
