@@ -1172,8 +1172,8 @@ You can draw each item in `routeSegments` as a separate polyline. This avoids
 connecting the location before a pause to the location after a resume.
 
 Map rendering is deliberately not a package dependency. The example app shows
-how to display recorded tracks with `maplibre_gl` and the OpenFreeMap Liberty
-street style; applications can use MapLibre, Google Maps, Apple MapKit, or any
+how to display recorded tracks with `maplibre_gl` and the muted OpenFreeMap
+Positron style; applications can use MapLibre, Google Maps, Apple MapKit, or any
 other renderer.
 
 ### Route details
@@ -1990,14 +1990,24 @@ See the
 [`example/lib/main.dart`](https://github.com/amias-samir/flutter_background_location/blob/main/example/lib/main.dart)
 sample for a complete Material example with:
 
+- a single home screen, with no scrolling on a typical phone, showing:
+  - the current session;
+  - tracking preferences as tiles that open a picker;
+  - a bottom bar with only the actions the lifecycle allows now: Start,
+    Pause, Resume, End day, and Complete Trip;
 - staged permission recovery;
-- Start, Pause, Resume, End day, and Complete Trip button states;
 - configurable retention policy;
-- live status, activity, and point data;
-- one recorded-Trip history item with daily leg/segment/gap summaries;
-- GeoJSON, KML, and GPX naming/export;
-- MapLibre whole-Trip display with a street-map style, gap markers, and an
-  explicit connect-all toggle.
+- recorded Trips on their own screen, with:
+  - a card per Trip showing its distance, moving and stopped time, and steps;
+  - tap a card to open its map;
+  - GeoJSON, KML, and GPX naming/export from the card menu;
+- a MapLibre map screen with:
+  - an app bar showing the full route title;
+  - a bottom panel holding the route's figures and legend, and a stop list
+    that scrolls on its own (tap a stop to fly to it);
+  - floating fit-route and, in debug builds, continuity buttons above the
+    panel;
+  - in debug builds, gap markers and route views.
 
 ## Production checklist
 

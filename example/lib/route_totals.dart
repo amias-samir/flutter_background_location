@@ -105,3 +105,35 @@ String clockTime(DateTime time) {
   return '${local.hour.toString().padLeft(2, '0')}:'
       '${local.minute.toString().padLeft(2, '0')}';
 }
+
+/// [time]'s local day: "24 Oct".
+String shortDate(DateTime time) {
+  const months = <String>[
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final local = time.toLocal();
+  return '${local.day} ${months[local.month - 1]}';
+}
+
+/// When a route ran, in local time: "24 Oct · 08:00–09:12" within one day,
+/// "24 Oct 08:00 – 26 Oct 17:40" across days, "24 Oct · since 08:00" while
+/// it has no end.
+String recordedPeriod(DateTime startedAt, DateTime? endedAt) {
+  final start = shortDate(startedAt);
+  if (endedAt == null) return '$start · since ${clockTime(startedAt)}';
+  final end = shortDate(endedAt);
+  return start == end
+      ? '$start · ${clockTime(startedAt)}–${clockTime(endedAt)}'
+      : '$start ${clockTime(startedAt)} – $end ${clockTime(endedAt)}';
+}
