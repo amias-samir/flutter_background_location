@@ -31,25 +31,42 @@ class TrackingExampleApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = ColorScheme.fromSeed(
-      seedColor: const Color(0xFF00796B),
-      brightness: Brightness.light,
+    // Soft ink on a soft grey background: dark slate text and mid-grey
+    // labels, white cards with a hairline border, no shadows.
+    final colors =
+        ColorScheme.fromSeed(
+          seedColor: const Color(0xFF00796B),
+          brightness: Brightness.light,
+        ).copyWith(
+          onSurface: const Color(0xFF3C4347),
+          onSurfaceVariant: const Color(0xFF737A7F),
+          surfaceContainerLow: Colors.white,
+          surfaceContainerLowest: const Color(0xFFF4F6F5),
+        );
+    final base = Typography.material2021().black.apply(
+      bodyColor: colors.onSurface,
+      displayColor: colors.onSurface,
+    );
+    final textTheme = base.copyWith(
+      titleLarge: base.titleLarge?.copyWith(fontWeight: FontWeight.w500),
+      titleMedium: base.titleMedium?.copyWith(fontWeight: FontWeight.w500),
+      titleSmall: base.titleSmall?.copyWith(fontWeight: FontWeight.w500),
     );
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Background location tracker',
       theme: ThemeData(
         colorScheme: colors,
+        textTheme: textTheme,
         scaffoldBackgroundColor: colors.surfaceContainerLowest,
         appBarTheme: AppBarTheme(
           backgroundColor: colors.surfaceContainerLowest,
           foregroundColor: colors.onSurface,
           elevation: 0,
           scrolledUnderElevation: 1,
-          titleTextStyle: TextStyle(
+          titleTextStyle: textTheme.titleLarge?.copyWith(
             color: colors.onSurface,
-            fontSize: 20,
-            fontWeight: FontWeight.w700,
+            fontWeight: FontWeight.w600,
           ),
         ),
         cardTheme: CardThemeData(
@@ -57,6 +74,9 @@ class TrackingExampleApp extends StatelessWidget {
           color: colors.surfaceContainerLow,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
+            side: BorderSide(
+              color: colors.outlineVariant.withValues(alpha: 0.5),
+            ),
           ),
         ),
         filledButtonTheme: const FilledButtonThemeData(
@@ -980,7 +1000,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                               onResolve: _busy ? null : _resolveOwnerConflict,
                             ),
                           ],
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 24),
                           TrackingConfigurationControls(
                             retention: _retention,
                             accuracy: _accuracy,
@@ -997,7 +1017,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                             onMotionFusionModeChanged: (value) =>
                                 setState(() => _motionFusionMode = value),
                           ),
-                          const SizedBox(height: 8),
+                          const SizedBox(height: 24),
                         ],
                       ),
                       RecordedHistoryTile(

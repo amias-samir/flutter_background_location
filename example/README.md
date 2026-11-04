@@ -1,42 +1,60 @@
 # flutter_background_location_tracker example
 
-This app demonstrates:
+This app demonstrates the package's recommended integration in three screens.
 
-- Android and iOS background-location permission recovery;
-- route-identifier entry when starting, with whitespace normalization and a
-  unique UTC date-time suffix;
-- Start, Pause, Resume, End day, and confirmed Complete Trip controls;
-- read-only readiness checks, staged permission-step requests, and replaying
-  session actions;
-- live activity confidence/freshness, GPS uncertainty in metres, fused motion
-  sources, capture profile, mock-location, and point evidence;
-- start-time capture intent, platform/low-power/enhanced sensor-fusion, and
-  separate/connect-days/continuous multi-day presentation controls;
-- latest-only and keep-all Trip-level retention;
-- one recorded-Trip history row with daily leg, segment, quality-event, and
-  filtered visible-gap counts;
-- owner-conflict recovery that pauses and preserves a previous owner’s local
-  capture after explicit confirmation;
-- MapLibre street-map whole-Trip display with red Start, green Destination,
-  filtered orange gap indicators, and a three-mode continuity selector;
-- user-named combined Trip GeoJSON, KML, and GPX export;
-- confirmed deletion of a selected completed Trip and all of its local legs;
-- a coordinate-free diagnostics/setup-doctor panel;
-- dependency injection through the public testing fake for widget tests.
+**Home** is a single screen that fits a typical phone without scrolling:
+
+- the current session: lifecycle, route identifier, activity, GPS uncertainty
+  in metres, distance and start time (debug builds add activity confidence,
+  fused motion, capture profile, fix, sequence and mock evidence);
+- tracking preferences as tiles that open a picker: accuracy, capture intent,
+  motion evidence (platform, low-power or enhanced sensor fusion) and the
+  multi-day display, plus Keep all / Latest only history retention. They are
+  locked while a route is open;
+- a bottom bar with only the actions the session allows now: Start, Pause,
+  Resume, End day and Complete Trip (confirmed);
+- read-only readiness checks, staged permission requests, the setup doctor,
+  app and battery settings, and owner-conflict recovery that pauses and
+  preserves a previous owner's local capture after confirmation;
+- a tile that opens the recorded history.
+
+**History** lists recorded Trips (or routes) as cards with distance, moving
+time, stops and steps, read from the stored route summaries. Debug builds also
+show quality events and visible gaps. Tap a card to open its map. The card
+menu holds Continue completed Trip or Start next day, GeoJSON, KML, GPX and
+cleaned GPX export with user-named files, a diagnostic GeoJSON export (debug
+only), and confirmed deletion.
+
+**Map** shows the whole Trip full screen with MapLibre and the muted
+OpenFreeMap Positron style, with a green Start, blue stops and a red End. A
+draggable sheet holds the distance, moving and stopped time, steps, the legend
+and the stop list (tap a stop to fly to it), and a button fits the route.
+Debug builds add orange gap and yellow uncertain-stretch markers, the
+Reviewed / Cleaned / Raw route views and the three-mode continuity menu.
+
+Debug-only views follow one switch, `TrackingClient.resolveRecordingDetail`:
+full detail in debug builds, clean routes in profile and release builds.
 
 The example is split into copyable integration units:
 
-- `lib/main.dart` owns exactly one owner-bound `TrackingTripController` and the
-  staged readiness/multi-day lifecycle flow;
-- `lib/recorded_trips_section.dart` presents one Trip and its complete action
-  menu without exposing daily internal Tracks as separate journeys;
-- `lib/recorded_tracks_section.dart` contains paged route summaries and every
-  overflow action;
-- `lib/route_map_page.dart` uses the package's shared continuity assembler with
-  MapLibre and the OpenFreeMap Liberty street style;
-- `lib/tracking_controls.dart` contains session-driven controls, accuracy, and
-  retention UI;
-- `lib/tracking_dialogs.dart` contains route/export naming gestures.
+- `lib/main.dart` owns exactly one owner-bound `TrackingTripController`, the
+  home screen and the staged readiness and multi-day lifecycle flow;
+- `lib/tracking_controls.dart` contains the session card, the preference tiles
+  and the session-driven action bar;
+- `lib/history_page.dart` contains the history screen and the home tile that
+  opens it;
+- `lib/recorded_trips_section.dart` presents each Trip as one card with its
+  complete action menu, without exposing daily internal Tracks as separate
+  journeys;
+- `lib/recorded_tracks_section.dart` contains paged route cards for single-day
+  routes and their actions;
+- `lib/route_map_page.dart` uses the package's shared continuity assembler
+  with MapLibre and draws the route, stops and the sheet;
+- `lib/route_totals.dart` adapts the stored `RouteSummary` and `TripSummary`
+  for the cards and the map sheet; the example computes nothing itself;
+- `lib/ui_kit.dart` holds the shared widgets: stat tiles, status pills,
+  preference pickers and history cards;
+- `lib/tracking_dialogs.dart` contains route and export naming gestures.
 
 ## Run the example
 
@@ -55,7 +73,7 @@ storing it as `Track.routeId`; for example, `Morning delivery route` becomes
 default export names use this readable identifier while the internal track ID
 continues to manage lifecycle operations.
 
-The retention selector starts with **Keep all** selected. Every completed Trip
+The History retention control starts with **Keep all** selected. Every completed Trip
 therefore remains in history until the user deletes it or changes the selector
 to **Latest only** before starting another Trip. Continuing a retained Trip
 never deletes its earlier daily legs.
@@ -94,22 +112,23 @@ coordinates.
 The selected Trip presentation survives End day, process restart, and Start
 next day. Connect days joins only daily boundaries. Continuous presentation
 also joins lifecycle/outage parts. Every joined edge is disclosed as inferred
-and excluded from measured distance. The map menu can temporarily override
-the stored choice without changing the Trip.
+and excluded from measured distance. In debug builds the map's continuity menu
+can temporarily override the stored choice without changing the Trip.
 
 Schema 14 automatically repairs older route totals that excluded drawn edges
 between accepted anchors in the same segment after rejected fixes. Genuine
 Pause, interruption, and overnight inferred connectors remain excluded.
 
-Activity confidence and location uncertainty are intentionally separate in
-the status card. `unknown 40%` means the platform is unsure about the activity;
+Activity confidence (shown in debug builds) and location uncertainty are
+intentionally separate in the session card. `unknown 40%` means the platform is unsure about the activity;
 it does not mean location is 40% accurate. GPS uncertainty is shown in metres,
 and stale activity is labeled stale instead of repeating an old percentage.
 
 The example widget tests inject `FakeTrackingController` from
 `flutter_background_location_tracker_testing.dart`; they exercise interrupted
-restoration, every recorded-route overflow action, and pause-safe map segments
-without method channels, a device, or filesystem access. The public testing
+restoration, the home layout on small and large-text screens, the actions the
+bar offers, every history card action, the map sheet's stops, the views clean
+builds hide, and pause-safe map segments without method channels, a device, or filesystem access. The public testing
 library also includes deterministic clocks, synthetic routes, permission
 fixtures, a temporary SQLite fixture, and faultable adapter/export doubles.
 
@@ -137,6 +156,7 @@ its merged release manifest if it uses custom manifest rules:
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />

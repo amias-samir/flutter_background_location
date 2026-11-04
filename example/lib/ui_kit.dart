@@ -39,7 +39,9 @@ class StatTile extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style:
               (large ? theme.textTheme.titleLarge : theme.textTheme.titleSmall)
-                  ?.copyWith(fontWeight: FontWeight.w700),
+                  ?.copyWith(
+                    fontWeight: large ? FontWeight.w600 : FontWeight.w500,
+                  ),
         ),
         const SizedBox(height: 2),
         Row(
@@ -152,7 +154,7 @@ class StatusPill extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.labelMedium?.copyWith(
               color: color,
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
@@ -172,16 +174,15 @@ class SectionLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.only(left: 4, bottom: 6),
+      padding: const EdgeInsets.only(left: 4, bottom: 8),
       child: Row(
         children: <Widget>[
           Expanded(
             child: Text(
-              text.toUpperCase(),
-              style: theme.textTheme.labelSmall?.copyWith(
+              text,
+              style: theme.textTheme.labelLarge?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.1,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ),
@@ -216,7 +217,10 @@ class PreferenceTile extends StatelessWidget {
     final enabled = onTap != null;
     return Material(
       color: colors.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(14),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.5)),
+      ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
@@ -248,7 +252,7 @@ class PreferenceTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w500,
                         color: enabled ? null : colors.onSurfaceVariant,
                       ),
                     ),
@@ -296,7 +300,7 @@ Future<T?> showPreferencePicker<T>({
               child: Text(
                 title,
                 style: theme.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
@@ -386,7 +390,7 @@ class RouteHistoryCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
@@ -515,7 +519,7 @@ class EmptyHistory extends StatelessWidget {
           Text(
             title,
             style: theme.textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w600,
             ),
           ),
           const SizedBox(height: 4),

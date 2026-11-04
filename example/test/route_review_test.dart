@@ -435,6 +435,49 @@ void main() {
       },
     );
 
+    testWidgets('the map sheet opens on the stats and drags open', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(390 * 3, 844 * 3)
+        ..devicePixelRatio = 3;
+      addTearDown(tester.view.reset);
+      final track = _track('track-1', distanceMeters: 1777);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TrackMapPage(
+            tracking: _ReviewedRouteTracking.example(),
+            track: track,
+            mapBuilder: (key, route, showDiagnostics, fitPadding) =>
+                const ColoredBox(color: Color(0xFFE0E0E0)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('track-1'), findsOneWidget, reason: 'the app bar');
+      expect(find.text('1.49 km').hitTestable(), findsOneWidget);
+      expect(
+        find.text('Start').hitTestable(),
+        findsNothing,
+        reason: 'only the stats show at first',
+      );
+      expect(find.byTooltip('Fit route'), findsOneWidget);
+      final fabBefore = tester.getTopLeft(find.byTooltip('Fit route'));
+
+      await tester.drag(find.text('1.49 km'), const Offset(0, -500));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Start').hitTestable(), findsOneWidget);
+      expect(find.text('Stops').hitTestable(), findsOneWidget);
+      expect(find.text('1.49 km').hitTestable(), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byTooltip('Fit route')).dy,
+        lessThan(fabBefore.dy),
+        reason: 'the buttons ride on the sheet',
+      );
+    });
+
     test('a route without a review opens in its cleaned view', () async {
       final tracking = _ReviewedRouteTracking.example(withReview: false);
 

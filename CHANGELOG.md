@@ -1,5 +1,15 @@
 ## Unreleased
 
+- Shorter README with example-app screenshots. The detail moved into guides in
+  `doc/`: platform setup, integration, multi-day Trips, route details, export
+  and configuration. The Android manifest listing now shows `WAKE_LOCK`.
+- Redesigned example app:
+  - a single home screen with preference pickers and a bottom bar of the
+    allowed actions;
+  - recorded Trips on their own History screen;
+  - a full-screen map with a draggable sheet of figures and stops, using the
+    OpenFreeMap Positron style.
+
 - Release and profile builds now record a clean, lightweight route; debug
   builds keep everything (route database schema 19).
   - New `TrackingConfiguration.recordingDetail`. The default,

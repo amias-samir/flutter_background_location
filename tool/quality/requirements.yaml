@@ -69,6 +69,7 @@ work_packages:
       - android/src/main/AndroidManifest.xml
       - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
       - README.md
+      - doc/platform_setup.md
       - example/README.md
   - id: R1-03
     phase: R1
@@ -146,6 +147,7 @@ work_packages:
       - android/src/main/AndroidManifest.xml
       - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
       - README.md
+      - doc/export.md
       - example/README.md
   - id: C1-01
     phase: C1
@@ -223,6 +225,8 @@ work_packages:
       - test/tracking_client_test.dart
       - test/sqlite_track_repository_test.dart
       - README.md
+      - doc/configuration.md
+      - doc/integration_guide.md
       - example/README.md
   - id: O1-01
     phase: O1
@@ -256,6 +260,7 @@ work_packages:
       - test/sqlite_track_repository_test.dart
       - test/tracking_client_test.dart
       - README.md
+      - doc/integration_guide.md
   - id: N1-01
     phase: N1
     title: Durable session token, engine lease, and foreign-control resolver
@@ -290,6 +295,7 @@ work_packages:
     evidence:
       - lib/src/application/tracking_client.dart
       - README.md
+      - doc/integration_guide.md
       - example/lib/main.dart
       - test/tracking_client_test.dart
   - id: X1-01
@@ -319,6 +325,7 @@ work_packages:
       - lib/src/domain/tracking_health.dart
       - lib/src/application/tracking_client.dart
       - README.md
+      - doc/integration_guide.md
       - example/lib/main.dart
       - test/tracking_client_test.dart
   - id: N1-02
@@ -528,6 +535,7 @@ work_packages:
       - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/TrackingConfiguration.swift
       - test/tracking_config_test.dart
       - README.md
+      - doc/configuration.md
   - id: B1-03
     phase: B1
     title: Epoch-tagged atomic runtime configuration capability
@@ -572,6 +580,8 @@ work_packages:
     required_before: release candidate
     evidence:
       - README.md
+      - doc/integration_guide.md
+      - doc/platform_setup.md
       - example/README.md
       - MIGRATION.md
       - CONTRIBUTING.md
@@ -865,6 +875,7 @@ work_packages:
     required_before: format-correct export heights
     evidence:
       - README.md
+      - doc/export.md
       - lib/src/domain/location_sample.dart
   - id: FIX-25
     phase: FIX

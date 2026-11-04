@@ -88,7 +88,7 @@ class TrackingStatusCard extends StatelessWidget {
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -123,7 +123,7 @@ class TrackingStatusCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
+                fontWeight: FontWeight.w600,
                 color: track == null ? colors.onSurfaceVariant : null,
               ),
             ),
@@ -152,7 +152,7 @@ class TrackingStatusCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: colors.error,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     ),
@@ -643,7 +643,7 @@ class OwnerConflictCard extends StatelessWidget {
                 'Another owner is tracking on this device',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: colors.onErrorContainer,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
             ),

@@ -46,10 +46,14 @@ class TrackMapPage extends StatefulWidget {
     required this.tracking,
     required this.track,
     this.showDiagnostics = true,
+    @visibleForTesting this.mapBuilder = _mapLibreMap,
   });
 
   final Tracking tracking;
   final Track track;
+
+  /// Draws the map; tests replace the MapLibre platform view.
+  final RouteMapBuilder mapBuilder;
 
   /// Whether the page offers the route's views and continuity and draws
   /// gaps and uncertain stretches; a clean build shows the clean route and
@@ -70,6 +74,7 @@ class _TrackMapPageState extends State<TrackMapPage> {
   Widget build(BuildContext context) => _RouteMapScaffold(
     title: widget.track.routeId ?? 'Recorded route',
     showDiagnostics: widget.showDiagnostics,
+    mapBuilder: widget.mapBuilder,
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
     onViewChanged: (value) => setState(() => _view = value),
@@ -370,6 +375,27 @@ abstract final class _RouteColors {
       '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
 }
 
+/// Draws a route's map; tests replace the MapLibre platform view.
+typedef RouteMapBuilder =
+    Widget Function(
+      Key key,
+      RouteGeometry route,
+      bool showDiagnostics,
+      EdgeInsets fitPadding,
+    );
+
+Widget _mapLibreMap(
+  Key key,
+  RouteGeometry route,
+  bool showDiagnostics,
+  EdgeInsets fitPadding,
+) => TrackRouteMap(
+  key: key,
+  route: route,
+  showDiagnostics: showDiagnostics,
+  fitPadding: fitPadding,
+);
+
 class _RouteMapScaffold extends StatefulWidget {
   const _RouteMapScaffold({
     required this.title,
@@ -378,6 +404,7 @@ class _RouteMapScaffold extends StatefulWidget {
     required this.onContinuityChanged,
     required this.onViewChanged,
     required this.future,
+    this.mapBuilder = _mapLibreMap,
   });
 
   final String title;
@@ -386,6 +413,7 @@ class _RouteMapScaffold extends StatefulWidget {
   final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
   final ValueChanged<RouteView> onViewChanged;
   final Future<RouteMapContent> future;
+  final RouteMapBuilder mapBuilder;
 
   @override
   State<_RouteMapScaffold> createState() => _RouteMapScaffoldState();
@@ -393,6 +421,61 @@ class _RouteMapScaffold extends StatefulWidget {
 
 class _RouteMapScaffoldState extends State<_RouteMapScaffold> {
   final GlobalKey<TrackRouteMapState> _map = GlobalKey<TrackRouteMapState>();
+  final DraggableScrollableController _sheet = DraggableScrollableController();
+
+  /// How much of the body the expanded sheet covers.
+  static const _expandedSize = 0.75;
+
+  @override
+  void dispose() {
+    _sheet.dispose();
+    super.dispose();
+  }
+
+  /// The collapsed sheet's height: its handle and the stats row.
+  double _peekPixels(BuildContext context, RouteMapContent content) {
+    final scale = MediaQuery.textScalerOf(context).scale(1);
+    final hasNote = routeStats(
+      content.route.totals,
+      cleaned: content.view == RouteView.cleaned,
+    ).any((stat) => stat.note != null);
+    return RouteMapHeader.handleHeight +
+        scale * (hasNote ? 76 : 58) +
+        20 +
+        MediaQuery.paddingOf(context).bottom;
+  }
+
+  /// Moves the sheet with a drag on its header, in [bodyHeight] pixels.
+  void _dragSheet(DragUpdateDetails details, double bodyHeight, double peek) {
+    if (!_sheet.isAttached) return;
+    _sheet.jumpTo(
+      (_sheet.size - details.primaryDelta! / bodyHeight).clamp(
+        peek,
+        _expandedSize,
+      ),
+    );
+  }
+
+  /// Settles the sheet at the peek or expanded, by the fling or the
+  /// nearer one.
+  void _settleSheet(DragEndDetails details, double peek) {
+    if (!_sheet.isAttached) return;
+    final velocity = details.primaryVelocity ?? 0;
+    final target = velocity < -300
+        ? _expandedSize
+        : velocity > 300
+        ? peek
+        : (_sheet.size - peek < _expandedSize - _sheet.size
+              ? peek
+              : _expandedSize);
+    unawaited(
+      _sheet.animateTo(
+        target,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -400,7 +483,7 @@ class _RouteMapScaffoldState extends State<_RouteMapScaffold> {
       title: Text(widget.title, maxLines: 2, softWrap: true),
       titleTextStyle: Theme.of(
         context,
-      ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+      ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
       toolbarHeight: 64,
     ),
     body: FutureBuilder<RouteMapContent>(
@@ -423,54 +506,82 @@ class _RouteMapScaffoldState extends State<_RouteMapScaffold> {
         if (route.points.isEmpty && content.view != RouteView.reviewed) {
           return const Center(child: Text('No accepted coordinates yet.'));
         }
-        return Column(
-          children: <Widget>[
-            Expanded(
-              child: route.points.isEmpty
-                  ? const Center(child: Text('No accepted coordinates yet.'))
-                  : Stack(
-                      children: <Widget>[
-                        Positioned.fill(
-                          child: TrackRouteMap(
-                            key: _map,
-                            route: route,
-                            showDiagnostics: widget.showDiagnostics,
-                          ),
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final bodyHeight = constraints.maxHeight;
+            final peekPixels = math.min(
+              _peekPixels(context, content),
+              bodyHeight * 0.4,
+            );
+            final peek = peekPixels / bodyHeight;
+            return Stack(
+              children: <Widget>[
+                Positioned.fill(
+                  child: route.points.isEmpty
+                      ? const Center(
+                          child: Text('No accepted coordinates yet.'),
+                        )
+                      : widget.mapBuilder(
+                          _map,
+                          route,
+                          widget.showDiagnostics,
+                          // The fitted route stays clear of the stats.
+                          EdgeInsets.fromLTRB(48, 48, 48, peekPixels + 32),
                         ),
-                        Positioned(
-                          right: 16,
-                          bottom: 16,
-                          child: _MapButtons(
-                            showDiagnostics: widget.showDiagnostics,
-                            continuity: widget.continuity,
-                            onContinuityChanged: widget.onContinuityChanged,
-                            onFitRoute: () => _map.currentState?.fitRoute(),
-                          ),
-                        ),
-                      ],
-                    ),
-            ),
-            Material(
-              elevation: 8,
-              color: Theme.of(context).colorScheme.surfaceContainerLow,
-              shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: SafeArea(
-                top: false,
-                child: RouteMapHeader(
-                  content: content,
-                  showDiagnostics: widget.showDiagnostics,
-                  continuity: widget.continuity,
-                  onContinuityChanged: widget.onContinuityChanged,
-                  onViewChanged: widget.onViewChanged,
-                  onStopSelected: (stop) =>
-                      _map.currentState?.focus(stop.coordinate),
                 ),
-              ),
-            ),
-          ],
+                if (route.points.isNotEmpty)
+                  // The buttons ride just above the sheet.
+                  AnimatedBuilder(
+                    animation: _sheet,
+                    builder: (context, child) => Positioned(
+                      right: 16,
+                      bottom:
+                          (_sheet.isAttached ? _sheet.pixels : peekPixels) + 16,
+                      child: child!,
+                    ),
+                    child: _MapButtons(
+                      showDiagnostics: widget.showDiagnostics,
+                      continuity: widget.continuity,
+                      onContinuityChanged: widget.onContinuityChanged,
+                      onFitRoute: () => _map.currentState?.fitRoute(),
+                    ),
+                  ),
+                DraggableScrollableSheet(
+                  controller: _sheet,
+                  initialChildSize: peek,
+                  minChildSize: peek,
+                  maxChildSize: _expandedSize,
+                  snap: true,
+                  builder: (context, scrollController) => Material(
+                    elevation: 8,
+                    color: Theme.of(context).colorScheme.surfaceContainerLow,
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(24),
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: RouteMapHeader(
+                      content: content,
+                      showDiagnostics: widget.showDiagnostics,
+                      continuity: widget.continuity,
+                      onContinuityChanged: widget.onContinuityChanged,
+                      onViewChanged: widget.onViewChanged,
+                      onStopSelected: (stop) =>
+                          _map.currentState?.focus(stop.coordinate),
+                      sheet: RouteMapSheetLayout(
+                        scrollController: scrollController,
+                        expandedHeight: bodyHeight * _expandedSize,
+                        onDragUpdate: (details) =>
+                            _dragSheet(details, bodyHeight, peek),
+                        onDragEnd: (details) => _settleSheet(details, peek),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
     ),
@@ -553,9 +664,26 @@ class _MapButtons extends StatelessWidget {
   );
 }
 
-/// The route details in the map's bottom panel: the route database's
-/// totals, the route's views, the legend and the route's stops. Only the
-/// stop list scrolls.
+/// How [RouteMapHeader] sits in a draggable sheet: the sheet's
+/// [scrollController], which only the stop list uses, the sheet's
+/// [expandedHeight], and the drags on the header that move the sheet.
+final class RouteMapSheetLayout {
+  const RouteMapSheetLayout({
+    required this.scrollController,
+    required this.expandedHeight,
+    required this.onDragUpdate,
+    required this.onDragEnd,
+  });
+
+  final ScrollController scrollController;
+  final double expandedHeight;
+  final GestureDragUpdateCallback onDragUpdate;
+  final GestureDragEndCallback onDragEnd;
+}
+
+/// The route details in the map's bottom sheet: the route database's
+/// totals first, then the route's views, the legend and the route's stops.
+/// Only the stop list scrolls.
 class RouteMapHeader extends StatelessWidget {
   const RouteMapHeader({
     super.key,
@@ -565,11 +693,15 @@ class RouteMapHeader extends StatelessWidget {
     required this.onViewChanged,
     this.showDiagnostics = true,
     this.onStopSelected,
+    this.sheet,
   });
+
+  /// The drag handle's height above the stats.
+  static const handleHeight = 24.0;
 
   final RouteMapContent content;
 
-  /// Whether the panel offers views and shows the route's point, part,
+  /// Whether the sheet offers views and shows the route's point, part,
   /// quality event and visible gap counts and its continuity.
   final bool showDiagnostics;
   final RouteGeometryContinuity continuity;
@@ -580,6 +712,9 @@ class RouteMapHeader extends StatelessWidget {
 
   /// Shows a stop of the list on the map.
   final ValueChanged<RouteStopMarker>? onStopSelected;
+
+  /// The draggable sheet holding the header; null lays it out on its own.
+  final RouteMapSheetLayout? sheet;
 
   @override
   Widget build(BuildContext context) {
@@ -594,83 +729,143 @@ class RouteMapHeader extends StatelessWidget {
       cleaned: content.view == RouteView.cleaned,
     );
     final stops = route.stopMarkers;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-      child: Column(
+    final details = <Widget>[
+      if (stats.isNotEmpty)
+        StatGrid(
+          columns: math.max(3, stats.length),
+          children: <Widget>[
+            // The distance comes first: the main figure.
+            for (final (index, stat) in stats.indexed)
+              StatTile(
+                value: stat.value,
+                label: stat.label,
+                note: stat.note,
+                large: index == 0,
+              ),
+          ],
+        ),
+      if (showDiagnostics && content.views.length > 1)
+        Padding(
+          padding: const EdgeInsets.only(top: 20),
+          child: SegmentedButton<RouteView>(
+            showSelectedIcon: false,
+            segments: <ButtonSegment<RouteView>>[
+              for (final view in content.views)
+                ButtonSegment(
+                  value: view,
+                  label: Text(view.label),
+                  tooltip: view.description,
+                ),
+            ],
+            selected: <RouteView>{content.view},
+            onSelectionChanged: (selection) => onViewChanged(selection.first),
+          ),
+        ),
+      const SizedBox(height: 16),
+      _RouteLegend(showDiagnostics: showDiagnostics),
+      const SizedBox(height: 10),
+      Text(
+        routeHeadline(route, showDiagnostics: showDiagnostics),
+        style: muted,
+      ),
+      if (showDiagnostics)
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Text(switch (continuity) {
+            RouteGeometryContinuity.preserveEvidenceSegments =>
+              'Recorded daily and lifecycle parts stay separate.',
+            RouteGeometryContinuity.connectDailyLegs =>
+              'Only daily boundaries receive straight inferred connectors.',
+            RouteGeometryContinuity.connectAllChronologicalPoints =>
+              'All parts receive straight inferred connectors; inferred distance is excluded.',
+            RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
+              'Only proven automatic callback gaps are joined.',
+          }, style: muted),
+        ),
+      if (stops.isNotEmpty) ...const <Widget>[
+        SizedBox(height: 20),
+        SectionLabel('Stops'),
+      ],
+    ];
+    Widget stopList({ScrollController? controller, bool shrinkWrap = false}) =>
+        ListView.builder(
+          controller: controller,
+          shrinkWrap: shrinkWrap,
+          padding: EdgeInsets.fromLTRB(
+            20,
+            0,
+            20,
+            12 + MediaQuery.paddingOf(context).bottom,
+          ),
+          itemCount: stops.length,
+          itemBuilder: (context, index) =>
+              _stopTile(context, index, stops[index]),
+        );
+    final layout = sheet;
+    if (layout == null) {
+      return Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          if (stats.isNotEmpty)
-            StatGrid(
-              columns: math.max(3, stats.length),
-              children: <Widget>[
-                // The distance comes first: the main figure.
-                for (final (index, stat) in stats.indexed)
-                  StatTile(
-                    value: stat.value,
-                    label: stat.label,
-                    note: stat.note,
-                    large: index == 0,
-                  ),
-              ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: details,
             ),
-          if (showDiagnostics && content.views.length > 1)
-            Padding(
-              padding: const EdgeInsets.only(top: 14),
-              child: SegmentedButton<RouteView>(
-                showSelectedIcon: false,
-                segments: <ButtonSegment<RouteView>>[
-                  for (final view in content.views)
-                    ButtonSegment(
-                      value: view,
-                      label: Text(view.label),
-                      tooltip: view.description,
-                    ),
-                ],
-                selected: <RouteView>{content.view},
-                onSelectionChanged: (selection) =>
-                    onViewChanged(selection.first),
-              ),
-            ),
-          const SizedBox(height: 14),
-          _RouteLegend(showDiagnostics: showDiagnostics),
-          const SizedBox(height: 10),
-          Text(
-            routeHeadline(route, showDiagnostics: showDiagnostics),
-            style: muted,
           ),
-          if (showDiagnostics)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(switch (continuity) {
-                RouteGeometryContinuity.preserveEvidenceSegments =>
-                  'Recorded daily and lifecycle parts stay separate.',
-                RouteGeometryContinuity.connectDailyLegs =>
-                  'Only daily boundaries receive straight inferred connectors.',
-                RouteGeometryContinuity.connectAllChronologicalPoints =>
-                  'All parts receive straight inferred connectors; inferred distance is excluded.',
-                RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
-                  'Only proven automatic callback gaps are joined.',
-              }, style: muted),
-            ),
-          if (stops.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 14),
-            const SectionLabel('Stops'),
-            // The one part of the panel that scrolls.
+          if (stops.isNotEmpty)
+            // The one part that scrolls.
             ConstrainedBox(
               constraints: BoxConstraints(
                 maxHeight: MediaQuery.sizeOf(context).height * 0.4,
               ),
-              child: ListView.builder(
-                shrinkWrap: true,
-                padding: EdgeInsets.zero,
-                itemCount: stops.length,
-                itemBuilder: (context, index) =>
-                    _stopTile(context, index, stops[index]),
+              child: stopList(shrinkWrap: true),
+            ),
+        ],
+      );
+    }
+    // The sheet reveals this expanded layout from the top as it opens: the
+    // stats first. Dragging the header moves the sheet; the stop list
+    // takes the sheet's scrolling, so it opens the sheet before it scrolls.
+    return ClipRect(
+      child: OverflowBox(
+        alignment: Alignment.topCenter,
+        minHeight: layout.expandedHeight,
+        maxHeight: layout.expandedHeight,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onVerticalDragUpdate: layout.onDragUpdate,
+              onVerticalDragEnd: layout.onDragEnd,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    SizedBox(
+                      height: handleHeight,
+                      child: Center(
+                        child: Container(
+                          width: 36,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: colors.outlineVariant,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                    ),
+                    ...details,
+                  ],
+                ),
               ),
             ),
+            Expanded(child: stopList(controller: layout.scrollController)),
           ],
-        ],
+        ),
       ),
     );
   }
@@ -687,7 +882,7 @@ class RouteMapHeader extends StatelessWidget {
         ),
         title: Text(
           stopDurationLabel(stop.duration),
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          style: const TextStyle(fontWeight: FontWeight.w500),
         ),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,

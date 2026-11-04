@@ -228,7 +228,7 @@ void main() {
       ),
     );
 
-    expect(find.text('STOPS'), findsOneWidget);
+    expect(find.text('Stops'), findsOneWidget);
     expect(find.text('1 h 12 min'), findsOneWidget);
     expect(find.text('10:05–11:17'), findsOneWidget);
     await tester.tap(find.text('1 h 12 min'));
