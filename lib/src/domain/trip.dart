@@ -1,6 +1,7 @@
 import 'track.dart';
 import 'export_models.dart';
 import 'route_geometry.dart';
+import 'route_summary.dart';
 import 'tracker_status.dart';
 import 'tracking_config.dart';
 import 'tracking_continuity.dart';
@@ -152,12 +153,17 @@ final class TripBundle {
     required this.trip,
     required Iterable<TripLeg> legs,
     required Iterable<TrackingContinuityGap> gaps,
+    this.summary,
   })  : legs = List<TripLeg>.unmodifiable(legs),
         gaps = List<TrackingContinuityGap>.unmodifiable(gaps);
 
   final Trip trip;
   final List<TripLeg> legs;
   final List<TrackingContinuityGap> gaps;
+
+  /// Totals over the Trip's legs, kept in the route database; null for
+  /// repositories that keep no summaries.
+  final TripSummary? summary;
 }
 
 /// Request for a new user-visible journey and its first internal Track leg.

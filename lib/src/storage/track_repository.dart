@@ -1,10 +1,15 @@
 import '../domain/activity_snapshot.dart';
 import '../domain/export_models.dart';
 import '../domain/location_sample.dart';
+import '../domain/route_recording_detail.dart';
+import '../domain/route_review.dart';
+import '../domain/route_summary.dart';
+import '../domain/step_coverage.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
+import '../domain/track_stop.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_configuration_epoch.dart';
@@ -14,10 +19,23 @@ import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 
 final class TrackBundle {
-  const TrackBundle({required this.track, required this.segments});
+  const TrackBundle({
+    required this.track,
+    required this.segments,
+    this.stops = const <TrackStop>[],
+    this.summary,
+  });
 
   final Track track;
   final List<TrackSegmentWithPoints> segments;
+
+  /// Stops of the track, one per place, oldest first, read in the same
+  /// snapshot. Empty for repositories without [TrackStopRepository].
+  final List<TrackStop> stops;
+
+  /// The track's stored summary, read in the same snapshot; null for
+  /// repositories without [RouteSummaryRepository].
+  final RouteSummary? summary;
 }
 
 final class PointWriteRequest {
@@ -29,6 +47,7 @@ final class PointWriteRequest {
     required this.accepted,
     required this.qualityFlags,
     this.rejectionReason,
+    this.qualityPolicyVersion,
   });
 
   final String trackId;
@@ -38,6 +57,11 @@ final class PointWriteRequest {
   final bool accepted;
   final int qualityFlags;
   final String? rejectionReason;
+
+  /// Quality policy version that produced [accepted], [qualityFlags] and
+  /// [rejectionReason]. Repositories persist it as point provenance; when it
+  /// is null they record the version of the epoch that covers the point.
+  final int? qualityPolicyVersion;
 }
 
 /// Result of one atomic point/topology/gap transaction.
@@ -47,12 +71,16 @@ final class PointAppendResult {
     required this.segmentId,
     required this.duplicate,
     this.gap,
+    this.stop,
   });
 
   final TrackPoint point;
   final String segmentId;
   final TrackingContinuityGap? gap;
   final bool duplicate;
+
+  /// The stop the transaction opened, extended or closed, if any.
+  final TrackStop? stop;
 }
 
 /// Optional atomic continuity capability for repositories that support the
@@ -66,6 +94,172 @@ abstract interface class ContinuityTrackRepository {
   );
 
   Future<List<TrackingContinuityGap>> listContinuityGaps(String trackId);
+}
+
+/// Optional capability: stop records written atomically with the fixes that
+/// open, extend and close them (route database schema 16).
+abstract interface class TrackStopRepository {
+  /// Appends [request] like [ContinuityTrackRepository.appendPointWithContinuity]
+  /// and applies [stop] in the same transaction. A duplicate native event
+  /// applies no stop change.
+  Future<PointAppendResult> appendPointWithStop(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
+  );
+
+  /// The current stop of [trackId], if one is open.
+  Future<TrackStop?> findOpenTrackStop(String trackId);
+
+  /// Stops of [trackId], oldest first.
+  Future<List<TrackStop>> listTrackStops(String trackId);
+}
+
+/// Optional capability: the stored points quality policy 5's decision engine
+/// re-reads to rebuild its state for a route after a restart.
+abstract interface class DecisionTailRepository {
+  /// The newest points of [segmentId] of [trackId] in sequence order, from
+  /// the [contextAcceptedPoints]th last accepted point (or the segment's
+  /// first point) on, at most [maximumPoints] of them; null for an unknown
+  /// segment.
+  Future<DecisionTail?> decisionTail(
+    String trackId, {
+    required String segmentId,
+    int contextAcceptedPoints = 30,
+    int maximumPoints = 5000,
+  });
+}
+
+/// Points returned by [DecisionTailRepository.decisionTail].
+final class DecisionTail {
+  const DecisionTail({required this.segmentStartedAt, required this.points});
+
+  /// When the segment began recording.
+  final DateTime segmentStartedAt;
+
+  /// Points in sequence order.
+  final List<TrackPoint> points;
+}
+
+/// Optional capability: route details kept in the database as a route
+/// records ([RouteSummary], [TripSummary]).
+abstract interface class RouteSummaryRepository {
+  /// [trackId]'s stored summary, computed first if it has none yet; null for
+  /// an unknown track.
+  Future<RouteSummary?> routeSummary(String trackId);
+
+  /// [tripId]'s totals over its legs, stored and returned; null for an
+  /// unknown Trip.
+  Future<TripSummary?> tripSummary(String tripId);
+
+  /// Recomputes [trackId]'s summary from its stored rows.
+  Future<void> refreshRouteSummary(String trackId);
+
+  /// Completed tracks whose stops are still [TrackStopSource.pending],
+  /// oldest first; with [owner], only that owner's.
+  Future<List<String>> tracksAwaitingStops({
+    int limit = 20,
+    TrackingOwner? owner,
+  });
+
+  /// Stores [stops], derived from [trackId]'s stored points, as its stop rows,
+  /// one per place, and marks its stops [TrackStopSource.derived]. Does
+  /// nothing unless its stops are still pending.
+  Future<void> storeDerivedStops(String trackId, List<TrackStop> stops);
+
+  /// Records [stepCount], the native step count of capture generation
+  /// [captureGenerationId] read from status as capture stops, so the steps
+  /// after the route's newest fix count too, and the counter's [coverage].
+  /// A generation counts once, at its highest count: a count no higher than
+  /// one already recorded for it adds nothing.
+  Future<void> recordStepCount(
+    String trackId, {
+    required String? captureGenerationId,
+    required int stepCount,
+    StepCoverage? coverage,
+  });
+
+  /// Records [runId] as [trackId]'s current cleaned view, [distanceMeters]
+  /// long.
+  Future<void> recordCleanedGeometry(
+    String trackId, {
+    required String runId,
+    required double distanceMeters,
+  });
+}
+
+/// Optional capability: routes recorded under older rules, decided again
+/// under the current ones ([RouteReview]) and stored beside what they
+/// recorded (route database schema 18).
+abstract interface class RouteReviewRepository {
+  /// Completed routes, oldest first, recorded entirely under quality
+  /// policies older than [RouteReview.qualityPolicyVersion] and without a
+  /// current review of [RouteReview.version]; with [owner], only that
+  /// owner's.
+  Future<List<String>> tracksAwaitingReview({
+    int limit = 20,
+    TrackingOwner? owner,
+  });
+
+  /// Whether [trackId] is one of [tracksAwaitingReview].
+  Future<bool> awaitsReview(String trackId);
+
+  /// [trackId]'s configuration epochs, oldest first.
+  Future<List<TrackingConfigurationEpoch>> configurationEpochsOf(
+    String trackId,
+  );
+
+  /// Ids of the fixes review run [runId] keeps.
+  Future<Set<String>> keptPointIdsOf(String runId);
+
+  /// Stores [review] as its route's current review in one transaction,
+  /// replacing an older one, and returns the id of its derived-geometry run
+  /// (the fixes the review keeps). The route's points, their acceptance, its
+  /// measured distance and its uploads stay as recorded. Returns null without
+  /// storing when the route is not completed or the review does not cover
+  /// its newest point.
+  Future<String?> storeRouteReview(RouteReview review);
+
+  /// Removes [trackId]'s review; the rows it recorded count again.
+  Future<void> deleteRouteReview(String trackId);
+}
+
+/// Optional capability: health events recorded once per key, so events
+/// rebuilt from journal payloads replayed after a restart never repeat.
+/// Optional capability: the detail recorded beside the clean route
+/// ([RouteRecordingDetail]).
+///
+/// [TrackingClient] sets both properties from
+/// [TrackingConfiguration.recordingDetail] before it opens the repository.
+/// Repositories without this capability record everything.
+abstract interface class RecordingDetailRepository {
+  /// Detail stamped on routes created from now on:
+  /// [RouteRecordingDetail.full] (the default) or
+  /// [RouteRecordingDetail.clean]. A route keeps its stamp for life.
+  set newRouteRecordingDetail(RouteRecordingDetail value);
+
+  /// Whether diagnostic health events are stored (the default). Events that
+  /// prove a lifecycle boundary are always stored.
+  set recordsDiagnosticHealthEvents(bool value);
+
+  /// Compacts up to [limit] completed or failed clean routes not yet
+  /// compacted, oldest first, one transaction each; with [owner], only that
+  /// owner's. Their journaled activity readings, motion evidence and
+  /// diagnostic health events are removed; their points, acceptance,
+  /// distance, stops, steps, summaries and uploads stay. Returns how many
+  /// routes were compacted.
+  Future<int> compactCleanRoutes({int limit = 20, TrackingOwner? owner});
+}
+
+abstract interface class KeyedHealthEventRepository {
+  /// Records a health event under [key] unless one is already recorded.
+  Future<void> recordKeyedHealthEvent({
+    required String key,
+    String? trackId,
+    required String type,
+    required DateTime occurredAt,
+    Map<String, Object?>? details,
+  });
 }
 
 enum TrackOperationType { pause, complete }
@@ -242,6 +436,17 @@ abstract interface class QualityDiagnosticsRepository {
     required TrackingOwner owner,
     required String tripId,
   });
+}
+
+/// Optional lookup of the immutable epoch that covers an active track's next
+/// point.
+///
+/// The tracking client evaluates each fix under the policy versions this epoch
+/// recorded, so upgrading the package never reinterprets a route that is
+/// already recording. Repositories without this capability are evaluated under
+/// the current policy versions.
+abstract interface class ActiveConfigurationEpochRepository {
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(String trackId);
 }
 
 /// Optional owner-scoped lookup for immutable point-policy provenance.

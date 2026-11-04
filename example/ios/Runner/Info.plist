@@ -29,7 +29,7 @@
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Location is recorded while an active example track continues in the background.</string>
 	<key>NSMotionUsageDescription</key>
-	<string>Motion is used to reduce GPS and battery usage while stationary.</string>
+	<string>Motion is used to reduce GPS and battery usage while stationary, and to count your steps on a route.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

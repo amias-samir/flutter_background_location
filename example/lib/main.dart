@@ -6,6 +6,7 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'recorded_tracks_section.dart';
 import 'recorded_trips_section.dart';
 import 'route_map_page.dart';
+import 'route_totals.dart';
 import 'tracking_controls.dart';
 import 'tracking_dialogs.dart';
 
@@ -65,6 +66,15 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     organizationId: 'example-organization',
   );
 
+  /// Whether this build records and shows diagnostics: debug builds do,
+  /// profile and release builds record a clean route and show only it and
+  /// its stops ([TrackingConfiguration.recordingDetail]).
+  static final _recordsDiagnostics =
+      TrackingClient.resolveRecordingDetail(
+        const TrackingConfiguration().recordingDetail,
+      ) ==
+      RouteRecordingDetail.full;
+
   final List<StreamSubscription<Object?>> _subscriptions =
       <StreamSubscription<Object?>>[];
   TrackingController? _tracking;
@@ -76,6 +86,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   MultiDayRoutePresentation _routePresentation =
       MultiDayRoutePresentation.separateRecordedParts;
   List<Track> _tracks = const <Track>[];
+  Map<String, RouteTotals> _trackTotals = const <String, RouteTotals>{};
   List<RecordedTripSummary> _trips = const <RecordedTripSummary>[];
   String? _historyCursor;
   bool _historyHasMore = false;
@@ -163,11 +174,23 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final page = await tracking.listTrackPage(
       TrackQuery(limit: 25, cursor: append ? _historyCursor : null),
     );
+    final totals = <String, RouteTotals>{
+      if (tracking is TrackingSummaryController)
+        for (final track in page.items)
+          track.id: RouteTotals.ofRoute(
+            await (tracking as TrackingSummaryController).routeSummary(
+              track.id,
+            ),
+          ),
+    };
     if (!mounted) return;
     setState(() {
       _tracks = append
           ? List<Track>.unmodifiable(<Track>[..._tracks, ...page.items])
           : page.items;
+      _trackTotals = Map<String, RouteTotals>.unmodifiable(
+        <String, RouteTotals>{if (append) ..._trackTotals, ...totals},
+      );
       _historyCursor = page.nextCursor;
       _historyHasMore = page.hasMore;
     });
@@ -184,28 +207,20 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         cursor: append ? _historyCursor : null,
       ),
     );
+    // Each Trip's details are stored in the route database.
     final summaries = await Future.wait<RecordedTripSummary>(
-      page.items.map((trip) async {
-        final bundle = await tripTracking.loadTripBundle(trip.id);
-        final quality = tracking is TrackingQualityController
-            ? await (tracking as TrackingQualityController).tripQualitySummary(
-                trip.id,
-              )
-            : null;
-        var segmentCount = 0;
-        for (final leg in bundle.legs) {
-          final track = await _tracking!.getTrack(leg.trackId);
-          segmentCount += track?.segmentCount ?? 0;
-        }
-        return RecordedTripSummary(
+      page.items.map(
+        (trip) async => RecordedTripSummary(
           trip: trip,
-          segmentCount: segmentCount,
-          gapCount: bundle.gaps.length,
-          qualityEventCount: quality?.qualityRunCount ?? bundle.gaps.length,
-          visibleGapCount:
-              quality?.visibleQualityRunCount ?? bundle.gaps.length,
-        );
-      }),
+          totals: tracking is TrackingSummaryController
+              ? RouteTotals.ofTrip(
+                  await (tracking as TrackingSummaryController).tripSummary(
+                    trip.id,
+                  ),
+                )
+              : null,
+        ),
+      ),
     );
     if (!mounted) return;
     setState(() {
@@ -445,13 +460,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   }
 
   Future<void> _exportTrack(String trackId, TrackExportFormat format) async {
+    final index = _tracks.indexWhere((track) => track.id == trackId);
+    final routeName = index < 0 ? trackId : _tracks[index].routeId ?? trackId;
     final name = await showDialog<String>(
       context: context,
-      builder: (_) => ExportNameDialog(
-        format: format,
-        initialFileName:
-            'route_${DateTime.now().toUtc().millisecondsSinceEpoch}',
-      ),
+      builder: (_) =>
+          ExportNameDialog(format: format, initialFileName: routeName),
     );
     if (name == null) return;
     await _run(() async {
@@ -499,13 +513,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   }
 
   Future<void> _exportTrip(String tripId, TrackExportFormat format) async {
+    final index = _trips.indexWhere((item) => item.trip.id == tripId);
+    final routeName = index < 0 ? tripId : _trips[index].trip.routeId ?? tripId;
     final name = await showDialog<String>(
       context: context,
-      builder: (_) => ExportNameDialog(
-        format: format,
-        initialFileName:
-            'trip_${DateTime.now().toUtc().millisecondsSinceEpoch}',
-      ),
+      builder: (_) =>
+          ExportNameDialog(format: format, initialFileName: routeName),
     );
     if (name == null) return;
     await _run(() async {
@@ -519,6 +532,84 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         setState(
           () => _message =
               'Exported ${result.pointCount} Trip points to ${result.path}',
+        );
+      }
+    });
+  }
+
+  /// GeoJSON with every point, including rejected ones, and per-fix
+  /// diagnostics: accuracy, Doppler speed, native profile and activity age.
+  Future<void> _exportTripDiagnostics(String tripId) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => ExportNameDialog(
+        format: TrackExportFormat.geoJson,
+        initialFileName:
+            'diagnostics_${DateTime.now().toUtc().millisecondsSinceEpoch}',
+      ),
+    );
+    if (name == null) return;
+    await _run(() async {
+      final tracking = _tracking! as MultiDayTripController;
+      final result = await tracking.exportTrip(
+        tripId: tripId,
+        format: TrackExportFormat.geoJson,
+        fileName: name,
+        options: const TrackExportOptions(
+          includeGeoJsonPointFeatures: true,
+          includeRejectedPoints: true,
+          includeDiagnosticProperties: true,
+        ),
+      );
+      if (mounted) {
+        setState(
+          () => _message =
+              'Exported ${result.pointCount} diagnostic points to ${result.path}',
+        );
+      }
+    });
+  }
+
+  /// GPX of the cleaned route view, one file per recorded day. Combined Trip
+  /// export takes raw geometry only, so each day exports its own cleaned
+  /// view.
+  Future<void> _exportTripCleaned(Trip trip) async {
+    final tracking = _tracking;
+    if (tracking == null || tracking is! TrackingSummaryController) return;
+    final summaries = tracking as TrackingSummaryController;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => ExportNameDialog(
+        format: TrackExportFormat.gpx,
+        initialFileName:
+            'cleaned_${DateTime.now().toUtc().millisecondsSinceEpoch}',
+      ),
+    );
+    if (name == null) return;
+    await _run(() async {
+      final tripTracking = tracking as MultiDayTripController;
+      final bundle = await tripTracking.loadTripBundle(trip.id);
+      final exported = <String>[];
+      var points = 0;
+      for (final leg in bundle.legs) {
+        final run = await summaries.currentCleanedGeometry(leg.trackId);
+        final result = await tracking.exportTrack(
+          trackId: leg.trackId,
+          format: TrackExportFormat.gpx,
+          fileName: bundle.legs.length == 1
+              ? name
+              : '${name}_day_${leg.legNumber}',
+          options: TrackExportOptions(
+            geometry: TrackGeometrySelection.derived(run.id),
+          ),
+        );
+        points += result.pointCount;
+        exported.add(result.path);
+      }
+      if (mounted) {
+        setState(
+          () => _message =
+              'Exported $points cleaned points to ${exported.join(', ')}',
         );
       }
     });
@@ -719,7 +810,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: <Widget>[
-                TrackingStatusCard(session: _session),
+                TrackingStatusCard(
+                  session: _session,
+                  showDiagnostics: _recordsDiagnostics,
+                ),
                 if (_message != null) ...<Widget>[
                   const SizedBox(height: 12),
                   _MessageCard(message: _message!),
@@ -786,17 +880,27 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                                 builder: (_) => TripMapPage(
                                   tracking: tracking as MultiDayTripController,
                                   trip: trip,
+                                  showDiagnostics: _recordsDiagnostics,
                                 ),
                               ),
                             );
                           },
                     onContinue: _busy ? null : _continueTrip,
                     onExport: _busy ? null : _exportTrip,
+                    onExportDiagnostics: _busy || !_recordsDiagnostics
+                        ? null
+                        : _exportTripDiagnostics,
+                    showDiagnostics: _recordsDiagnostics,
+                    onExportCleaned:
+                        _busy || tracking is! TrackingSummaryController
+                        ? null
+                        : _exportTripCleaned,
                     onDelete: _busy ? null : _deleteTrip,
                   )
                 else
                   RecordedTracksSection(
                     tracks: _tracks,
+                    totals: _trackTotals,
                     hasMore: _historyHasMore,
                     onRefresh: _busy ? null : _refreshTracks,
                     onLoadMore: _busy
@@ -811,6 +915,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                                 builder: (_) => TrackMapPage(
                                   tracking: tracking,
                                   track: track,
+                                  showDiagnostics: _recordsDiagnostics,
                                 ),
                               ),
                             );

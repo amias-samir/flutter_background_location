@@ -329,3 +329,466 @@ codes:
     redaction: no filesystem path
     commands:
       - prepareExportForSharing
+  - code: active_trip_conflict
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no foreign Trip, track, user, or organization identity
+    commands:
+      - startTrip
+      - continueTrip
+      - endCurrentDay
+      - completeTrip
+      - Trip recovery during initialize
+  - code: trip_not_active
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - endCurrentDay
+  - code: trip_not_continuable
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - continueTrip
+  - code: completed_trip_confirmation_required
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - continueTrip
+  - code: trip_already_finalized
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip, upload, or owner identity
+    commands:
+      - continueTrip
+  - code: trip_not_completable
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - endCurrentDay
+      - completeTrip
+  - code: trip_not_completed
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - Trip completion upload enqueue
+  - code: trip_not_terminal
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - deleteTrip
+  - code: trip_operation_conflict
+    owner: TrackingTripException
+    recovery: retry
+    redaction: no operation, Trip, track, or owner identity
+    commands:
+      - startTrip
+      - continueTrip
+      - endCurrentDay
+      - completeTrip
+  - code: trip_operation_missing
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no operation, Trip, or owner identity
+    commands:
+      - Trip lifecycle recovery
+  - code: trip_operation_inconsistent
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no operation, Trip, or owner identity
+    commands:
+      - Trip lifecycle recovery
+  - code: trip_leg_missing
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no Trip, leg, or owner identity
+    commands:
+      - Trip lifecycle commands
+  - code: trip_upload_lease_conflict
+    owner: TrackingConflictException
+    recovery: resume
+    redaction: no lease, Trip, or owner identity
+    commands:
+      - Trip completion upload acknowledgement
+      - Trip completion upload failure
+  - code: trip_not_found_in_owner_scope
+    owner: TrackingOwnershipException
+    recovery: resolve_owner_capture
+    redaction: no Trip, user, or organization identity
+    commands:
+      - tripQualitySummary
+  - code: track_is_trip_leg
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: same-owner track ID only
+    commands:
+      - deleteRecordedTrack
+      - eraseTrackEverywhere
+  - code: trip_leg_not_found_in_owner_scope
+    owner: TrackingOwnershipException
+    recovery: resolve_owner_capture
+    redaction: no Trip, leg, user, or organization identity
+    commands:
+      - exportTrip
+  - code: trip_has_no_legs
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - exportTrip
+  - code: export_trip_incomplete
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - exportTrip
+  - code: trip_derived_geometry_unsupported
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no Trip or owner identity
+    commands:
+      - exportTrip
+  - code: trip_export_too_large_for_legacy_api
+    owner: TrackingExportException
+    recovery: retry
+    redaction: same-owner leg track ID only
+    commands:
+      - exportTrip
+  - code: derived_algorithm_unsupported
+    owner: TrackingConfigurationException
+    recovery: refresh
+    redaction: supported algorithm names only
+    commands:
+      - deriveGeometry
+  - code: invalid_route_geometry_processor
+    owner: TrackingConfigurationException
+    recovery: refresh
+    redaction: no processor payload, route, or owner identity
+    commands:
+      - deriveGeometry with a RouteGeometryProcessor
+  - code: invalid_derived_geometry_request
+    owner: TrackingConfigurationException
+    recovery: refresh
+    redaction: no route or owner identity
+    commands:
+      - beginDerivedGeometryRun
+  - code: derived_geometry_run_not_writable
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no run, track, or owner identity
+    commands:
+      - appendDerivedGeometryPoints
+      - completeDerivedGeometryRun
+  - code: invalid_derived_geometry_point
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no coordinates, run, or owner identity
+    commands:
+      - appendDerivedGeometryPoints
+  - code: derived_geometry_source_mismatch
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no coordinates, run, or owner identity
+    commands:
+      - appendDerivedGeometryPoints
+  - code: derived_geometry_incomplete
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: same-owner track ID and point counts only
+    commands:
+      - completeDerivedGeometryRun
+      - derived geometry export
+  - code: derived_geometry_unavailable
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no run, track, or owner identity
+    commands:
+      - derived geometry export
+  - code: derived_geometry_rejected_points_unsupported
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no route or owner identity
+    commands:
+      - derived geometry export
+  - code: derived_geometry_requires_v2_export
+    owner: TrackingStorageException
+    recovery: retry
+    redaction: no route or owner identity
+    commands:
+      - exportTrack
+  - code: invalid_track_id
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no track identity
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+      - native track cleanup
+  - code: tracking_already_active
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only; no track identity
+    commands:
+      - startNewTrack
+  - code: already_tracking
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only; no track identity
+    commands:
+      - startNewTrack
+  - code: track_mismatch
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only; no track identity
+    commands:
+      - pauseCurrentTrack
+      - resumeCurrentTrack
+      - completeCurrentTrack
+      - updateTrackingConfig
+  - code: no_paused_track
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no track identity
+    commands:
+      - resumeCurrentTrack
+  - code: invalid_state
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only
+    commands:
+      - native lifecycle commands
+  - code: invalid_arguments
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no argument values
+    commands:
+      - native lifecycle commands
+      - acknowledgeLocations
+  - code: location_permission_denied
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: permission state only
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: notification_permission_denied
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: permission state only
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: location_services_disabled
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no coordinates or owner identity
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: background_permission_required
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: precise_location_required
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: missing_usage_description
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: Info.plist key name only
+    commands:
+      - requestNextPermission
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: background_mode_missing
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: redacted command state only
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+  - code: foreground_service_start_failed
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: exception type and permission state only
+    commands:
+      - startNewTrack
+      - resumeCurrentTrack
+      - updateTrackingConfig
+  - code: native_journal_unavailable
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no journal payload or track identity
+    commands:
+      - startNewTrack
+  - code: native_state_persistence_failed
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: exception type and redacted command state only
+    commands:
+      - native command lease
+      - native lifecycle commands
+  - code: native_command_lease_conflict
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no lease token, track, or owner identity
+    commands:
+      - native command lease
+      - native lifecycle commands
+  - code: native_command_invalid
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no lease token, track, or owner identity
+    commands:
+      - native lifecycle commands
+  - code: native_command_revision_conflict
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no lease token, track, or owner identity
+    commands:
+      - native lifecycle commands
+  - code: native_command_in_progress
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no lease token, track, or owner identity
+    commands:
+      - native lifecycle commands
+  - code: ios_error
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: error domain and code only
+    commands:
+      - native lifecycle commands
+      - iOS method calls
+  - code: plugin_unavailable
+    owner: native
+    recovery: refresh
+    redaction: no route or owner identity
+    commands:
+      - iOS method calls after plugin teardown
+  - code: pending_location_backpressure
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no journal payload or track identity
+    commands:
+      - startNewTrack
+      - pending journal drain
+      - acknowledgeLocations
+      - native journal diagnostic
+      - native track cleanup
+  - code: pending_locations_unavailable
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: exception type only; no journal payload
+    commands:
+      - pending journal drain
+  - code: native_journal_cursor_invalid
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no journal payload, cursor, track, or owner identity
+    commands:
+      - pending journal drain
+  - code: pending_location_ack_failed
+    owner: native
+    recovery: retry
+    redaction: exception type only; no event IDs
+    commands:
+      - acknowledgeLocations
+  - code: pending_location_replay_failed
+    owner: native
+    recovery: retry
+    redaction: exception type only; no journal payload
+    commands:
+      - location stream replay
+  - code: location_journal_capacity
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: pending-fix counts only
+    commands:
+      - startNewTrack
+      - native capture
+  - code: location_journal_failure
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: journal operation, SQLite result, and error domain only
+    commands:
+      - startNewTrack
+      - native capture
+      - pending journal drain
+  - code: invalid_export
+    owner: TrackingExportException
+    recovery: retry
+    redaction: no path, URI, track, or owner identity
+    commands:
+      - exportTrackV2
+      - exportToDownloads
+      - prepareExportForSharing
+      - deleteManagedExport
+  - code: invalid_export_chunk
+    owner: TrackingExportException
+    recovery: retry
+    redaction: no export contents
+    commands:
+      - exportTrackV2
+  - code: export_handle_not_found
+    owner: TrackingExportException
+    recovery: retry
+    redaction: no export handle, path, or URI
+    commands:
+      - exportTrackV2
+  - code: export_failed
+    owner: native
+    recovery: retry
+    redaction: exception type only; no path or URI
+    commands:
+      - exportToDownloads
+  - code: delete_export_failed
+    owner: native
+    recovery: retry
+    redaction: exception type only; no path or URI
+    commands:
+      - deleteDownloadExport
+  - code: activity_unavailable
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: permission state only
+    commands:
+      - requestNextPermission
+  - code: activity_detached
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: permission state only
+    commands:
+      - requestNextPermission
+  - code: permission_request_in_progress
+    owner: TrackingNativeException
+    recovery: retry
+    redaction: no permission payload
+    commands:
+      - requestNextPermission
+  - code: settings_unavailable
+    owner: native
+    recovery: retry
+    redaction: exception type only
+    commands:
+      - openAppSettings
+      - openLocationSettings
+      - openBatteryOptimizationSettings
+  - code: invalid_action_id
+    owner: native
+    recovery: retry
+    redaction: redacted command state only
+    commands:
+      - acknowledgePendingUserAction

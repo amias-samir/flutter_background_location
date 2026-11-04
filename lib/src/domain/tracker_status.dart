@@ -1,4 +1,6 @@
+import 'location_sample.dart';
 import 'motion_evidence.dart';
+import 'step_coverage.dart';
 
 /// Native capture lifecycle independent of the Flutter widget lifecycle.
 enum TrackerLifecycle {
@@ -56,6 +58,11 @@ final class TrackerStatus {
     this.motionState = MotionState.unknown,
     this.samplingProfile = SamplingProfile.moving,
     this.motionEvidence,
+    this.profileTransitionReason,
+    this.stepCount,
+    this.captureGenerationId,
+    this.stepCoverage,
+    this.stepFinal,
   });
 
   /// Current native capture lifecycle.
@@ -79,6 +86,29 @@ final class TrackerStatus {
   /// Latest bounded native motion-evidence decision, when supported.
   final MotionEvidenceSnapshot? motionEvidence;
 
+  /// Coordinate-free reason the native [samplingProfile] last changed, such
+  /// as `still_episode`, `entry_without_fixes`, `moving_readings`, `doppler`
+  /// or `sustained_displacement`, when the native side reports one. Older
+  /// natives send none.
+  final String? profileTransitionReason;
+
+  /// Steps the native step counter counted in the current capture
+  /// generation ([captureGenerationId]); null without a step counter, its
+  /// permission, or a native build that reports it.
+  final int? stepCount;
+
+  /// The native capture generation the status describes.
+  final String? captureGenerationId;
+
+  /// How completely the step counter is counting [captureGenerationId]
+  /// (capability `step_count_coverage`).
+  final StepCoverage? stepCoverage;
+
+  /// The final step count of the newest capture generation that stopped,
+  /// read as it stopped; present after a pause or stop until capture starts
+  /// again.
+  final StepFinal? stepFinal;
+
   /// Decodes a native status-channel payload.
   factory TrackerStatus.fromMap(Map<Object?, Object?> map) {
     final raw = map['lifecycle'] ?? map['state'] ?? map['status'];
@@ -87,7 +117,10 @@ final class TrackerStatus {
       (candidate) => candidate.name == normalized,
       orElse: () => TrackerLifecycle.idle,
     );
-    final timestamp = map['lastPointAt'] ?? map['timestamp'];
+    // Current natives always send `lastPointAt`, null before the first fix.
+    // Only natives that never sent the key fall back to the status time.
+    final timestamp =
+        map.containsKey('lastPointAt') ? map['lastPointAt'] : map['timestamp'];
     final rawMotionEvidence = map['motionEvidence'];
     return TrackerStatus(
       lifecycle: lifecycle,
@@ -114,6 +147,17 @@ final class TrackerStatus {
               rawMotionEvidence.cast<Object?, Object?>(),
             )
           : null,
+      profileTransitionReason: switch (map['profileTransitionReason']) {
+        final String reason when reason.trim().isNotEmpty => reason.trim(),
+        _ => null,
+      },
+      stepCount: stepCountFromPayload(map['stepCount']),
+      captureGenerationId: switch (map['captureGenerationId']) {
+        final String id when id.isNotEmpty => id,
+        _ => null,
+      },
+      stepCoverage: StepCoverage.fromPayload(map['stepCoverage']),
+      stepFinal: StepFinal.fromPayload(map['stepFinal']),
     );
   }
 }

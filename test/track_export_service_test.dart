@@ -4,6 +4,7 @@ import 'package:flutter_background_location_tracker/src/domain/activity_snapshot
 import 'package:flutter_background_location_tracker/src/domain/export_models.dart';
 import 'package:flutter_background_location_tracker/src/domain/track_point.dart';
 import 'package:flutter_background_location_tracker/src/domain/tracker_status.dart';
+import 'package:flutter_background_location_tracker/src/domain/tracking_config.dart';
 import 'package:flutter_background_location_tracker/src/export/track_export_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xml/xml.dart';
@@ -50,6 +51,23 @@ void main() {
   });
 
   tearDown(() => harness.repository.close());
+
+  test('default filename uses the route identifier', () async {
+    final trackId = await harness.repository.createTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: const TrackingConfig(),
+      routeId: 'Morning ride',
+      requestedTrackId: 'named-route',
+    );
+    await harness.repository.markTrackActive(trackId);
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+    final result = await exporter.exportTrack(
+      trackId: trackId,
+      format: TrackExportFormat.gpx,
+    );
+    expect(result.fileName, 'Morning ride.gpx');
+  });
 
   test('all formats parse and preserve a single-point track', () async {
     final trackId = await harness.createActiveTrack(trackId: 'one-point');

@@ -4,6 +4,7 @@ import '../domain/route_geometry.dart';
 import '../domain/track_point.dart';
 import '../domain/track_segment.dart';
 import '../domain/tracking_continuity.dart';
+import '../domain/track_geodesy.dart';
 
 /// One bounded source segment supplied to [RouteGeometryAssembler].
 final class RouteGeometrySourcePart {
@@ -244,16 +245,11 @@ final class RouteGeometryAssembler {
     double latitude2,
     double longitude2,
   ) {
-    const radius = 6371008.8;
-    final lat1 = latitude1 * math.pi / 180;
-    final lat2 = latitude2 * math.pi / 180;
-    final deltaLatitude = (latitude2 - latitude1) * math.pi / 180;
-    final deltaLongitude = (longitude2 - longitude1) * math.pi / 180;
-    final a = math.sin(deltaLatitude / 2) * math.sin(deltaLatitude / 2) +
-        math.cos(lat1) *
-            math.cos(lat2) *
-            math.sin(deltaLongitude / 2) *
-            math.sin(deltaLongitude / 2);
-    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return TrackGeodesy.sphericalHaversineMeters(
+      latitude1,
+      longitude1,
+      latitude2,
+      longitude2,
+    );
   }
 }

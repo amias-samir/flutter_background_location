@@ -3,6 +3,8 @@ import '../domain/capability_report.dart';
 import '../domain/location_sample.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
+import '../domain/route_recording_detail.dart';
+import '../domain/step_coverage.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_readiness.dart';
@@ -124,6 +126,22 @@ abstract interface class NativeJournalDiagnosticsAdapter {
   Future<Map<String, Object?>> nativeJournalDiagnostic({
     bool performMaintenance = false,
   });
+}
+
+/// Optional adapter capability for the native step counter's count-free
+/// diagnostics ring (capability `step_counter_diagnostics`), oldest first;
+/// empty when the native side keeps none.
+abstract interface class StepCounterDiagnosticsAdapter {
+  Future<List<StepCounterDiagnostic>> stepCounterDiagnostics();
+}
+
+/// Optional adapter capability (`recording_detail_mode`): the detail the
+/// native side records, sent with the next `initialize` and kept by it for
+/// starts before Dart runs. In [RouteRecordingDetail.clean] it keeps no
+/// step-counter diagnostics and replaces raw platform error text with fixed
+/// messages; capture is the same in every mode.
+abstract interface class NativeRecordingDetailAdapter {
+  void applyRecordingDetail(RouteRecordingDetail detail);
 }
 
 /// Optional destructive native-journal capability used by confirmed erase.

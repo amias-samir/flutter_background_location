@@ -5,10 +5,13 @@ import 'package:flutter_background_location_tracker/src/domain/tracking_config.d
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const config = TrackingConfig(
-    stationaryConfirmationDuration: Duration(seconds: 90),
-    movingConfirmationCount: 2,
-  );
+  // These cases pin motion policy 1, which routes recorded before motion
+  // policy 2 keep; motion_gate_v2_test.dart covers the current policy.
+  final config = TrackingConfig.fromMap(<String, Object?>{
+    'stationaryConfirmationMs': 90000,
+    'movingConfirmationCount': 2,
+    'motionPolicyVersion': 1,
+  });
   final epoch = DateTime.utc(2026, 7, 20, 8);
 
   ActivitySnapshot activity(

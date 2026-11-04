@@ -6,6 +6,8 @@ import '../domain/capability_report.dart';
 import '../domain/location_sample.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
+import '../domain/route_recording_detail.dart';
+import '../domain/step_coverage.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
 import '../domain/tracking_error.dart';
@@ -23,6 +25,8 @@ final class NativeTrackerAdapter
         StagedPermissionAdapter,
         PagedNativeLocationAdapter,
         NativeJournalDiagnosticsAdapter,
+        StepCounterDiagnosticsAdapter,
+        NativeRecordingDetailAdapter,
         NativeTrackingHealthAdapter,
         TrackScopedNativeDataAdapter,
         CommandLeaseTrackerAdapter {
@@ -38,8 +42,11 @@ final class NativeTrackerAdapter
             activityChannel ?? const EventChannel('$_prefix/activity'),
         _statusChannel =
             statusChannel ?? const EventChannel('$_prefix/status') {
+    // TrackingClient drains the native journal by pages, so the native side
+    // must not also replay the whole backlog on every subscription.
     _locations = _locationChannel
-        .receiveBroadcastStream()
+        .receiveBroadcastStream(
+            const <String, Object?>{'replayOnListen': 'none'})
         .map(_eventMap)
         .map(LocationSample.fromMap)
         .asBroadcastStream();
@@ -87,22 +94,42 @@ final class NativeTrackerAdapter
   @override
   Stream<TrackerStatus> get statusStream => _statuses;
 
+  RouteRecordingDetail? _recordingDetail;
+
+  @override
+  void applyRecordingDetail(RouteRecordingDetail detail) {
+    _recordingDetail = detail;
+  }
+
   @override
   Future<void> initialize() async {
-    await _methodChannel.invokeMethod<Object?>('initialize');
+    // Native code without the `recording_detail_mode` capability ignores the
+    // argument.
+    final detail = _recordingDetail;
+    await _methodChannel.invokeMethod<Object?>(
+      'initialize',
+      detail == null ? null : <String, Object?>{'recordingDetail': detail.name},
+    );
   }
 
   @override
   Future<NativeTrackingProtocol> protocolInfo() async {
+    // The native binary's protocol cannot change while the process runs, and
+    // capability checks precede most native calls (each journal page, for
+    // example), so the answer is cached. Failures are not cached.
+    final cached = _protocol;
+    if (cached != null) return cached;
     try {
       final result = await _methodChannel.invokeMethod<Object?>(
         'getProtocolInfo',
       );
-      return NativeTrackingProtocol.fromMap(_nullableMap(result));
+      return _protocol = NativeTrackingProtocol.fromMap(_nullableMap(result));
     } on MissingPluginException {
-      return NativeTrackingProtocol.legacy();
+      return _protocol = NativeTrackingProtocol.legacy();
     }
   }
+
+  NativeTrackingProtocol? _protocol;
 
   @override
   Future<TrackingCapabilityReport> capabilities() async {
@@ -489,6 +516,26 @@ final class NativeTrackerAdapter
         message: error.message ?? 'Paged native pending locations failed.',
         cause: error.details,
       );
+    }
+  }
+
+  @override
+  Future<List<StepCounterDiagnostic>> stepCounterDiagnostics() async {
+    if (!(await protocolInfo()).supports(
+      NativeTrackingCapabilities.stepCounterDiagnostics,
+    )) {
+      return const <StepCounterDiagnostic>[];
+    }
+    try {
+      final result = await _methodChannel.invokeMethod<Object?>(
+        'getStepCounterDiagnostics',
+      );
+      if (result is! List) return const <StepCounterDiagnostic>[];
+      return List<StepCounterDiagnostic>.unmodifiable(
+        result.map(StepCounterDiagnostic.fromPayload).nonNulls,
+      );
+    } on MissingPluginException {
+      return const <StepCounterDiagnostic>[];
     }
   }
 

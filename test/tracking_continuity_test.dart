@@ -9,6 +9,69 @@ import 'test_support.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  group('continuity policy 4 (rule C1)', () {
+    const classifier = TrackingContinuityClassifier(policyVersion: 4);
+    TrackingContinuityEvidence evidence({
+      required bool? stay,
+      SamplingProfile profile = SamplingProfile.moving,
+      bool rejected = false,
+      String generation = 'generation-1',
+    }) =>
+        TrackingContinuityEvidence(
+          currentAcceptedForGeometry: true,
+          expectedTrackId: 'track-1',
+          currentTrackId: 'track-1',
+          previousCaptureGenerationId: 'generation-1',
+          currentCaptureGenerationId: generation,
+          nativeLifecycle: TrackerLifecycle.tracking,
+          samplingProfile: profile,
+          serviceHealthy: true,
+          permissionAndServiceAvailable: true,
+          hasInterveningRejectedFixes: rejected,
+          stayExplainsGap: stay,
+        );
+
+    test('a stationary profile stamp alone no longer hides a gap', () {
+      // One phone's profile turned stationary because fixes stopped: the
+      // same outage was hidden on it and visible on the other.
+      final decision = classifier.classify(
+        evidence(stay: false, profile: SamplingProfile.stationary),
+      );
+      expect(decision.cause, TrackingGapCause.unknown);
+      expect(decision.policyVersion, 4);
+    });
+
+    test('a stay that explains the gap makes it expected suppression', () {
+      expect(
+        classifier.classify(evidence(stay: true)).cause,
+        TrackingGapCause.expectedStationarySuppression,
+      );
+      expect(
+        classifier.classify(evidence(stay: true, rejected: true)).cause,
+        TrackingGapCause.expectedStationarySuppression,
+      );
+    });
+
+    test('without a stay decision version 3 applies unchanged', () {
+      expect(
+        classifier
+            .classify(
+              evidence(stay: null, profile: SamplingProfile.stationary),
+            )
+            .cause,
+        TrackingGapCause.expectedStationarySuppression,
+      );
+    });
+
+    test('a stay never hides a lifecycle boundary', () {
+      final decision = classifier.classify(
+        evidence(stay: true, generation: 'generation-2'),
+      );
+      expect(decision.treatment, TrackingGapTreatment.startNewSegment);
+      expect(decision.cause, TrackingGapCause.nativeInterruption);
+    });
+  });
+
   group('TrackingContinuityClassifier', () {
     test('uses positive capture evidence before fallback policy', () {
       const conservative = TrackingContinuityClassifier();
@@ -251,8 +314,12 @@ void main() {
       final clock = DeterministicTrackingClock(
         initialTime: DateTime.utc(2026, 8, 30, 12),
       );
+      // An explicit intent keeps quality policy 1 acceptance: under adaptive
+      // capture, quality policy 3 would hold this still device's fixes as a
+      // stop, which stop_site_pipeline_test.dart covers.
       final harness = RepositoryHarness(
         config: const TrackingConfig(
+          captureIntent: RouteCaptureIntent.walking,
           acceptedGeometryGapThreshold: Duration(minutes: 5),
           callbackHealthWarningThreshold: Duration(minutes: 2),
         ),
@@ -276,6 +343,7 @@ void main() {
           requestedTripId: 'synthetic_stationary_gap',
           routeId: 'synthetic_stationary_gap',
           config: TrackingConfig(
+            captureIntent: RouteCaptureIntent.walking,
             acceptedGeometryGapThreshold: Duration(minutes: 5),
             callbackHealthWarningThreshold: Duration(minutes: 2),
           ),

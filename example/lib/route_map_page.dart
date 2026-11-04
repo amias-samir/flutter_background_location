@@ -5,11 +5,55 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
+import 'route_totals.dart';
+
+/// Which version of a route the map draws.
+enum RouteView {
+  /// The route as the current rules decide it: the stored review of a route
+  /// recorded under older rules ([DerivedGeometryAlgorithm.routeQualityReview]).
+  reviewed('Reviewed', 'The fixes the current rules keep'),
+
+  /// The stored cleaned view, where each stop is one point.
+  cleaned('Cleaned', 'Each stop drawn as one point'),
+
+  /// The route as recorded.
+  raw('Raw', 'The route as recorded');
+
+  const RouteView(this.label, this.description);
+
+  final String label;
+  final String description;
+}
+
+/// A route as the map page draws it: [route] in [view], one of the [views]
+/// the route has, in the order the page offers them.
+final class RouteMapContent {
+  const RouteMapContent({
+    required this.route,
+    this.view = RouteView.raw,
+    this.views = const <RouteView>[RouteView.raw],
+  });
+
+  final RouteGeometry route;
+  final RouteView view;
+  final List<RouteView> views;
+}
+
 class TrackMapPage extends StatefulWidget {
-  const TrackMapPage({super.key, required this.tracking, required this.track});
+  const TrackMapPage({
+    super.key,
+    required this.tracking,
+    required this.track,
+    this.showDiagnostics = true,
+  });
 
   final Tracking tracking;
   final Track track;
+
+  /// Whether the page offers the route's views and continuity and draws
+  /// gaps and uncertain stretches; a clean build shows the clean route and
+  /// its stops only.
+  final bool showDiagnostics;
 
   @override
   State<TrackMapPage> createState() => _TrackMapPageState();
@@ -18,46 +62,155 @@ class TrackMapPage extends StatefulWidget {
 class _TrackMapPageState extends State<TrackMapPage> {
   var _continuity = RouteGeometryContinuity.mergeAutomaticCallbackGaps;
 
-  Future<RouteGeometry> _load() async {
-    final tracking = widget.tracking;
-    if (tracking is TrackingGeometryController) {
-      return RouteGeometry.fromReport(
-        await (tracking as TrackingGeometryController)
-            .assembleTrackRouteGeometry(
-              widget.track.id,
-              continuity: _continuity,
-            ),
-      );
-    }
-    final bundle = await tracking.loadTrackBundle(widget.track.id);
-    return RouteGeometry.fromReport(
-      const RouteGeometryAssembler().assemble(
-        sourceParts: bundle.segments.map(
-          (segment) => RouteGeometrySourcePart(
-            legNumber: 1,
-            segment: segment.segment,
-            points: segment.points,
-          ),
-        ),
-        continuity: _continuity,
-      ),
-    );
-  }
+  /// The view picked on the page; null draws the route's default view.
+  RouteView? _view;
 
   @override
   Widget build(BuildContext context) => _RouteMapScaffold(
     title: 'Recorded route',
+    showDiagnostics: widget.showDiagnostics,
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
-    future: _load(),
+    onViewChanged: (value) => setState(() => _view = value),
+    future: loadTrackMap(
+      widget.tracking,
+      widget.track.id,
+      continuity: _continuity,
+      view: _view,
+    ),
   );
 }
 
+/// Loads [trackId] for the map in [view] when the route has it, else in its
+/// first view: reviewed when it has a review, else cleaned when [tracking]
+/// can derive that, else as recorded.
+Future<RouteMapContent> loadTrackMap(
+  Tracking tracking,
+  String trackId, {
+  required RouteGeometryContinuity continuity,
+  RouteView? view,
+}) async {
+  // Reading a route's stops first also reviews it, when it completed under
+  // older rules.
+  final stops = tracking is TrackingStopController
+      ? await (tracking as TrackingStopController).listTrackStops(trackId)
+      : const <TrackStop>[];
+  if (tracking is! TrackingGeometryController) {
+    final bundle = await tracking.loadTrackBundle(trackId);
+    return RouteMapContent(
+      route: RouteGeometry.fromReport(
+        const RouteGeometryAssembler().assemble(
+          sourceParts: _sourceParts(bundle, legNumber: 1),
+          continuity: continuity,
+        ),
+        stops: stops,
+        totals: bundle.summary == null
+            ? null
+            : RouteTotals.ofRoute(bundle.summary!),
+      ),
+    );
+  }
+  final geometry = tracking as TrackingGeometryController;
+  final summaries = tracking is TrackingSummaryController
+      ? tracking as TrackingSummaryController
+      : null;
+  final review = await reviewRunOf(geometry, trackId);
+  final views = <RouteView>[
+    if (review != null) RouteView.reviewed,
+    if (summaries != null) RouteView.cleaned,
+    RouteView.raw,
+  ];
+  final shown = views.contains(view) ? view! : views.first;
+  final report = await geometry.assembleTrackRouteGeometry(
+    trackId,
+    continuity: continuity,
+  );
+  // The fixes the review keeps, at their recorded coordinates, with the
+  // reviewed stops. They join across segments by the stored gaps only: the
+  // facade does not expose the audit of legacy callback gaps.
+  final reviewed = shown == RouteView.reviewed
+      ? await geometry.loadTrackGeometry(
+          trackId,
+          geometry: TrackGeometrySelection.derived(review!.id),
+        )
+      : null;
+  final cleaned = shown == RouteView.cleaned
+      ? await cleanedCoordinates(geometry, summaries!, report)
+      : null;
+  return RouteMapContent(
+    view: shown,
+    views: views,
+    route: RouteGeometry.fromReport(
+      reviewed == null
+          ? report
+          : const RouteGeometryAssembler().assemble(
+              sourceParts: _sourceParts(reviewed, legNumber: 1),
+              gaps: report.gaps,
+              continuity: continuity,
+            ),
+      cleaned: cleaned,
+      stops: reviewed?.stops ?? stops,
+      // Read after cleaning, which stores the cleaned distance.
+      totals: summaries == null
+          ? null
+          : RouteTotals.ofRoute(await summaries.routeSummary(trackId)),
+    ),
+  );
+}
+
+/// Whether [tracking] can show the cleaned view.
+bool _canClean(Object tracking) =>
+    tracking is TrackingGeometryController &&
+    tracking is TrackingSummaryController;
+
+/// [trackId]'s stored review, or null when the route has none: it was
+/// recorded under the current rules, or is not reviewed yet.
+Future<DerivedGeometryRun?> reviewRunOf(
+  TrackingGeometryController geometry,
+  String trackId,
+) async => currentReviewRun(await geometry.listDerivedGeometry(trackId));
+
+/// The newest completed run of [runs] holding a route review
+/// ([DerivedGeometryAlgorithm.routeQualityReview]); null when there is none.
+DerivedGeometryRun? currentReviewRun(Iterable<DerivedGeometryRun> runs) {
+  DerivedGeometryRun? newest;
+  for (final run in runs) {
+    if (run.algorithm != DerivedGeometryAlgorithm.routeQualityReview ||
+        run.status != DerivedGeometryRunStatus.completed) {
+      continue;
+    }
+    if (newest == null || run.createdAt.isAfter(newest.createdAt)) {
+      newest = run;
+    }
+  }
+  return newest;
+}
+
+/// [bundle]'s segments as parts of day [legNumber].
+Iterable<RouteGeometrySourcePart> _sourceParts(
+  TrackBundle bundle, {
+  required int legNumber,
+}) => bundle.segments.map(
+  (segment) => RouteGeometrySourcePart(
+    legNumber: legNumber,
+    segment: segment.segment,
+    points: segment.points,
+  ),
+);
+
 class TripMapPage extends StatefulWidget {
-  const TripMapPage({super.key, required this.tracking, required this.trip});
+  const TripMapPage({
+    super.key,
+    required this.tracking,
+    required this.trip,
+    this.showDiagnostics = true,
+  });
 
   final MultiDayTripController tracking;
   final Trip trip;
+
+  /// As [TrackMapPage.showDiagnostics].
+  final bool showDiagnostics;
 
   @override
   State<TripMapPage> createState() => _TripMapPageState();
@@ -66,52 +219,161 @@ class TripMapPage extends StatefulWidget {
 class _TripMapPageState extends State<TripMapPage> {
   late RouteGeometryContinuity _continuity;
 
+  /// The view picked on the page; null draws the Trip's default view.
+  RouteView? _view;
+
   @override
   void initState() {
     super.initState();
     _continuity = widget.trip.routePresentation.geometryContinuity;
   }
 
-  Future<RouteGeometry> _load() async {
-    final results = await Future.wait<Object>(<Future<Object>>[
-      widget.tracking.assembleTripRouteGeometry(
-        widget.trip.id,
-        continuity: _continuity,
-      ),
-      widget.tracking.loadTripBundle(widget.trip.id),
-    ]);
-    return RouteGeometry.fromReport(
-      results[0] as RouteGeometryReport,
-      gaps: (results[1] as TripBundle).gaps,
-    );
-  }
-
   @override
   Widget build(BuildContext context) => _RouteMapScaffold(
     title: widget.trip.routeId ?? 'Multi-day Trip',
+    showDiagnostics: widget.showDiagnostics,
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
-    future: _load(),
+    onViewChanged: (value) => setState(() => _view = value),
+    future: loadTripMap(
+      widget.tracking,
+      widget.trip.id,
+      continuity: _continuity,
+      view: _view,
+    ),
   );
+}
+
+/// Loads [tripId] for the map in [view] when the Trip has it, else in its
+/// first view: reviewed when a day has a review, else cleaned when
+/// [tracking] can derive that, else as recorded. The reviewed view draws
+/// days without a review as recorded.
+Future<RouteMapContent> loadTripMap(
+  MultiDayTripController tracking,
+  String tripId, {
+  required RouteGeometryContinuity continuity,
+  RouteView? view,
+}) async {
+  final bundle = await tracking.loadTripBundle(tripId);
+  // Reading the days' stops first also reviews each day that completed
+  // under older rules.
+  final stops = tracking is TrackingStopController
+      ? await (tracking as TrackingStopController).listTripStops(tripId)
+      : const <TrackStop>[];
+  final geometry = tracking is TrackingGeometryController
+      ? tracking as TrackingGeometryController
+      : null;
+  final summaries = tracking is TrackingSummaryController
+      ? tracking as TrackingSummaryController
+      : null;
+  final reviews = <String, DerivedGeometryRun>{
+    if (geometry != null)
+      for (final leg in bundle.legs)
+        leg.trackId: ?await reviewRunOf(geometry, leg.trackId),
+  };
+  final views = <RouteView>[
+    if (reviews.isNotEmpty) RouteView.reviewed,
+    if (_canClean(tracking)) RouteView.cleaned,
+    RouteView.raw,
+  ];
+  final shown = views.contains(view) ? view! : views.first;
+  final RouteGeometryReport report;
+  var shownStops = stops;
+  if (shown == RouteView.reviewed) {
+    final parts = <RouteGeometrySourcePart>[];
+    final reviewedStops = <TrackStop>[];
+    for (final leg in bundle.legs) {
+      final review = reviews[leg.trackId];
+      final day = await geometry!.loadTrackGeometry(
+        leg.trackId,
+        geometry: review == null
+            ? const TrackGeometrySelection.raw()
+            : TrackGeometrySelection.derived(review.id),
+      );
+      parts.addAll(_sourceParts(day, legNumber: leg.legNumber));
+      reviewedStops.addAll(day.stops);
+    }
+    // As in [loadTrackMap], parts join by the stored gaps only.
+    report = const RouteGeometryAssembler().assemble(
+      sourceParts: parts,
+      gaps: bundle.gaps,
+      continuity: continuity,
+    );
+    shownStops = reviewedStops;
+  } else {
+    report = await tracking.assembleTripRouteGeometry(
+      tripId,
+      continuity: continuity,
+    );
+  }
+  final cleaned = shown == RouteView.cleaned
+      ? await cleanedCoordinates(geometry!, summaries!, report)
+      : null;
+  return RouteMapContent(
+    view: shown,
+    views: views,
+    route: RouteGeometry.fromReport(
+      report,
+      gaps: bundle.gaps,
+      cleaned: cleaned,
+      stops: shownStops,
+      // Read after cleaning, which stores the cleaned distances.
+      totals: summaries == null
+          ? null
+          : RouteTotals.ofTrip(await summaries.tripSummary(tripId)),
+    ),
+  );
+}
+
+/// Cleaned positions for every point of [report], by point ID, from each
+/// track's current cleaned view ([TrackingSummaryController.currentCleanedGeometry]).
+/// The recorded points never change.
+Future<Map<String, maplibre.LatLng>> cleanedCoordinates(
+  TrackingGeometryController geometry,
+  TrackingSummaryController summaries,
+  RouteGeometryReport report,
+) async {
+  final trackIds = <String>{
+    for (final part in report.parts)
+      for (final point in part.points) point.trackId,
+  };
+  final cleaned = <String, maplibre.LatLng>{};
+  for (final trackId in trackIds) {
+    final current = await summaries.currentCleanedGeometry(trackId);
+    final bundle = await geometry.loadTrackGeometry(
+      trackId,
+      geometry: TrackGeometrySelection.derived(current.id),
+    );
+    for (final segment in bundle.segments) {
+      for (final point in segment.points) {
+        cleaned[point.id] = maplibre.LatLng(point.latitude, point.longitude);
+      }
+    }
+  }
+  return cleaned;
 }
 
 class _RouteMapScaffold extends StatelessWidget {
   const _RouteMapScaffold({
     required this.title,
+    required this.showDiagnostics,
     required this.continuity,
     required this.onContinuityChanged,
+    required this.onViewChanged,
     required this.future,
   });
 
   final String title;
+  final bool showDiagnostics;
   final RouteGeometryContinuity continuity;
   final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
-  final Future<RouteGeometry> future;
+  final ValueChanged<RouteView> onViewChanged;
+  final Future<RouteMapContent> future;
 
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: Text(title)),
-    body: FutureBuilder<RouteGeometry>(
+    body: FutureBuilder<RouteMapContent>(
       future: future,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
@@ -120,84 +382,44 @@ class _RouteMapScaffold extends StatelessWidget {
         if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        final route = snapshot.requireData;
-        if (route.points.isEmpty) {
+        final content = snapshot.requireData;
+        final route = content.route;
+        // A review that keeps no fix still offers the recorded route.
+        if (route.points.isEmpty && content.view != RouteView.reviewed) {
           return const Center(child: Text('No accepted coordinates yet.'));
         }
         return Column(
           children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
-              child: Column(
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: Text(
-                          '${route.pointCount} points • '
-                          '${route.geometryPartCount} drawable part(s) • '
-                          '${route.gapCount} quality event(s) • '
-                          '${route.visibleGapCount} visible gap(s)',
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      PopupMenuButton<RouteGeometryContinuity>(
-                        tooltip: 'Route continuity',
-                        initialValue: continuity,
-                        onSelected: onContinuityChanged,
-                        itemBuilder: (_) =>
-                            const <PopupMenuEntry<RouteGeometryContinuity>>[
-                              PopupMenuItem(
-                                value: RouteGeometryContinuity
-                                    .preserveEvidenceSegments,
-                                child: Text('Keep parts separate'),
-                              ),
-                              PopupMenuItem(
-                                value: RouteGeometryContinuity.connectDailyLegs,
-                                child: Text('Connect days'),
-                              ),
-                              PopupMenuItem(
-                                value: RouteGeometryContinuity
-                                    .connectAllChronologicalPoints,
-                                child: Text('Connect all'),
-                              ),
-                            ],
-                        icon: const Icon(Icons.alt_route_rounded),
-                      ),
-                    ],
-                  ),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(switch (continuity) {
-                      RouteGeometryContinuity.preserveEvidenceSegments =>
-                        'Recorded daily and lifecycle parts stay separate.',
-                      RouteGeometryContinuity.connectDailyLegs =>
-                        'Only daily boundaries receive straight inferred connectors.',
-                      RouteGeometryContinuity.connectAllChronologicalPoints =>
-                        'All parts receive straight inferred connectors; inferred distance is excluded.',
-                      RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
-                        'Only proven automatic callback gaps are joined.',
-                    }, style: Theme.of(context).textTheme.bodySmall),
-                  ),
-                ],
-              ),
+            RouteMapHeader(
+              content: content,
+              showDiagnostics: showDiagnostics,
+              continuity: continuity,
+              onContinuityChanged: onContinuityChanged,
+              onViewChanged: onViewChanged,
             ),
             Expanded(
-              child: Stack(
-                children: <Widget>[
-                  Positioned.fill(
-                    child: TrackRouteMap(
-                      key: ValueKey<RouteGeometryContinuity>(continuity),
-                      route: route,
+              child: route.points.isEmpty
+                  ? const Center(child: Text('No accepted coordinates yet.'))
+                  : Stack(
+                      children: <Widget>[
+                        Positioned.fill(
+                          child: TrackRouteMap(
+                            key: ValueKey<(RouteGeometryContinuity, RouteView)>(
+                              (continuity, content.view),
+                            ),
+                            route: route,
+                            showDiagnostics: showDiagnostics,
+                          ),
+                        ),
+                        Positioned(
+                          left: 12,
+                          bottom: 12,
+                          child: _RouteEndpointLegend(
+                            showDiagnostics: showDiagnostics,
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  const Positioned(
-                    left: 12,
-                    bottom: 12,
-                    child: _RouteEndpointLegend(),
-                  ),
-                ],
-              ),
             ),
           ],
         );
@@ -206,10 +428,170 @@ class _RouteMapScaffold extends StatelessWidget {
   );
 }
 
+/// The route details above the map: what is drawn, the route's views, and
+/// the route database's totals.
+class RouteMapHeader extends StatelessWidget {
+  const RouteMapHeader({
+    super.key,
+    required this.content,
+    required this.continuity,
+    required this.onContinuityChanged,
+    required this.onViewChanged,
+    this.showDiagnostics = true,
+  });
+
+  final RouteMapContent content;
+
+  /// Whether the header offers views and continuity and shows the route's
+  /// point, part, quality event and visible gap counts.
+  final bool showDiagnostics;
+  final RouteGeometryContinuity continuity;
+  final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
+  final ValueChanged<RouteView> onViewChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final lines = routeTotalsLines(
+      content.route.totals,
+      cleaned: content.view == RouteView.cleaned,
+    );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  routeHeadline(
+                    content.route,
+                    showDiagnostics: showDiagnostics,
+                  ),
+                ),
+              ),
+              if (showDiagnostics) ...<Widget>[
+                const SizedBox(width: 8),
+                PopupMenuButton<RouteGeometryContinuity>(
+                  tooltip: 'Route continuity',
+                  initialValue: continuity,
+                  onSelected: onContinuityChanged,
+                  itemBuilder: (_) =>
+                      const <PopupMenuEntry<RouteGeometryContinuity>>[
+                        PopupMenuItem(
+                          value:
+                              RouteGeometryContinuity.preserveEvidenceSegments,
+                          child: Text('Keep parts separate'),
+                        ),
+                        PopupMenuItem(
+                          value: RouteGeometryContinuity.connectDailyLegs,
+                          child: Text('Connect days'),
+                        ),
+                        PopupMenuItem(
+                          value: RouteGeometryContinuity
+                              .connectAllChronologicalPoints,
+                          child: Text('Connect all'),
+                        ),
+                      ],
+                  icon: const Icon(Icons.alt_route_rounded),
+                ),
+              ],
+            ],
+          ),
+          if (showDiagnostics && content.views.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SegmentedButton<RouteView>(
+                showSelectedIcon: false,
+                segments: <ButtonSegment<RouteView>>[
+                  for (final view in content.views)
+                    ButtonSegment(
+                      value: view,
+                      label: Text(view.label),
+                      tooltip: view.description,
+                    ),
+                ],
+                selected: <RouteView>{content.view},
+                onSelectionChanged: (selection) =>
+                    onViewChanged(selection.first),
+              ),
+            ),
+          // The distance comes first: the main figure.
+          for (final (index, line) in lines.indexed)
+            Text(
+              line,
+              style: index == 0
+                  ? text.bodyMedium?.copyWith(fontWeight: FontWeight.w600)
+                  : text.bodySmall,
+            ),
+          if (showDiagnostics)
+            Text(switch (continuity) {
+              RouteGeometryContinuity.preserveEvidenceSegments =>
+                'Recorded daily and lifecycle parts stay separate.',
+              RouteGeometryContinuity.connectDailyLegs =>
+                'Only daily boundaries receive straight inferred connectors.',
+              RouteGeometryContinuity.connectAllChronologicalPoints =>
+                'All parts receive straight inferred connectors; inferred distance is excluded.',
+              RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
+                'Only proven automatic callback gaps are joined.',
+            }, style: text.bodySmall),
+        ],
+      ),
+    );
+  }
+}
+
+/// The map header's first line: the route database's count of stops and,
+/// with [showDiagnostics], what is drawn and its counts of quality events
+/// and visible gaps.
+String routeHeadline(RouteGeometry route, {bool showDiagnostics = true}) =>
+    <String>[
+      if (showDiagnostics) '${route.pointCount} points',
+      '${route.totals?.stopCount ?? route.stopMarkers.length} stop(s)',
+      if (showDiagnostics) '${route.geometryPartCount} drawable part(s)',
+      if (route.totals case final totals? when showDiagnostics) ...<String>[
+        '${totals.qualityEventCount} quality event(s)',
+        '${totals.visibleGapCount} visible gap(s)',
+      ],
+    ].join(' • ');
+
+/// The map header's distance and time lines, from the route database. The
+/// distance comes first: the corrected one once the route was reviewed,
+/// followed by the measured one ("recorded …") when the two differ as
+/// shown. The cleaned distance shows in the [cleaned] view.
+List<String> routeTotalsLines(RouteTotals? totals, {required bool cleaned}) {
+  if (totals == null) return const <String>[];
+  final cleanedMeters = totals.cleanedDistanceMeters;
+  final corrected = totals.correctedDistanceMeters;
+  final recorded = kilometres(totals.distanceMeters);
+  return <String>[
+    <String>[
+      'Distance ${kilometres(totals.displayDistanceMeters)}',
+      if (cleaned && cleanedMeters != null)
+        'cleaned ≈ ${kilometres(cleanedMeters)}',
+    ].join(' • '),
+    if (corrected != null && kilometres(corrected) != recorded)
+      'recorded $recorded',
+    <String>[
+      'Moving ${hoursMinutes(totals.moving)}',
+      'stopped ${hoursMinutes(totals.stopped)}',
+      ?totals.stepsText,
+    ].join(' • '),
+  ];
+}
+
 class TrackRouteMap extends StatefulWidget {
-  const TrackRouteMap({super.key, required this.route});
+  const TrackRouteMap({
+    super.key,
+    required this.route,
+    this.showDiagnostics = true,
+  });
 
   final RouteGeometry route;
+
+  /// Whether gaps and uncertain stretches are drawn.
+  final bool showDiagnostics;
 
   @override
   State<TrackRouteMap> createState() => _TrackRouteMapState();
@@ -221,6 +603,13 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
   bool _routeDrawn = false;
 
   @override
+  void dispose() {
+    _controller?.onCircleTapped.remove(_onCircleTapped);
+    _controller?.onSymbolTapped.remove(_onSymbolTapped);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => maplibre.MapLibreMap(
     styleString: maplibre.MapLibreStyles.openfreemapLiberty,
     initialCameraPosition: maplibre.CameraPosition(
@@ -229,6 +618,8 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     ),
     onMapCreated: (controller) {
       _controller = controller;
+      controller.onCircleTapped.add(_onCircleTapped);
+      controller.onSymbolTapped.add(_onSymbolTapped);
       unawaited(_drawRoute());
     },
     onStyleLoadedCallback: () {
@@ -251,7 +642,25 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         ),
       );
     }
-    for (final marker in widget.route.gapMarkers) {
+    // Stretches whose fixes zig-zag inside their own uncertainty: the route
+    // went somewhere here, but the positions can't say exactly where.
+    for (final stretch
+        in widget.showDiagnostics
+            ? widget.route.uncertainSegments
+            : const <List<maplibre.LatLng>>[]) {
+      await controller.addLine(
+        maplibre.LineOptions(
+          geometry: stretch,
+          lineColor: '#F9A825',
+          lineWidth: 4,
+          lineOpacity: 0.9,
+        ),
+      );
+    }
+    for (final marker
+        in widget.showDiagnostics
+            ? widget.route.gapMarkers
+            : const <maplibre.LatLng>[]) {
       await _drawCircle(
         controller,
         coordinate: marker,
@@ -259,6 +668,35 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         radius: 6,
         strokeWidth: 2,
       );
+    }
+    final stops = widget.route.stopMarkers;
+    for (var index = 0; index < stops.length; index += 1) {
+      final stop = stops[index];
+      final data = <String, dynamic>{_stopKey: index};
+      await _drawCircle(
+        controller,
+        coordinate: stop.coordinate,
+        color: '#1565C0',
+        radius: 7,
+        strokeWidth: 2,
+        data: data,
+      );
+      try {
+        await controller.addSymbol(
+          maplibre.SymbolOptions(
+            geometry: stop.coordinate,
+            textField: stopDurationLabel(stop.duration),
+            textSize: 12,
+            textOffset: const Offset(0, 1.4),
+            textColor: '#0D47A1',
+            textHaloColor: '#FFFFFF',
+            textHaloWidth: 1.5,
+          ),
+          data,
+        );
+      } on Object {
+        // A style without glyphs still shows the stop marker.
+      }
     }
     await _drawCircle(
       controller,
@@ -285,12 +723,29 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     );
   }
 
+  static const _stopKey = 'stop';
+
+  void _onCircleTapped(maplibre.Circle circle) => _showStop(circle.data);
+
+  void _onSymbolTapped(maplibre.Symbol symbol) => _showStop(symbol.data);
+
+  void _showStop(Map<dynamic, dynamic>? data) {
+    final index = data?[_stopKey];
+    if (!mounted || index is! int) return;
+    final stops = widget.route.stopMarkers;
+    if (index >= stops.length) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(describeStop(stops[index]))));
+  }
+
   Future<void> _drawCircle(
     maplibre.MapLibreMapController controller, {
     required maplibre.LatLng coordinate,
     required String color,
     required double radius,
     double strokeWidth = 3,
+    Map<String, dynamic>? data,
   }) async {
     await controller.addCircle(
       maplibre.CircleOptions(
@@ -300,12 +755,29 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         circleStrokeColor: '#FFFFFF',
         circleStrokeWidth: strokeWidth,
       ),
+      data,
     );
   }
 }
 
+/// How long a stop lasted, as drawn beside its marker.
+String stopDurationLabel(Duration duration) => duration.inMinutes >= 60
+    ? '${duration.inHours} h ${duration.inMinutes % 60} min'
+    : '${math.max(1, duration.inMinutes)} min';
+
+/// What a tap on a stop shows: how long it lasted and when, in local time.
+String describeStop(RouteStopMarker stop) {
+  final length = stopDurationLabel(stop.duration);
+  return stop.current
+      ? 'Stopped $length so far, since ${clockTime(stop.startedAt)}'
+      : 'Stopped $length, '
+            '${clockTime(stop.startedAt)}–${clockTime(stop.endedAt)}';
+}
+
 class _RouteEndpointLegend extends StatelessWidget {
-  const _RouteEndpointLegend();
+  const _RouteEndpointLegend({required this.showDiagnostics});
+
+  final bool showDiagnostics;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -314,12 +786,20 @@ class _RouteEndpointLegend extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: const <Widget>[
-          _LegendItem(color: Color(0xFFD32F2F), label: 'Start'),
-          SizedBox(width: 12),
-          _LegendItem(color: Color(0xFFF57C00), label: 'Gap'),
-          SizedBox(width: 12),
-          _LegendItem(color: Color(0xFF2E7D32), label: 'Destination'),
+        children: <Widget>[
+          const _LegendItem(color: Color(0xFFD32F2F), label: 'Start'),
+          const SizedBox(width: 12),
+          if (showDiagnostics) ...const <Widget>[
+            _LegendItem(color: Color(0xFFF57C00), label: 'Gap'),
+            SizedBox(width: 12),
+          ],
+          const _LegendItem(color: Color(0xFF1565C0), label: 'Stop'),
+          const SizedBox(width: 12),
+          if (showDiagnostics) ...const <Widget>[
+            _LegendItem(color: Color(0xFFF9A825), label: 'Uncertain'),
+            SizedBox(width: 12),
+          ],
+          const _LegendItem(color: Color(0xFF2E7D32), label: 'Destination'),
         ],
       ),
     ),
@@ -354,6 +834,36 @@ class _LegendItem extends StatelessWidget {
   );
 }
 
+/// A stop drawn as one marker: where it was and how long it lasted.
+class RouteStopMarker {
+  const RouteStopMarker({
+    required this.coordinate,
+    required this.startedAt,
+    required this.endedAt,
+    this.current = false,
+  });
+
+  /// A stop as the route database stores it.
+  RouteStopMarker.fromStop(TrackStop stop)
+    : this(
+        coordinate: maplibre.LatLng(stop.latitude, stop.longitude),
+        startedAt: stop.startedAt,
+        endedAt: stop.endedAt ?? stop.lastSeenAt,
+        current: stop.isOpen,
+      );
+
+  final maplibre.LatLng coordinate;
+  final DateTime startedAt;
+
+  /// When the stay ended, or its newest fix while it is [current].
+  final DateTime endedAt;
+
+  /// Whether the stop is still in progress.
+  final bool current;
+
+  Duration get duration => endedAt.difference(startedAt);
+}
+
 class RouteGeometry {
   const RouteGeometry({
     required this.segments,
@@ -365,19 +875,31 @@ class RouteGeometry {
     required this.geometryPartCount,
     required this.gapCount,
     required this.inferredConnectorCount,
+    this.stopMarkers = const <RouteStopMarker>[],
+    this.uncertainSegments = const <List<maplibre.LatLng>>[],
+    this.totals,
   });
 
   final List<List<maplibre.LatLng>> segments;
   final List<maplibre.LatLng> points;
+
+  /// Gaps the route database marks visible, and inferred connectors.
   final List<maplibre.LatLng> gapMarkers;
+
+  /// The route's stops as the route database stores them, one per visit.
+  final List<RouteStopMarker> stopMarkers;
+
+  /// Low-confidence stretches drawn over [segments].
+  final List<List<maplibre.LatLng>> uncertainSegments;
+
+  /// The route database's totals; null when the facade keeps none.
+  final RouteTotals? totals;
   final maplibre.LatLngBounds bounds;
   final maplibre.LatLng center;
   final int pointCount;
   final int geometryPartCount;
   final int gapCount;
   final int inferredConnectorCount;
-
-  int get visibleGapCount => gapMarkers.length;
 
   maplibre.LatLng get start => points.first;
   maplibre.LatLng get destination => points.last;
@@ -386,27 +908,39 @@ class RouteGeometry {
       start.latitude != destination.latitude ||
       start.longitude != destination.longitude;
 
+  /// Builds map geometry from [report], drawn at [cleaned] positions when
+  /// given. Stops are the stored [stops]; a gap is marked when the route
+  /// database marks it visible ([TrackingContinuityGap.isVisible]), so a stop
+  /// or pause is never a gap.
   factory RouteGeometry.fromReport(
     RouteGeometryReport report, {
     Iterable<TrackingContinuityGap>? gaps,
+    Map<String, maplibre.LatLng>? cleaned,
+    Iterable<TrackStop> stops = const <TrackStop>[],
+    RouteTotals? totals,
   }) {
     final all = <maplibre.LatLng>[];
     final pointCoordinates = <String, maplibre.LatLng>{};
     final segments = <List<maplibre.LatLng>>[];
+    final uncertain = <List<maplibre.LatLng>>[];
     for (final part in report.parts) {
-      final coordinates = <maplibre.LatLng>[];
-      for (final point in part.points.where(_valid)) {
-        final coordinate = maplibre.LatLng(point.latitude, point.longitude);
-        coordinates.add(coordinate);
-        all.add(coordinate);
-        pointCoordinates[point.id] = coordinate;
+      final valid = part.points.where(_valid).toList();
+      final coordinates = <maplibre.LatLng>[
+        for (final point in valid)
+          cleaned?[point.id] ??
+              maplibre.LatLng(point.latitude, point.longitude),
+      ];
+      for (var index = 0; index < valid.length; index += 1) {
+        all.add(coordinates[index]);
+        pointCoordinates[valid[index].id] = coordinates[index];
       }
       if (coordinates.length >= 2) segments.add(coordinates);
+      uncertain.addAll(_uncertainStretches(valid, coordinates));
     }
     final markers = <maplibre.LatLng>[];
     final representedBoundaries = <String>{};
     for (final gap in gaps ?? report.gaps) {
-      if (!_isVisibleGap(gap)) continue;
+      if (!gap.isVisible) continue;
       final beforeId = gap.beforePointId;
       final before = beforeId == null ? null : pointCoordinates[beforeId];
       final after = pointCoordinates[gap.afterPointId];
@@ -430,21 +964,85 @@ class RouteGeometry {
       geometryPartCount: report.geometryPartCount,
       gapCount: report.gapCount,
       inferredConnectorCount: report.inferredConnectorCount,
+      stopMarkers: <RouteStopMarker>[
+        for (final stop in stops) RouteStopMarker.fromStop(stop),
+      ]..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
+      uncertainSegments: uncertain,
+      totals: totals,
     );
   }
 
-  factory RouteGeometry.fromBundle(TrackBundle bundle) {
-    final report = const RouteGeometryAssembler().assemble(
-      sourceParts: bundle.segments.map(
-        (segment) => RouteGeometrySourcePart(
-          legNumber: 1,
-          segment: segment.segment,
-          points: segment.points,
-        ),
-      ),
-    );
-    return RouteGeometry.fromReport(report);
+  /// Stretches of five or more fixes, at least 30 s long, that zig-zag
+  /// inside their own uncertainty: little net progress for the path drawn.
+  static List<List<maplibre.LatLng>> _uncertainStretches(
+    List<TrackPoint> points,
+    List<maplibre.LatLng> coordinates,
+  ) {
+    const window = 5;
+    final flagged = List<bool>.filled(points.length, false);
+    for (var start = 0; start + window <= points.length; start += 1) {
+      final members = points.sublist(start, start + window);
+      if (members.last.capturedAt.difference(members.first.capturedAt) <
+          const Duration(seconds: 30)) {
+        continue;
+      }
+      var path = 0.0;
+      for (var index = 1; index < members.length; index += 1) {
+        path += _meters(members[index - 1], members[index]);
+      }
+      final net = _meters(members.first, members.last);
+      final sigmas =
+          members
+              .map(
+                (point) =>
+                    math.max(1.5, (point.horizontalAccuracy ?? 20) / 1.51),
+              )
+              .toList()
+            ..sort();
+      final sigma = sigmas[sigmas.length ~/ 2];
+      if (net <= 2 * math.sqrt2 * sigma + 5 && path >= 2 * net + 10) {
+        flagged.fillRange(start, start + window, true);
+      }
+    }
+    final stretches = <List<maplibre.LatLng>>[];
+    var current = <maplibre.LatLng>[];
+    for (var index = 0; index < points.length; index += 1) {
+      if (flagged[index]) {
+        current.add(coordinates[index]);
+      } else if (current.isNotEmpty) {
+        if (current.length >= 2) stretches.add(current);
+        current = <maplibre.LatLng>[];
+      }
+    }
+    if (current.length >= 2) stretches.add(current);
+    return stretches;
   }
+
+  static double _meters(TrackPoint from, TrackPoint to) => _distanceMeters(
+    maplibre.LatLng(from.latitude, from.longitude),
+    maplibre.LatLng(to.latitude, to.longitude),
+  );
+
+  static double _distanceMeters(maplibre.LatLng from, maplibre.LatLng to) {
+    const earthRadiusMeters = 6371008.8;
+    final phi1 = from.latitude * math.pi / 180;
+    final phi2 = to.latitude * math.pi / 180;
+    final deltaPhi = phi2 - phi1;
+    final deltaLambda = (to.longitude - from.longitude) * math.pi / 180;
+    final h =
+        math.pow(math.sin(deltaPhi / 2), 2) +
+        math.cos(phi1) *
+            math.cos(phi2) *
+            math.pow(math.sin(deltaLambda / 2), 2);
+    return 2 * earthRadiusMeters * math.asin(math.min(1, math.sqrt(h)));
+  }
+
+  factory RouteGeometry.fromBundle(TrackBundle bundle) =>
+      RouteGeometry.fromReport(
+        const RouteGeometryAssembler().assemble(
+          sourceParts: _sourceParts(bundle, legNumber: 1),
+        ),
+      );
 
   static RouteGeometry _create({
     required List<List<maplibre.LatLng>> segments,
@@ -453,6 +1051,10 @@ class RouteGeometry {
     required int geometryPartCount,
     required int gapCount,
     required int inferredConnectorCount,
+    List<RouteStopMarker> stopMarkers = const <RouteStopMarker>[],
+    List<List<maplibre.LatLng>> uncertainSegments =
+        const <List<maplibre.LatLng>>[],
+    RouteTotals? totals,
   }) {
     final bounds = _bounds(points);
     return RouteGeometry(
@@ -468,6 +1070,9 @@ class RouteGeometry {
       geometryPartCount: geometryPartCount,
       gapCount: gapCount,
       inferredConnectorCount: inferredConnectorCount,
+      stopMarkers: stopMarkers,
+      uncertainSegments: uncertainSegments,
+      totals: totals,
     );
   }
 
@@ -487,21 +1092,6 @@ class RouteGeometry {
       point.latitude <= 90 &&
       point.longitude >= -180 &&
       point.longitude <= 180;
-
-  static bool _isVisibleGap(TrackingContinuityGap gap) {
-    if (gap.cause == TrackingGapCause.explicitPause ||
-        gap.cause == TrackingGapCause.nativeInterruption ||
-        gap.cause == TrackingGapCause.processRestart ||
-        gap.cause == TrackingGapCause.permissionOrServiceLoss ||
-        gap.cause == TrackingGapCause.overnightBoundary) {
-      return true;
-    }
-    // Same-segment rejected-fix runs are quality diagnostics, not lifecycle
-    // breaks. Show only severe automatic gaps so normal urban uncertainty does
-    // not cover an otherwise continuous route with orange markers.
-    return (gap.providerGap ?? Duration.zero) >= const Duration(seconds: 60) ||
-        (gap.straightLineDistanceMeters ?? 0) >= 150;
-  }
 
   static maplibre.LatLngBounds _bounds(List<maplibre.LatLng> points) {
     if (points.isEmpty) {

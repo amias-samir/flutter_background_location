@@ -26,6 +26,7 @@ final class TrackingQualitySummary {
     this.acceptedAccuracyP95Meters,
     this.rejectedAccuracyP50Meters,
     this.rejectedAccuracyP95Meters,
+    this.stopEvidenceRunCount = 0,
   });
 
   /// All persisted provider callbacks, whether accepted or rejected.
@@ -42,6 +43,12 @@ final class TrackingQualitySummary {
 
   /// Quality runs whose severity warrants a visible marker.
   final int visibleQualityRunCount;
+
+  /// Quality runs made only of stop evidence: fixes a stop hold kept out of
+  /// the route, or rejected while a stay was current. They are expected, not
+  /// quality problems; [qualityRunCount] less this is the number of runs
+  /// worth a look.
+  final int stopEvidenceRunCount;
 
   /// Durable topology/continuity decisions.
   final int continuityGapCount;

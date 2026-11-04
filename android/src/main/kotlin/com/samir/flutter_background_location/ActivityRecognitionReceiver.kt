@@ -78,32 +78,29 @@ class ActivityRecognitionReceiver : BroadcastReceiver() {
         )
         if (!store.acceptsActivityRecognitionEvent(trackId, generation)) return
 
-        val serviceIntent = Intent(context, LocationTrackingService::class.java).apply {
-            action = LocationTrackingService.ACTION_ACTIVITY_UPDATE
-            putExtra(LocationTrackingService.EXTRA_TRACK_ID, trackId)
-            putExtra(LocationTrackingService.EXTRA_ACTIVITY_GENERATION, generation)
-            putExtra(LocationTrackingService.EXTRA_ACTIVITY_TYPE, activity.type)
-            putExtra(LocationTrackingService.EXTRA_ACTIVITY_CONFIDENCE, activity.confidence)
-            putExtra(
-                LocationTrackingService.EXTRA_ACTIVITY_SOURCE,
-                "android_activity_recognition",
-            )
-            putExtra(
-                LocationTrackingService.EXTRA_ACTIVITY_PROBABILITIES,
-                JSONObject(probabilities as Map<*, *>).toString(),
-            )
-            putExtra(
-                LocationTrackingService.EXTRA_ACTIVITY_TIMESTAMP,
-                result.time.takeIf { it > 0L } ?: System.currentTimeMillis(),
-            )
-        }
-
-        runCatching { ContextCompat.startForegroundService(context, serviceIntent) }
+        deliver(
+            context = context,
+            trackId = trackId,
+            generation = generation,
+            activityType = activity.type,
+            confidence = activity.confidence,
+            timestamp = result.time.takeIf { it > 0L } ?: System.currentTimeMillis(),
+            probabilitiesJson = JSONObject(probabilities as Map<*, *>).toString(),
+            source = "android_activity_recognition",
+            episodeStartedAt = null,
+        )
     }
 
+    /**
+     * Delivers every transition of one result, oldest first. A transition is
+     * observed when it is delivered, so its freshness is measured from
+     * receipt; the transition time is kept as `episodeStartedAt`. Reporting
+     * the transition time itself made a late ENTER look stale and lose to the
+     * newest periodic sample.
+     */
     private fun deliverTransition(context: Context, intent: Intent) {
         val result = ActivityTransitionResult.extractResult(intent) ?: return
-        val event = result.transitionEvents.lastOrNull() ?: return
+        if (result.transitionEvents.isEmpty()) return
         val store = TrackingStateStore(context)
         val trackId = intent.getStringExtra(LocationTrackingService.EXTRA_TRACK_ID)
         val generation = intent.getLongExtra(
@@ -111,21 +108,65 @@ class ActivityRecognitionReceiver : BroadcastReceiver() {
             0L,
         )
         if (!store.acceptsActivityRecognitionEvent(trackId, generation)) return
-        val elapsedAgeNanos =
-            (SystemClock.elapsedRealtimeNanos() - event.elapsedRealTimeNanos).coerceAtLeast(0L)
-        val timestamp = System.currentTimeMillis() - elapsedAgeNanos / 1_000_000L
-        val isEnter = event.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER
+        val receivedAt = System.currentTimeMillis()
+        val nowElapsedNanos = SystemClock.elapsedRealtimeNanos()
+        for (event in result.transitionEvents.sortedBy { it.elapsedRealTimeNanos }) {
+            val elapsedAgeNanos = (nowElapsedNanos - event.elapsedRealTimeNanos).coerceAtLeast(0L)
+            val isEnter = event.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER
+            deliver(
+                context = context,
+                trackId = trackId,
+                generation = generation,
+                activityType = event.activityType,
+                confidence = if (isEnter) 100 else 0,
+                timestamp = receivedAt,
+                probabilitiesJson = null,
+                source = "android_activity_transition",
+                episodeStartedAt = receivedAt - elapsedAgeNanos / 1_000_000L,
+            )
+        }
+    }
+
+    /**
+     * Hands a result to the running service in process; starts the service
+     * only when capture is not running.
+     */
+    private fun deliver(
+        context: Context,
+        trackId: String?,
+        generation: Long,
+        activityType: Int,
+        confidence: Int,
+        timestamp: Long,
+        probabilitiesJson: String?,
+        source: String,
+        episodeStartedAt: Long?,
+    ) {
+        val handled = LocationTrackingService.liveService?.deliverActivityInProcess(
+            trackId = trackId,
+            generation = generation,
+            activityType = activityType,
+            confidence = confidence,
+            timestamp = timestamp,
+            probabilitiesJson = probabilitiesJson,
+            source = source,
+            episodeStartedAt = episodeStartedAt,
+        ) == true
+        if (handled) return
         val serviceIntent = Intent(context, LocationTrackingService::class.java).apply {
             action = LocationTrackingService.ACTION_ACTIVITY_UPDATE
             putExtra(LocationTrackingService.EXTRA_TRACK_ID, trackId)
             putExtra(LocationTrackingService.EXTRA_ACTIVITY_GENERATION, generation)
-            putExtra(LocationTrackingService.EXTRA_ACTIVITY_TYPE, event.activityType)
-            putExtra(LocationTrackingService.EXTRA_ACTIVITY_CONFIDENCE, if (isEnter) 100 else 0)
+            putExtra(LocationTrackingService.EXTRA_ACTIVITY_TYPE, activityType)
+            putExtra(LocationTrackingService.EXTRA_ACTIVITY_CONFIDENCE, confidence)
             putExtra(LocationTrackingService.EXTRA_ACTIVITY_TIMESTAMP, timestamp)
-            putExtra(
-                LocationTrackingService.EXTRA_ACTIVITY_SOURCE,
-                "android_activity_transition",
-            )
+            putExtra(LocationTrackingService.EXTRA_ACTIVITY_SOURCE, source)
+            probabilitiesJson?.let {
+                putExtra(LocationTrackingService.EXTRA_ACTIVITY_PROBABILITIES, it)
+            }
+            episodeStartedAt?.let {
+                putExtra(LocationTrackingService.EXTRA_ACTIVITY_EPISODE_STARTED_AT, it)
+            }
         }
         runCatching { ContextCompat.startForegroundService(context, serviceIntent) }
     }

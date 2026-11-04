@@ -17,6 +17,9 @@ import '../domain/track_point.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../storage/track_repository.dart';
+import 'export_diagnostics.dart';
+import 'export_stops.dart';
+import 'export_summary.dart';
 
 abstract interface class ExportFileWriter {
   Future<String> write({
@@ -159,16 +162,23 @@ final class TrackExportService {
   final TrackRepository repository;
   final ExportFileWriter fileWriter;
 
+  /// Writes [trackId] as [format].
+  ///
+  /// With [bundle], renders that already loaded bundle instead of reading the
+  /// raw route, such as derived coordinates an owner-scoped caller loaded for
+  /// a derived [TrackExportOptions.geometry].
   Future<TrackExportResult> exportTrack({
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
     String? fileName,
+    TrackBundle? bundle,
   }) async {
     final artifact = await renderTrack(
       trackId: trackId,
       format: format,
       options: options,
+      bundle: bundle,
     );
     final exportName = resolveExportFileName(
       format: format,
@@ -196,18 +206,27 @@ final class TrackExportService {
     );
   }
 
+  /// Renders [trackId] as [format]; see [exportTrack] for [bundle].
   Future<TrackExportArtifact> renderTrack({
     required String trackId,
     required TrackExportFormat format,
     TrackExportOptions options = const TrackExportOptions(),
+    TrackBundle? bundle,
   }) async {
-    if (options.geometry is DerivedTrackGeometry) {
+    if (options.geometry is DerivedTrackGeometry &&
+        options.includeRejectedPoints) {
+      throw const TrackingStorageException(
+        code: 'derived_geometry_rejected_points_unsupported',
+        message: 'Derived exports cannot include rejected raw points.',
+      );
+    }
+    if (options.geometry is DerivedTrackGeometry && bundle == null) {
       throw const TrackingStorageException(
         code: 'derived_geometry_requires_v2_export',
         message: 'Use owner-scoped exportTrackV2 for derived geometry.',
       );
     }
-    final bundle = await repository.loadTrackBundle(trackId);
+    bundle ??= await repository.loadTrackBundle(trackId);
     if (bundle.track.status != TrackStatus.completed &&
         !options.allowIncompleteTrackSnapshot) {
       throw StateError('Only completed tracks can be exported.');
@@ -303,7 +322,7 @@ final class TrackExportService {
     final features = <Map<String, Object?>>[
       <String, Object?>{
         'type': 'Feature',
-        'properties': _trackProperties(bundle.track, options, report),
+        'properties': _trackProperties(bundle, options, report),
         'geometry': _geoJsonRouteGeometry(lines),
       },
     ];
@@ -321,6 +340,13 @@ final class TrackExportService {
         },
         'geometry': null,
       });
+    }
+    if (options.includeStops) {
+      for (final stop in bundle.stops) {
+        features.add(
+          stopGeoJsonFeature(stop, (time) => _formatTime(time, options)),
+        );
+      }
     }
     if (options.includeGeoJsonPointFeatures) {
       for (final points in selectedSegmentPoints) {
@@ -396,7 +422,8 @@ final class TrackExportService {
             builder.element(
               'Data',
               attributes: const <String, String>{'name': 'geometrySource'},
-              nest: () => builder.element('value', nest: 'raw'),
+              nest: () =>
+                  builder.element('value', nest: _geometrySource(options)),
             );
             builder.element(
               'Data',
@@ -406,6 +433,16 @@ final class TrackExportService {
                 nest: report.continuity.name,
               ),
             );
+            for (final MapEntry(:key, :value) in routeSummaryFields(
+              bundle.summary,
+              evidence: exportsEvidence(bundle.track),
+            ).entries) {
+              builder.element(
+                'Data',
+                attributes: <String, String>{'name': key},
+                nest: () => builder.element('value', nest: '$value'),
+              );
+            }
           });
           for (var index = 0; index < segmentPoints.length; index += 1) {
             final points = segmentPoints[index];
@@ -454,6 +491,38 @@ final class TrackExportService {
               });
             });
           }
+          if (options.includeStops) {
+            for (final stop in bundle.stops) {
+              final fields =
+                  stopExportFields(stop, (time) => _formatTime(time, options));
+              builder.element('Placemark', nest: () {
+                builder.element('name', nest: 'Stop');
+                builder.element('description', nest: stopDescription(stop));
+                builder.element('TimeSpan', nest: () {
+                  builder.element('begin', nest: fields['startedAt']);
+                  if (fields['endedAt'] case final endedAt?) {
+                    builder.element('end', nest: endedAt);
+                  }
+                });
+                builder.element('ExtendedData', nest: () {
+                  for (final MapEntry(:key, :value) in fields.entries) {
+                    builder.element(
+                      'Data',
+                      attributes: <String, String>{'name': key},
+                      nest: () => builder.element('value', nest: '$value'),
+                    );
+                  }
+                });
+                builder.element('Point', nest: () {
+                  builder.element(
+                    'coordinates',
+                    nest: '${_coordinate(stop.longitude)},'
+                        '${_coordinate(stop.latitude)}',
+                  );
+                });
+              });
+            }
+          }
         });
       },
     );
@@ -501,7 +570,44 @@ final class TrackExportService {
             nest: _formatTime(bundle.track.startedAt, options),
           );
           builder.element('desc', nest: report.continuity.name);
+          final summary = routeSummaryFields(
+            bundle.summary,
+            evidence: exportsEvidence(bundle.track),
+          );
+          if (summary.isNotEmpty) {
+            builder.element('extensions', nest: () {
+              for (final MapEntry(:key, :value) in summary.entries) {
+                builder.element('fbl:$key', nest: '$value');
+              }
+            });
+          }
         });
+        if (options.includeStops) {
+          // GPX 1.1 orders waypoints before tracks.
+          for (final stop in bundle.stops) {
+            final fields =
+                stopExportFields(stop, (time) => _formatTime(time, options));
+            builder.element(
+              'wpt',
+              attributes: <String, String>{
+                'lat': _coordinate(stop.latitude),
+                'lon': _coordinate(stop.longitude),
+              },
+              nest: () {
+                builder.element('time', nest: fields['startedAt']);
+                builder.element('name', nest: 'Stop');
+                builder.element('desc', nest: stopDescription(stop));
+                builder.element('type', nest: 'stop');
+                builder.element('extensions', nest: () {
+                  for (final MapEntry(:key, :value) in fields.entries) {
+                    if (key == 'featureType') continue;
+                    builder.element('fbl:$key', nest: '$value');
+                  }
+                });
+              },
+            );
+          }
+        }
         builder.element('trk', nest: () {
           builder.element('name', nest: _trackName(bundle.track));
           if (report.inferredConnectors.isNotEmpty) {
@@ -510,7 +616,9 @@ final class TrackExportService {
                 'fbl:geometryContinuity',
                 nest: report.continuity.name,
               );
-              for (final connector in report.inferredConnectors) {
+              for (final connector in exportsEvidence(bundle.track)
+                  ? report.inferredConnectors
+                  : const <InferredRouteConnector>[]) {
                 builder.element('fbl:gap', attributes: <String, String>{
                   'cause': connector.cause.name,
                   'beforePointId': connector.beforePointId,
@@ -560,6 +668,12 @@ final class TrackExportService {
                             nest: point.activityConfidence.toString(),
                           );
                         }
+                        if (options.includeDiagnosticProperties) {
+                          for (final MapEntry(:key, :value)
+                              in diagnosticPointProperties(point).entries) {
+                            builder.element('fbl:$key', nest: '$value');
+                          }
+                        }
                       });
                     }
                   },
@@ -605,28 +719,48 @@ final class TrackExportService {
       point.longitude <= 180;
 
   static Map<String, Object?> _trackProperties(
-    Track track,
+    TrackBundle bundle,
     TrackExportOptions options,
     RouteGeometryReport report,
-  ) =>
-      <String, Object?>{
-        'trackId': track.id,
-        'routeId': track.routeId,
-        'startedAt': track.startedAt.toUtc().toIso8601String(),
-        'completedAt': track.endedAt?.toUtc().toIso8601String(),
-        'status': track.status.name,
-        'segmentCount': track.segmentCount,
-        'acceptedPointCount': track.acceptedPointCount,
-        'rejectedPointCount': track.rejectedPointCount,
-        'distanceMeters': track.totalDistanceMeters,
-        'geometrySource': 'raw',
-        'geometryContinuity': report.continuity.name,
-        'sourceSegmentCount': report.sourceSegmentCount,
-        'geometryPartCount': report.geometryPartCount,
-        'gapCount': report.gapCount,
-        'inferredConnectorCount': report.inferredConnectorCount,
-        'hasInferredConnectors': report.hasInferredConnectors,
+  ) {
+    final track = bundle.track;
+    final evidence = exportsEvidence(track);
+    return <String, Object?>{
+      'trackId': track.id,
+      'routeId': track.routeId,
+      'startedAt': track.startedAt.toUtc().toIso8601String(),
+      'completedAt': track.endedAt?.toUtc().toIso8601String(),
+      'status': track.status.name,
+      'segmentCount': track.segmentCount,
+      'acceptedPointCount': track.acceptedPointCount,
+      if (evidence) 'rejectedPointCount': track.rejectedPointCount,
+      'distanceMeters': _distanceMeters(bundle, options),
+      'geometrySource': _geometrySource(options),
+      'geometryContinuity': report.continuity.name,
+      'sourceSegmentCount': report.sourceSegmentCount,
+      'geometryPartCount': report.geometryPartCount,
+      if (evidence) 'gapCount': report.gapCount,
+      'inferredConnectorCount': report.inferredConnectorCount,
+      'hasInferredConnectors': report.hasInferredConnectors,
+      ...routeSummaryFields(bundle.summary, evidence: evidence),
+    };
+  }
+
+  /// `raw`, or `derived:<run-id>` for a derived-geometry export.
+  static String _geometrySource(TrackExportOptions options) =>
+      switch (options.geometry) {
+        DerivedTrackGeometry(:final runId) => 'derived:$runId',
+        _ => 'raw',
       };
+
+  /// The measured distance, or the derived geometry's own length.
+  static double _distanceMeters(
+    TrackBundle bundle,
+    TrackExportOptions options,
+  ) =>
+      options.geometry is DerivedTrackGeometry
+          ? acceptedPathMeters(bundle)
+          : bundle.track.totalDistanceMeters;
 
   static Map<String, Object?> _pointProperties(
     TrackPoint point,
@@ -651,6 +785,8 @@ final class TrackExportService {
           'activityConfidence': point.activityConfidence,
           'motionState': point.motionState.name,
         },
+        if (options.includeDiagnosticProperties)
+          ...diagnosticPointProperties(point),
       };
 
   static void _kmlExtendedData(
@@ -698,16 +834,11 @@ final class TrackExportService {
     List<List<TrackPoint>> segments,
     RouteGeometryReport report,
   ) {
-    final date =
-        bundle.track.startedAt.toUtc().toIso8601String().split('T').first;
-    final safeId = (bundle.track.routeId ?? bundle.track.id).replaceAll(
-      RegExp(r'[^A-Za-z0-9_-]'),
-      '_',
-    );
+    final name = defaultRouteExportName(bundle.track, extension);
     return TrackExportArtifact(
       trackId: bundle.track.id,
       format: format,
-      fileName: 'track_${date}_$safeId.$extension',
+      fileName: name,
       mimeType: mimeType,
       contents: contents,
       pointCount: segments.fold<int>(0, (sum, points) => sum + points.length),
@@ -722,6 +853,19 @@ final class TrackExportService {
 
   static String _trackName(Track track) =>
       track.routeId == null ? 'Track ${track.id}' : 'Route ${track.routeId}';
+}
+
+/// Default export name, using the route identifier when one is available.
+String defaultRouteExportName(Track track, String extension) {
+  final routeName = track.routeId?.trim();
+  final base =
+      routeName == null || routeName.isEmpty ? 'track_${track.id}' : routeName;
+  final safe = base.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_');
+  try {
+    return '${sanitizeExportFileName(safe)}.$extension';
+  } on ArgumentError {
+    return '${sanitizeExportFileName('track_${track.id}')}.$extension';
+  }
 }
 
 String resolveExportFileName({

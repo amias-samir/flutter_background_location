@@ -73,10 +73,14 @@ variables.
 - Mock/simulation evidence per location fix with allow, flag, or reject policy.
 - Typed gap evidence for rejected fixes, lifecycle boundaries, and background
   callback interruptions.
+- Steps counted on every route from the phone's step counter, with the
+  activity permission the package already requests.
 
 ### Routes and export
 
 - Single-day `Track` routes and additive multi-day `Trip` journeys.
+- Every route detail kept in the route database: stops, moving and stopped
+  time, steps, speeds, quality events, visible gaps and the cleaned distance.
 - Combined multi-day Trip map and GeoJSON/KML/GPX export.
 - Persisted route presentation modes: recorded parts, connected days, or
   continuous presentation with labeled inferred connectors.
@@ -109,7 +113,7 @@ Add the package to your application:
 
 ```yaml
 dependencies:
-  flutter_background_location_tracker: ^0.1.2
+  flutter_background_location_tracker: ^1.0.0
 ```
 
 Then run:
@@ -330,12 +334,119 @@ classified as stationary. `adaptive` remains the battery-aware intent that may
 enter stationary sampling. Explicit `movingInterval` and
 `movingDistanceFilterMeters` values still win.
 
+Adaptive capture records a clean route and the stops along it. Indoors, or in
+a pocket, a phone that isn't going anywhere still reports fixes that wander
+several metres while claiming good accuracy. From the first quiet fix of a
+stay, fixes near it are stored as rejected `stationary_hold` evidence. They
+add no distance, don't draw a scribble, and stay out of default exports and
+uploads.
+
+- **What starts a stay:** a quiet fix, with no moving reading in the last
+  30 s and no measured walking-pace Doppler speed. A moving fix ends a short
+  pause at once, so walking on keeps its distance.
+- **What makes it a stop:** at least `minimumStopDuration` (five minutes by
+  default) within the hold radius with no net progress, or still evidence.
+  Still evidence also lets
+  the native stationary profile engage. A stay the provider sent no fixes in
+  is a stop when the first fix afterwards is still at the place.
+- **What keeps it:** unknown, tilting or low-confidence readings, activity
+  silence, and walking about inside the place, such as between rooms.
+- **What ends it:** a fix outside the hold radius with a measured Doppler
+  speed, a second outside fix while moving evidence is current, or fixes that
+  keep moving away for a minute.
+- **What counts as distance:** the stop-to-departure chord. Movement within a
+  site smaller than the hold radius (at least 25 m) is not measured.
+- **Scope:** new routes with the adaptive intent only. Explicit travel intents
+  record every fix.
+
+Set the minimum stop duration in the route's `TrackingConfig`. It is persisted
+with the route and is distinct from the native stationary sampling interval:
+
+```dart
+const config = TrackingConfig(minimumStopDuration: Duration(minutes: 3));
+```
+
+The duration must be at least one millisecond. Existing recorded stops are not rewritten when
+the setting changes. Stop-aware derived geometry uses the route's stored value.
+
+Each stop is recorded with its place and its start and end times. The
+owner-scoped controllers implement `TrackingStopController`:
+
+```dart
+final stops = await (tracking as TrackingStopController).listTripStops(tripId);
+for (final stop in stops) {
+  print('${stop.startedAt}: stayed ${stop.duration.inMinutes} min');
+}
+```
+
+`TrackStop` carries the stop's centre, hold radius, `startedAt`, `endedAt`
+(null while the stop is current), `duration`, `kind` (`TrackStopKind.still`
+or `dwell`) and the number of fixes held. A stop ends at the departure fix,
+or at its last fix when the route pauses or completes during it.
+`TrackBundle.stops` carries a route's stops, and exports include them.
+
+A visit to one place is one stop, and the route database stores it as one
+row. A phone with precise fixes holds a stop within the 25 m minimum radius,
+so walking between the buildings of a place, such as a temple's shrines, ends
+one stay and starts the next. A stay that begins within three minutes of the
+previous stop's end, centred within 75 m of it, extends that stop's row
+instead of adding one; schema 17 consolidated the rows older versions stored
+per stay. What the API returns is what is stored.
+
+Routes recorded without live stop records (quality policies 1 and 2, or an
+explicit travel intent) get their stops once they complete: the package
+derives them from the stored points with the cleaned view's stay rule, stores
+them as closed `dwell` rows and marks the route
+(`RouteSummary.stopsSource`), in the background after the client opens and on
+first read. The points never change.
+
+Rejected fixes that arrive while the device is at a recorded stop are stop
+evidence, not visible gaps, and `TrackingQualitySummary.stopEvidenceRunCount`
+counts the rejected-fix runs made only of stop evidence, so
+`qualityRunCount - stopEvidenceRunCount` is the number worth a look.
+
+Where the phone is carried changes what it records. The body blocks satellite
+signals: on a two-phone motorbike test, a phone in the rider's jacket pocket
+reported a median accuracy of 10 m and lost GNSS-quality fixes for about
+15 minutes after a long stop in a valley, while a phone in the passenger's
+bag reported 2 m throughout. The pocketed phone's route was 2.5 % shorter and
+showed 17 visible gaps, all where its fixes were rejected. For riding, prefer
+a bag, top box, tank bag or handlebar mount to a jacket or trouser pocket.
+
 Vehicle capture also uses a bounded urban-visibility acceptance envelope:
 `high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
 25 m. The provider still requests navigation-grade fixes. This avoids throwing
 away most tunnel, pocket, or urban-canyon callbacks solely because they exceed
 the walking-oriented 20/15 m limits. Pass an explicit
 `maximumAcceptedAccuracyMeters` to make the envelope stricter or looser.
+Adaptive capture applies the same envelope to a fix that is riding: its
+Doppler speed is at least 5 m/s, or at least 2 m/s with a fresh in-vehicle or
+on-bicycle reading (quality policy 4). Walking and standing keep the walking
+limit, and an explicit `maximumAcceptedAccuracyMeters` still wins.
+
+Quality policy 5, the default for new adaptive routes, decides the same way
+on every phone. The first fix after a silence that lands far from the route
+is accepted at once only when its Doppler speed is precise and consistent;
+otherwise it waits for a fix that agrees with it, so a wrong re-acquisition
+fix never pulls the route 100–300 m off. A fix the route could not have
+reached is kept as rejected `kinematic_outlier` evidence. Reported accuracy
+may widen a decision's tolerance but never narrows it, because phones report
+it differently. Each fix is decided only from the evidence stored with it,
+so a route received live, recovered after a restart or drained from the
+native journal later gets the same stops and distance.
+
+The High and Precised presets also capture turns (`turnCaptureDegrees`, 45°).
+At riding speed a fix every 5 seconds lies tens of metres from the last, so a
+junction or hairpin between them would be cut across. When a fix moving at
+least 3 m/s with a reliable course has turned 45° since the last recorded
+fix, it is recorded at once. The moving High and Precised profile reads an
+unfiltered fix every second, batched up to the moving interval where the
+device supports it, and records one fix per moving interval or a turn,
+whatever the distance moved, on Android and iOS alike (sampling policy 2,
+`TrackingConfig.samplingPolicyVersion`, preset definition 6), so walking,
+standing and driving record at the same cadence on every phone. Set
+`turnCaptureDegrees: 0` to turn turn capture off. Routes recording across an
+upgrade keep the sampling they started with.
 
 `MotionFusionMode.platformActivityOnly` is the compatibility default.
 `lowPowerSensorFusion` adds step/pedometer and significant-motion evidence.
@@ -597,8 +708,9 @@ until all required conditions are true:
 - The command is initiated while an Activity is visible.
 
 Activity Recognition permission is requested on Android 10 and later. If it is
-denied, route capture can continue, but activity classification becomes unknown
-and the battery-saving stationary transition remains conservative.
+denied, route capture can continue, but activity classification becomes unknown,
+the battery-saving stationary transition remains conservative, and steps are
+not counted.
 
 #### Permission sequence by Android version
 
@@ -674,8 +786,9 @@ continues in the background, and how the user stops it:
 `NSLocationWhenInUseUsageDescription` is required for the first authorization
 stage. `NSLocationAlwaysAndWhenInUseUsageDescription` is required before the
 plugin can request Always access. `NSMotionUsageDescription` is required for
-`CMMotionActivityManager`; without motion access, tracking remains on the
-conservative moving profile.
+`CMMotionActivityManager` and the step count; without motion access, tracking
+remains on the conservative moving profile and steps are not counted. Mention
+step counting in the string when your app shows steps.
 
 The deprecated `NSLocationAlwaysUsageDescription` key is not used because this
 package supports iOS 13 and later and checks the modern
@@ -1063,6 +1176,101 @@ how to display recorded tracks with `maplibre_gl` and the OpenFreeMap Liberty
 street style; applications can use MapLibre, Google Maps, Apple MapKit, or any
 other renderer.
 
+### Route details
+
+The route database keeps each route's details up to date in the transaction
+that changes them, so a host shows or uploads them without computing
+anything. The owner-scoped controllers implement `TrackingSummaryController`:
+
+```dart
+final details = tracking as TrackingSummaryController;
+final summary = await details.routeSummary(trackId);
+print('${summary.displayDistanceMeters} m, moving ${summary.moving}, '
+    'stopped ${summary.stopped} at ${summary.stopCount} stops, '
+    '${summary.stepCount ?? 'no'} steps');
+final trip = await details.tripSummary(tripId);
+```
+
+`RouteSummary` carries the measured distance, accepted and rejected point
+counts, segments, first and newest fix times, and these values:
+
+| Value | Meaning |
+|---|---|
+| `recording` | Time inside the route's segments, pauses excluded; while recording, up to the newest fix |
+| `stopped`, `stopCount` | Time at the stored stops, and their number |
+| `moving` | `recording` less `stopped` |
+| `paused`, `elapsed` | Time paused, and start to end with pauses |
+| `maxSpeedMetersPerSecond` | Fastest Doppler speed of an accepted fix with speed accuracy of 2 m/s or better, or unreported |
+| `averageMovingSpeedMetersPerSecond` | Distance over moving time |
+| `stepCount` | Steps counted while the route recorded; null when not counted |
+| `stepCountStoppedAt` | When the step counter stopped counting while the person walked: the count is incomplete from then, never estimated; null when complete |
+| `correctedDistanceMeters` | The distance under the current rules, for a route recorded under older ones and reviewed (see below); null otherwise |
+| `displayDistanceMeters` | The distance to show: `correctedDistanceMeters` when present, otherwise `distanceMeters` |
+| `qualityEventCount` | Rejected-fix runs that left a visible hole in the route; runs made only of stop evidence are counted in `stopEvidenceRunCount` |
+| `visibleGapCount` | Holes in the route: lifecycle breaks, or gaps of at least 60 s or 150 m between accepted fixes |
+| `cleanedDistanceMeters` | Length of the current cleaned view, once one was derived |
+
+A gap across a stop or pause is never a visible gap: the device stayed where
+it was. Each stored gap keeps this decision, and
+`TrackingContinuityGap.isVisible` applies the same rule, so a map that marks
+`isVisible` gaps agrees with the count. `TripSummary` holds the same totals
+over a Trip's legs. `TrackBundle.summary` and `TripBundle.summary` carry them
+too.
+
+**Routes recorded by an older version.** Two phones recording the same
+route should report the same stops, distance, quality events and visible
+gaps; the rules behind quality policy 5 and continuity policy 4 make them do
+so. A completed route recorded under older rules is decided again under the
+current ones, in the background after the client opens and when it is first
+read, and the review is stored beside what the route recorded: its stops,
+gaps, quality runs and step decisions come from the review, and
+`correctedDistanceMeters` reports its distance. The route's points, their
+acceptance, `distanceMeters` (the measured distance) and its uploads never
+change. `listDerivedGeometry` lists the reviewed route as a run with the
+algorithm `DerivedGeometryAlgorithm.routeQualityReview`; loading it shows
+exactly the fixes the review keeps, and deleting it restores the recorded
+stops, gaps and totals.
+
+`currentCleanedGeometry(trackId)` returns the route's current stop-aware
+cleaned view: the newest run when it covers the route's newest point under the
+current cleaning version, otherwise a new one. It deletes older runs and
+stores the cleaned distance in the summary.
+
+#### Steps
+
+While a route records, Android counts steps with the phone's step counter and
+iOS with the motion coprocessor's pedometer, in every motion fusion mode.
+Steps need the activity permission the package already requests:
+`ACTIVITY_RECOGNITION` on Android 10 and later, and Motion & Fitness on iOS.
+The package never prompts for steps on its own; without the permission, or
+on a phone without a step counter, `stepCount` stays null. A permission
+granted while a route records starts the count within a minute. Each location
+fix carries the count since its capture session started (`stepCount`), each
+point keeps it, and the route counts each session once, at its highest count,
+so a restart or recovery never counts steps twice. Steps taken after the
+newest fix count when the route pauses or completes: the native side reads a
+final count on every way capture stops. The native capability `step_count`
+reports a step counter.
+
+Some phones stop delivering step counts while the person walks. Android
+prefers the wake-up step counter and repairs a counter that falls silent
+while other evidence shows walking (it flushes, re-registers and switches to
+the other counter); iOS reads the pedometer before pausing and stopping.
+`stepCoverage` on fixes and status reports the counter's state (capability
+`step_count_coverage`). A count that stopped and was not recovered keeps the
+steps counted so far and sets `stepCountStoppedAt`, so a UI can show
+"≥ 1,234 steps · counter stopped at 09:22"; nothing is estimated. Changes of
+the counter's state are recorded as count-free health events, and
+`StepCounterDiagnosticsController.stepCounterDiagnostics()` returns the
+counter's count-free event history for support (capability
+`step_counter_diagnostics`).
+
+Steps are fitness data. They are kept in the route database and its exports.
+Upload batches leave them out of `TrackUploadBatch.toMap()`, but the batch's
+`TrackPoint`s carry `stepCount`. A host that sends steps to a server must
+declare fitness data in its own privacy disclosures, such as its App Store
+privacy details and Google Play data safety form.
+
 ### Optional derived geometry
 
 Raw point coordinates are immutable. To create a separately versioned,
@@ -1082,6 +1290,33 @@ final run = await geometry.deriveGeometry(
 final mapBundle = await geometry.loadTrackGeometry(
   completedTrackId,
   geometry: TrackGeometrySelection.derived(run.id),
+);
+```
+
+For a cleaned map, use the stop-aware algorithm. Each stay of the configured
+minimum stop duration or
+more collapses to one point, and spikes elsewhere are projected away. It reads
+held fixes as stop evidence and also cleans routes recorded before the stop
+hold existed. Runs record the version they applied; derive again when
+`run.algorithmVersion` differs from
+`DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion`. Pass
+`TrackGeometrySelection.derived(run.id)` as `TrackExportOptions.geometry` to
+export a track's cleaned view:
+
+```dart
+final cleaned = await geometry.deriveGeometry(
+  trackId,
+  request: const DerivedGeometryRequest(
+    name: 'cleaned',
+    algorithm: DerivedGeometryAlgorithm.stopAwareRouteCleaning,
+  ),
+);
+final gpx = await tracking.exportTrack(
+  trackId: trackId,
+  format: TrackExportFormat.gpx,
+  options: TrackExportOptions(
+    geometry: TrackGeometrySelection.derived(cleaned.id),
+  ),
 );
 ```
 
@@ -1135,8 +1370,9 @@ try {
 To export a completed derived run, set
 `TrackExportOptions(geometry: TrackGeometrySelection.derived(run.id))`. The V2
 GeoJSON/KML/GPX output labels its source as `derived:<run-id>`. Raw remains the
-default and is labeled `raw`. Derived exports intentionally reject
-`includeRejectedPoints`, because rejected points have no derived coordinates.
+default and is labeled `raw`. The controllers' `exportTrack` accepts the same
+option. Derived exports intentionally reject `includeRejectedPoints`, because
+rejected points have no derived coordinates.
 
 On Android 10+, `contentUri` is the reopenable MediaStore handle and
 `displayPath` is informational only. On iOS and pre-scoped-storage Android,
@@ -1146,8 +1382,9 @@ set. The package adds no sharing dependency.
 The compatibility exporter below materializes a complete route and returns its
 legacy required `path`. Keep it for existing integrations and bounded routes.
 
-Ask the user for a name, then pass the selected format and name to
-`exportTrack()`. The correct extension is added or repaired automatically.
+Without a filename, track and trip exports use their route identifier. An
+explicit `fileName` overrides it; the correct extension is added or repaired
+automatically, and destinations may add a suffix to avoid collisions.
 
 ```dart
 Future<TrackExportResult> exportCompletedTrip({
@@ -1216,9 +1453,31 @@ const options = TrackExportOptions(
 - GeoJSON segments with fewer than two accepted coordinates are omitted from
   line geometry. Optional point features can preserve them for diagnostics.
 - KML writes a line per multi-point segment and a point for a one-fix segment.
+  Heights are written as recorded, with 0 for unknown and no `altitudeMode`,
+  so KML clients clamp the route to the ground. Android heights are above the
+  WGS 84 ellipsoid and iOS heights above mean sea level.
 - GPX writes one `<trkseg>` per stored segment, including one-fix segments.
 - Rejected points can be included as diagnostics but never enter route
   geometry when their coordinates are invalid or non-finite.
+- Recorded stops are exported by default: a GeoJSON Point feature with
+  `featureType: stop`, `startedAt`, `endedAt`, `durationSeconds`, `kind`,
+  `evidenceCount` and `radiusMeters`; a GPX `<wpt>` of type `stop`, before the
+  track, with those values as `fbl:` extensions; and a KML Placemark with a
+  `TimeSpan`. Set `TrackExportOptions.includeStops` to false to leave them
+  out. Routes without stop records export as before.
+- The route's summary is exported with it: GeoJSON route properties, GPX
+  `fbl:` metadata extensions and KML `ExtendedData` carry `recordingSeconds`,
+  `movingSeconds`, `stoppedSeconds`, `pausedSeconds`, `stopCount`,
+  `qualityEventCount` and `visibleGapCount`, plus `maxSpeedMetersPerSecond`,
+  `averageMovingSpeedMetersPerSecond`, `stepCount` and
+  `cleanedDistanceMeters` when known.
+- A derived-geometry export reports the derived line's distance and
+  `geometrySource: derived:<run id>`.
+- `TrackExportOptions.includeDiagnosticProperties` adds coordinate-free
+  per-fix evidence to GeoJSON point features and GPX `fbl:` extensions:
+  vertical accuracy, Doppler speed and heading with their accuracies,
+  provider, native sampling profile, activity source, raw type, evidence state
+  and age, receipt delay, and quality policy version. It is off by default.
 
 ### Converting route file formats
 
@@ -1313,6 +1572,64 @@ const TrackingConfiguration(
 Retention is selected when the client is created. Do not dispose and recreate
 the client while native tracking is active.
 
+### Release builds record a clean route
+
+Release and profile builds keep only the clean route: the accepted path, its
+stops, distance, duration and steps. Debug builds keep everything recorded
+for investigating a field test. You don't need to set anything:
+
+```dart
+const TrackingConfiguration(); // recordingDetail: RouteRecordingDetail.automatic
+```
+
+Every mode collects and decides the same fixes, so these are identical in
+every mode:
+
+- capture and sampling;
+- the accepted points and the held or rejected fixes kept as hidden evidence
+  on the device;
+- measured and corrected distance, stops and steps;
+- uploads.
+
+In clean detail (`RouteRecordingDetail.clean`) a route stores:
+
+- **Gaps:** only the gap rows that mark a segment boundary, none of them
+  visible. `RouteSummary.visibleGapCount` is 0 and the map draws no gap
+  markers.
+- **Quality runs:** none. `RouteSummary.qualityEventCount` and
+  `stopEvidenceRunCount` are 0.
+- **Motion evidence and diagnostic health events:** none. Events that prove a
+  lifecycle boundary, such as an interruption, are kept.
+- **Journaled activity readings:** cleared once the route is completed or
+  failed. Only a restart of a live route decides from them.
+
+Clean detail also changes what the package reports:
+
+- **Exports** of a clean route leave out `qualityEventCount`,
+  `visibleGapCount`, `gapCount`, `rejectedPointCount` and GPX `fbl:gap`
+  elements. Stops are still exported.
+- **Ignored export options:** a clean client ignores `includeRejectedPoints`
+  and `includeDiagnosticProperties`.
+- **Native diagnostics:** native code keeps no step-counter diagnostics, so
+  `stepCounterDiagnostics()` returns an empty list. Raw platform error text is
+  replaced by a fixed message.
+
+The setup doctor, health snapshots, battery checks and the native journal
+integrity check work in every mode.
+
+Each route keeps the detail it started with (`Track.recordingDetail`). A route
+recorded by a debug build stays full after you install a release build, and
+the reverse holds too. Routes recorded before this setting existed are full.
+To force a mode, for example to collect full diagnostics in a release field
+test, set it explicitly. Read the resolved mode with
+`TrackingClient.recordsDiagnostics`, or with
+`TrackingClient.resolveRecordingDetail(configuration.recordingDetail)`, to
+show debug views on the same switch.
+
+```dart
+const TrackingConfiguration(recordingDetail: RouteRecordingDetail.full);
+```
+
 ### Deleting a selected recorded route
 
 Delete an individual completed or failed route with:
@@ -1369,6 +1686,7 @@ for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
 | `stationaryInterval` | 20 seconds | Requested interval while stationary |
 | `stationaryDistanceFilterMeters` | 20 m | Minimum stationary displacement |
 | `maximumAcceptedAccuracyMeters` | 20 m | Reject fixes with poorer reported accuracy |
+| `turnCaptureDegrees` | 45° (High, Precised), off (Medium, Low) | Record a fix between the regular ones when a moving route turns this far |
 | `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
 | `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
 | `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |
@@ -1606,7 +1924,8 @@ validate its key lifecycle independently.
 Host applications should:
 
 - show an explicit in-app tracking indicator;
-- explain why background and motion access are needed;
+- explain why background and motion access are needed, including step
+  counting when the app shows steps;
 - avoid logging coordinates or export contents;
 - apply a documented retention policy;
 - protect uploader authentication and transport;

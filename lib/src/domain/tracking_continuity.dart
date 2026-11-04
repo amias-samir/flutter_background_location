@@ -1,4 +1,5 @@
 import 'tracker_status.dart';
+import 'tracking_configuration_epoch.dart';
 
 /// Why a meaningful gap exists between route-geometry anchors.
 ///
@@ -108,6 +109,9 @@ final class TrackingContinuityEvidence {
     this.explicitBoundaryCause,
     this.acceptedGeometryGap,
     this.rawReceiptGap,
+    this.runtimeConfigurationBoundary = false,
+    this.interveningFixesHeldAtStop = false,
+    this.stayExplainsGap,
   });
 
   /// Whether the current point passed the canonical geometry-quality policy.
@@ -160,6 +164,51 @@ final class TrackingContinuityEvidence {
 
   /// Native receipt gap between consecutive raw callbacks.
   final Duration? rawReceiptGap;
+
+  /// Whether this is the first accepted point of a configuration epoch that a
+  /// runtime update activated after the previous accepted point, within the
+  /// accepted-geometry gap threshold.
+  ///
+  /// A runtime update restarts the native provider, so the capture generation
+  /// changes even though the route never stopped.
+  final bool runtimeConfigurationBoundary;
+
+  /// Whether the rejected raw fixes before this point were held by the
+  /// canonical stop hold (quality policy 2) rather than rejected for quality.
+  ///
+  /// Only routes recorded under quality policy 2 can set this.
+  final bool interveningFixesHeldAtStop;
+
+  /// Continuity policy 4: whether a stay at a place, current at the last
+  /// accepted fix before the gap, explains it (rule `C1` of quality policy 5:
+  /// a short silence, a gap-ending fix still near the stay, or a stop's
+  /// departure speed that covers the distance in time). Null when no stay
+  /// decision was made, as on routes recorded before quality policy 5.
+  final bool? stayExplainsGap;
+
+  /// This evidence without the native sampling-profile stamp, which differs
+  /// between platforms and can follow a silence rather than a stay.
+  TrackingContinuityEvidence _withoutProfileStamp() =>
+      TrackingContinuityEvidence(
+        currentAcceptedForGeometry: currentAcceptedForGeometry,
+        expectedTrackId: expectedTrackId,
+        currentTrackId: currentTrackId,
+        previousCaptureGenerationId: previousCaptureGenerationId,
+        currentCaptureGenerationId: currentCaptureGenerationId,
+        previousMonotonicDomainId: previousMonotonicDomainId,
+        currentMonotonicDomainId: currentMonotonicDomainId,
+        nativeLifecycle: nativeLifecycle,
+        serviceHealthy: serviceHealthy,
+        permissionAndServiceAvailable: permissionAndServiceAvailable,
+        hasInterveningRejectedFixes: hasInterveningRejectedFixes,
+        providerBatchingObserved: providerBatchingObserved,
+        providerAvailable: providerAvailable,
+        explicitBoundaryCause: explicitBoundaryCause,
+        acceptedGeometryGap: acceptedGeometryGap,
+        rawReceiptGap: rawReceiptGap,
+        runtimeConfigurationBoundary: runtimeConfigurationBoundary,
+        stayExplainsGap: stayExplainsGap,
+      );
 }
 
 /// Versioned topology decision for one accepted-geometry gap.
@@ -203,6 +252,7 @@ final class TrackingContinuityGap {
     this.straightLineDistanceMeters,
     this.nativeCaptureGeneration,
     this.configurationEpochId,
+    this.visible,
   });
 
   final String id;
@@ -221,6 +271,10 @@ final class TrackingContinuityGap {
   final String? configurationEpochId;
   final int continuityPolicyVersion;
   final DateTime createdAt;
+
+  /// The visibility decision stored with the gap (route database schema 17),
+  /// so a map and the route totals agree; null on rows without one.
+  final bool? visible;
 
   factory TrackingContinuityGap.fromDatabase(Map<String, Object?> row) =>
       TrackingContinuityGap(
@@ -244,27 +298,168 @@ final class TrackingContinuityGap {
         continuityPolicyVersion:
             (row['continuity_policy_version']! as num).toInt(),
         createdAt: DateTime.parse(row['created_at']! as String).toUtc(),
+        visible: switch (row['visible']) {
+          1 => true,
+          0 => false,
+          _ => null,
+        },
       );
 
   static Duration? _durationFromMilliseconds(Object? value) =>
       value == null ? null : Duration(milliseconds: (value as num).toInt());
+
+  /// Whether a map should mark this gap as a hole in the route: the decision
+  /// stored with the gap, or the rule for rows without one.
+  bool get isVisible =>
+      visible ??
+      visibleFor(
+        cause: cause,
+        providerGap: providerGap,
+        straightLineDistanceMeters: straightLineDistanceMeters,
+      );
+
+  /// Lifecycle breaks are holes in a route, and so are gaps of at least
+  /// [visibleProviderGap] or [visibleStraightLineMeters] between accepted
+  /// fixes. A gap across a stop or pause
+  /// ([TrackingGapCause.expectedStationarySuppression]) is not: the device
+  /// stayed where it was.
+  static bool visibleFor({
+    required TrackingGapCause cause,
+    required Duration? providerGap,
+    required double? straightLineDistanceMeters,
+  }) {
+    if (cause == TrackingGapCause.expectedStationarySuppression) return false;
+    if (_lifecycleCauses.contains(cause)) return true;
+    return (providerGap ?? Duration.zero) >= visibleProviderGap ||
+        (straightLineDistanceMeters ?? 0) >= visibleStraightLineMeters;
+  }
+
+  /// See [visibleFor].
+  static const visibleProviderGap = Duration(seconds: 60);
+  static const double visibleStraightLineMeters = 150;
+
+  static const _lifecycleCauses = <TrackingGapCause>{
+    TrackingGapCause.explicitPause,
+    TrackingGapCause.nativeInterruption,
+    TrackingGapCause.processRestart,
+    TrackingGapCause.permissionOrServiceLoss,
+    TrackingGapCause.overnightBoundary,
+  };
 }
 
 /// Pure classifier that keeps quality evidence separate from route topology.
 final class TrackingContinuityClassifier {
   const TrackingContinuityClassifier({
     this.policy = TrackingContinuityPolicy.conservative,
-    this.policyVersion = 2,
+    this.policyVersion = TrackingPolicyVersions.continuityPolicy,
   }) : assert(policyVersion > 0);
 
   /// Fallback policy for incomplete evidence.
   final TrackingContinuityPolicy policy;
 
-  /// Version persisted with every durable gap decision.
+  /// Requested classifier version, normally the version recorded by the
+  /// route's active configuration epoch. Durable gap decisions record the
+  /// version actually applied by
+  /// [TrackingPolicyVersions.resolveContinuityPolicy].
   final int policyVersion;
 
   /// Classifies one already-detected accepted-geometry gap.
   TrackingContinuityDecision classify(TrackingContinuityEvidence evidence) {
+    final applied =
+        TrackingPolicyVersions.resolveContinuityPolicy(policyVersion);
+    if (applied != policyVersion) {
+      return TrackingContinuityClassifier(
+        policy: policy,
+        policyVersion: applied,
+      ).classify(evidence);
+    }
+    return switch (applied) {
+      2 => _classifyVersion2(evidence),
+      3 => _classifyVersion3(evidence),
+      4 => _classifyVersion4(evidence),
+      _ => throw StateError('Continuity policy $applied has no classifier.'),
+    };
+  }
+
+  /// Version 3 without the native sampling-profile stamp.
+  ///
+  /// Android stamps a fix with the profile before its stationary policy
+  /// reacts to it and iOS after, and a profile can turn stationary because
+  /// fixes stopped arriving rather than because the device stayed: one 5.5
+  /// minute outage was hidden on one phone and visible on the other. A gap
+  /// is expected stationary suppression only when a stay explains it
+  /// ([TrackingContinuityEvidence.stayExplainsGap]).
+  TrackingContinuityDecision _classifyVersion4(
+    TrackingContinuityEvidence evidence,
+  ) {
+    // Without a stay decision, as for points no quality-policy-5 engine
+    // judged, version 3 applies unchanged.
+    if (evidence.stayExplainsGap == null) {
+      return _classifyVersion3(evidence);
+    }
+    final decision = _classifyVersion3Topology(evidence._withoutProfileStamp());
+    if (evidence.stayExplainsGap == true &&
+        decision.treatment == TrackingGapTreatment.retainCurrentSegment &&
+        _stayExplainableCauses.contains(decision.cause)) {
+      return _retain(TrackingGapCause.expectedStationarySuppression);
+    }
+    return decision;
+  }
+
+  static const _stayExplainableCauses = <TrackingGapCause>{
+    TrackingGapCause.acceptedFixRejectionRun,
+    TrackingGapCause.providerBatching,
+    TrackingGapCause.providerUnavailable,
+    TrackingGapCause.unknown,
+  };
+
+  /// Version 2 plus continuity across runtime configuration updates.
+  ///
+  /// The provider restart that applies a runtime update changes the capture
+  /// generation inside one live route, which version 2 splits as a native
+  /// interruption. Version 3 keeps the segment when nothing else (a process
+  /// restart, an explicit boundary, or a lost permission or service) explains
+  /// the gap.
+  TrackingContinuityDecision _classifyVersion3(
+    TrackingContinuityEvidence evidence,
+  ) {
+    final decision = _classifyVersion3Topology(evidence);
+    // Held fixes are a still device's stop, not a quality problem. The flag
+    // exists only on routes recorded under quality policy 2, so no older
+    // decision changes.
+    if (evidence.interveningFixesHeldAtStop &&
+        decision.cause == TrackingGapCause.acceptedFixRejectionRun &&
+        decision.treatment == TrackingGapTreatment.retainCurrentSegment) {
+      return _retain(TrackingGapCause.expectedStationarySuppression);
+    }
+    return decision;
+  }
+
+  TrackingContinuityDecision _classifyVersion3Topology(
+    TrackingContinuityEvidence evidence,
+  ) {
+    if (evidence.currentAcceptedForGeometry &&
+        evidence.runtimeConfigurationBoundary &&
+        evidence.explicitBoundaryCause == null &&
+        evidence.permissionAndServiceAvailable != false &&
+        evidence.nativeLifecycle == TrackerLifecycle.tracking &&
+        _sameKnownValues(evidence.expectedTrackId, evidence.currentTrackId) &&
+        !_differentKnownValues(
+          evidence.previousMonotonicDomainId,
+          evidence.currentMonotonicDomainId,
+        )) {
+      return _retain(
+        evidence.hasInterveningRejectedFixes
+            ? TrackingGapCause.acceptedFixRejectionRun
+            : TrackingGapCause.unknown,
+      );
+    }
+    return _classifyVersion2(evidence);
+  }
+
+  TrackingContinuityDecision _classifyVersion2(
+    TrackingContinuityEvidence evidence,
+  ) {
     // A rejected point may be retained as diagnostic evidence, but it can
     // never create, close, or switch a canonical segment.
     if (!evidence.currentAcceptedForGeometry) {

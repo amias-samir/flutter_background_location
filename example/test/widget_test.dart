@@ -5,7 +5,10 @@ import 'package:flutter_background_location_tracker_example/main.dart';
 import 'package:flutter_background_location_tracker_example/recorded_tracks_section.dart';
 import 'package:flutter_background_location_tracker_example/recorded_trips_section.dart';
 import 'package:flutter_background_location_tracker_example/route_map_page.dart';
+import 'package:flutter_background_location_tracker_example/route_totals.dart';
+import 'package:flutter_background_location_tracker_example/tracking_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
 void main() {
   TrackingExampleApp testApp() => TrackingExampleApp(
@@ -231,9 +234,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: RecordedTripsSection(
-            trips: <RecordedTripSummary>[
-              RecordedTripSummary(trip: trip, segmentCount: 4, gapCount: 3),
-            ],
+            trips: <RecordedTripSummary>[RecordedTripSummary(trip: trip)],
             hasMore: false,
             onRefresh: () async {},
             onLoadMore: () async {},
@@ -263,26 +264,143 @@ void main() {
     }
   });
 
-  test('map geometry marks severe typed same-segment gap evidence', () {
+  test('the map marks the gaps the route database marks visible', () {
     final track = _completedTrack();
     final source = _segment(track, 1, const <(double, double)>[
       (27.7, 85.3),
       (27.71, 85.31),
     ]);
-    final before = source.points.first;
-    final after = source.points.last;
+    RouteGeometry geometryWith(TrackingGapCause cause) {
+      final gap = TrackingContinuityGap(
+        id: 'gap-1',
+        trackId: track.id,
+        beforePointId: source.points.first.id,
+        afterPointId: source.points.last.id,
+        beforeSegmentId: source.segment.id,
+        afterSegmentId: source.segment.id,
+        cause: cause,
+        treatment: TrackingGapTreatment.retainCurrentSegment,
+        distanceTreatment: TrackingGapDistanceTreatment.excluded,
+        continuityPolicyVersion: 1,
+        providerGap: const Duration(seconds: 61),
+        createdAt: DateTime.utc(2026),
+      );
+      expect(
+        gap.isVisible,
+        cause != TrackingGapCause.expectedStationarySuppression,
+      );
+      return RouteGeometry.fromReport(
+        const RouteGeometryAssembler().assemble(
+          sourceParts: <RouteGeometrySourcePart>[
+            RouteGeometrySourcePart(
+              legNumber: 1,
+              segment: source.segment,
+              points: source.points,
+            ),
+          ],
+          gaps: <TrackingContinuityGap>[gap],
+          continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+        ),
+      );
+    }
+
+    final severe = geometryWith(TrackingGapCause.acceptedFixRejectionRun);
+    expect(severe.segments, hasLength(1));
+    expect(severe.gapMarkers, hasLength(1));
+    expect(severe.gapCount, 1);
+    expect(
+      geometryWith(TrackingGapCause.expectedStationarySuppression).gapMarkers,
+      isEmpty,
+      reason: 'a stop or pause is no hole',
+    );
+  });
+
+  test('the cleaned view moves points but invents no stops', () {
+    final track = _completedTrack();
+    // East offsets in metres around a synthetic origin, one fix per 20 s.
+    const east = <double>[-90, -60, -30, 3, -4, 6, -2, 5, 30, 60, 90];
+    final source = _timedSegment(track, east, spacing: 20, accuracy: 5);
+    final stay = source.points.sublist(3, 8);
+    final report = const RouteGeometryAssembler().assemble(
+      sourceParts: <RouteGeometrySourcePart>[
+        RouteGeometrySourcePart(
+          legNumber: 1,
+          segment: source.segment,
+          points: source.points,
+        ),
+      ],
+      continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    );
+    final centre = maplibre.LatLng(stay.first.latitude, 0.5);
+
+    final cleaned = RouteGeometry.fromReport(
+      report,
+      cleaned: <String, maplibre.LatLng>{
+        for (final point in stay) point.id: centre,
+      },
+    );
+
+    expect(cleaned.points.where((point) => point == centre), hasLength(5));
+    expect(cleaned.segments.single, hasLength(east.length));
+    expect(
+      cleaned.stopMarkers,
+      isEmpty,
+      reason: 'stops come from the route database',
+    );
+  });
+
+  test('a zig-zag inside its own uncertainty is drawn as uncertain', () {
+    final track = _completedTrack();
+    final zigzag = _timedSegment(
+      track,
+      const <double>[0, 9, -7, 8, -9, 6, -5],
+      spacing: 14,
+      accuracy: 8,
+    );
+    final walk = _timedSegment(
+      track,
+      const <double>[0, 12, 24, 36, 48, 60, 72],
+      spacing: 10,
+      accuracy: 5,
+    );
+    RouteGeometry geometryOf(TrackSegmentWithPoints source) =>
+        RouteGeometry.fromReport(
+          const RouteGeometryAssembler().assemble(
+            sourceParts: <RouteGeometrySourcePart>[
+              RouteGeometrySourcePart(
+                legNumber: 1,
+                segment: source.segment,
+                points: source.points,
+              ),
+            ],
+            continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+          ),
+        );
+
+    expect(geometryOf(zigzag).uncertainSegments, isNotEmpty);
+    expect(geometryOf(walk).uncertainSegments, isEmpty);
+  });
+
+  test('recorded stops are markers in both views, never gaps', () {
+    final track = _completedTrack();
+    // Fixes held at the stop are not route points: the route goes from the
+    // arrival at -10 m to the departure at 25 m.
+    const east = <double>[-90, -60, -30, -10, 25, 60, 90];
+    final source = _timedSegment(track, east, spacing: 300, accuracy: 5);
+    final arrival = source.points[3];
+    final departure = source.points[4];
     final gap = TrackingContinuityGap(
       id: 'gap-1',
       trackId: track.id,
-      beforePointId: before.id,
-      afterPointId: after.id,
+      beforePointId: arrival.id,
+      afterPointId: departure.id,
       beforeSegmentId: source.segment.id,
       afterSegmentId: source.segment.id,
       cause: TrackingGapCause.expectedStationarySuppression,
       treatment: TrackingGapTreatment.retainCurrentSegment,
-      distanceTreatment: TrackingGapDistanceTreatment.excluded,
-      continuityPolicyVersion: 1,
-      providerGap: const Duration(seconds: 61),
+      distanceTreatment: TrackingGapDistanceTreatment.measured,
+      continuityPolicyVersion: 3,
+      providerGap: const Duration(seconds: 300),
       createdAt: DateTime.utc(2026),
     );
     final report = const RouteGeometryAssembler().assemble(
@@ -296,13 +414,342 @@ void main() {
       gaps: <TrackingContinuityGap>[gap],
       continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
     );
+    final stop = TrackStop(
+      id: 'stop-1',
+      trackId: track.id,
+      segmentId: source.segment.id,
+      kind: TrackStopKind.dwell,
+      latitude: 0.5,
+      longitude: 0.5,
+      centreSigmaMeters: 2,
+      radiusMeters: 25,
+      startedAt: arrival.capturedAt,
+      lastSeenAt: departure.capturedAt.subtract(const Duration(seconds: 10)),
+      endedAt: departure.capturedAt,
+      evidenceCount: 30,
+      qualityPolicyVersion: 3,
+      arrivalPointId: arrival.id,
+      departurePointId: departure.id,
+    );
+    const centre = maplibre.LatLng(0.5, 0.5);
+    final collapsed = <String, maplibre.LatLng>{
+      arrival.id: centre,
+      departure.id: centre,
+    };
 
-    final geometry = RouteGeometry.fromReport(report);
+    final raw = RouteGeometry.fromReport(report, stops: <TrackStop>[stop]);
+    expect(raw.stopMarkers, hasLength(1));
+    expect(raw.stopMarkers.single.coordinate, centre);
+    expect(raw.stopMarkers.single.duration, const Duration(minutes: 5));
+    expect(raw.gapMarkers, isEmpty, reason: 'a stop is not a gap');
+    expect(RouteGeometry.fromReport(report).gapMarkers, isEmpty);
 
-    expect(geometry.segments, hasLength(1));
-    expect(geometry.gapMarkers, hasLength(1));
-    expect(geometry.gapCount, 1);
+    final cleaned = RouteGeometry.fromReport(
+      report,
+      cleaned: collapsed,
+      stops: <TrackStop>[stop],
+    );
+    expect(cleaned.stopMarkers, hasLength(1), reason: 'no second marker');
+    expect(cleaned.gapMarkers, isEmpty);
   });
+
+  test('the map header shows the route database\'s totals', () {
+    final track = _completedTrack();
+    final route = RouteGeometry.fromBundle(
+      TrackBundle(
+        track: track,
+        segments: <TrackSegmentWithPoints>[
+          _segment(track, 1, const <(double, double)>[(0, 0), (0.001, 0)]),
+        ],
+      ),
+    );
+    expect(routeHeadline(route), '2 points • 0 stop(s) • 1 drawable part(s)');
+    expect(routeTotalsLines(null, cleaned: true), isEmpty);
+
+    final totals = RouteTotals.ofRoute(
+      RouteSummary(
+        trackId: track.id,
+        startedAt: track.startedAt,
+        distanceMeters: 12345,
+        cleanedDistanceMeters: 12010,
+        acceptedPointCount: 2,
+        rejectedPointCount: 0,
+        segmentCount: 1,
+        recording: const Duration(minutes: 112),
+        moving: const Duration(minutes: 95),
+        stopped: const Duration(minutes: 17),
+        stopCount: 3,
+        stepCount: 4321,
+        qualityEventCount: 4,
+        visibleGapCount: 1,
+        stopEvidenceRunCount: 2,
+        stopsSource: TrackStopSource.recorded,
+        updatedAt: track.startedAt,
+      ),
+    );
+    expect(routeTotalsLines(totals, cleaned: true), <String>[
+      'Distance 12.35 km • cleaned ≈ 12.01 km',
+      'Moving 1 h 35 min • stopped 17 min • 4321 steps',
+    ]);
+    expect(routeTotalsLines(totals, cleaned: false).first, 'Distance 12.35 km');
+    final withTotals = RouteGeometry.fromReport(
+      const RouteGeometryAssembler().assemble(
+        sourceParts: <RouteGeometrySourcePart>[
+          for (final segment in <TrackSegmentWithPoints>[
+            _segment(track, 1, const <(double, double)>[(0, 0), (0.001, 0)]),
+          ])
+            RouteGeometrySourcePart(
+              legNumber: 1,
+              segment: segment.segment,
+              points: segment.points,
+            ),
+        ],
+      ),
+      totals: totals,
+    );
+    expect(
+      routeHeadline(withTotals),
+      '2 points • 3 stop(s) • 1 drawable part(s) • 4 quality event(s) • '
+      '1 visible gap(s)',
+      reason: 'the stop count is the stored one',
+    );
+  });
+
+  test('a tapped stop says how long it lasted and when', () {
+    final closed = RouteStopMarker(
+      coordinate: const maplibre.LatLng(0.5, 0.5),
+      startedAt: DateTime(2026, 10, 19, 10, 5),
+      endedAt: DateTime(2026, 10, 19, 11, 17),
+    );
+    expect(describeStop(closed), 'Stopped 1 h 12 min, 10:05–11:17');
+    final current = RouteStopMarker(
+      coordinate: const maplibre.LatLng(0.5, 0.5),
+      startedAt: DateTime(2026, 10, 19, 9, 58),
+      endedAt: DateTime(2026, 10, 19, 10, 1),
+      current: true,
+    );
+    expect(describeStop(current), 'Stopped 3 min so far, since 09:58');
+  });
+
+  testWidgets('a Trip card shows its stops and the time stopped', (
+    tester,
+  ) async {
+    Trip trip(String id) => Trip(
+      id: id,
+      organizationId: 'example-organization',
+      userId: 'example-user',
+      routeId: id,
+      status: TripStatus.completed,
+      startedAt: DateTime.utc(2026),
+      endedAt: DateTime.utc(2026, 1, 1, 2),
+      legCount: 1,
+      acceptedPointCount: 20,
+      rejectedPointCount: 40,
+      measuredDistanceMeters: 1234,
+      lifecycleRevision: 2,
+      createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026, 1, 1, 2),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTripsSection(
+            trips: <RecordedTripSummary>[
+              RecordedTripSummary(
+                trip: trip('with_stops'),
+                totals: const RouteTotals(
+                  distanceMeters: 1234,
+                  displayDistanceMeters: 1234,
+                  segmentCount: 1,
+                  moving: Duration(minutes: 95),
+                  stopped: Duration(minutes: 17),
+                  stopCount: 2,
+                  stepCount: 4321,
+                  qualityEventCount: 3,
+                  visibleGapCount: 1,
+                ),
+              ),
+              RecordedTripSummary(trip: trip('without_totals')),
+            ],
+            hasMore: false,
+            onRefresh: null,
+            onLoadMore: null,
+            onViewMap: null,
+            onContinue: null,
+            onExport: null,
+            onDelete: null,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('2 stop(s) • 17 min'), findsOneWidget);
+    expect(find.textContaining('stop(s)'), findsOneWidget);
+    expect(find.text('Moving 1 h 35 min'), findsOneWidget);
+    expect(find.text('4321 steps'), findsOneWidget);
+    expect(find.text('3 quality event(s)'), findsOneWidget);
+    expect(find.text('1 visible gap(s)'), findsOneWidget);
+  });
+
+  testWidgets('a clean build leaves quality events and gaps off Trip cards', (
+    tester,
+  ) async {
+    final trip = Trip(
+      id: 'clean',
+      organizationId: 'example-organization',
+      userId: 'example-user',
+      routeId: 'clean',
+      status: TripStatus.completed,
+      startedAt: DateTime.utc(2026),
+      endedAt: DateTime.utc(2026, 1, 1, 2),
+      legCount: 1,
+      acceptedPointCount: 20,
+      rejectedPointCount: 40,
+      measuredDistanceMeters: 1234,
+      lifecycleRevision: 2,
+      createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026, 1, 1, 2),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTripsSection(
+            trips: <RecordedTripSummary>[
+              RecordedTripSummary(
+                trip: trip,
+                totals: const RouteTotals(
+                  distanceMeters: 1234,
+                  displayDistanceMeters: 1234,
+                  segmentCount: 1,
+                  moving: Duration(minutes: 95),
+                  stopped: Duration(minutes: 17),
+                  stopCount: 2,
+                  qualityEventCount: 0,
+                  visibleGapCount: 0,
+                ),
+              ),
+            ],
+            hasMore: false,
+            onRefresh: null,
+            onLoadMore: null,
+            onViewMap: null,
+            onContinue: null,
+            onExport: null,
+            onDelete: null,
+            onExportDiagnostics: (_) async {},
+            showDiagnostics: false,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('2 stop(s) • 17 min'), findsOneWidget);
+    expect(find.textContaining('quality event'), findsNothing);
+    expect(find.textContaining('visible gap'), findsNothing);
+
+    await tester.tap(find.byTooltip('Trip actions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Export GPX'), findsOneWidget);
+    expect(find.text('Export diagnostic GeoJSON'), findsNothing);
+  });
+
+  testWidgets('a clean build keeps capture diagnostics off the status card', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: TrackingStatusCard(session: null, showDiagnostics: false),
+        ),
+      ),
+    );
+    expect(find.text('Activity: '), findsOneWidget);
+    expect(find.text('Location uncertainty: '), findsOneWidget);
+    for (final label in <String>[
+      'Activity confidence',
+      'Motion evidence',
+      'Capture profile',
+      'Fix',
+      'Sequence',
+      'Mock signal',
+    ]) {
+      expect(find.text('$label: '), findsNothing, reason: label);
+    }
+  });
+
+  testWidgets('a route card shows its stored details', (tester) async {
+    final track = _completedTrack();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTracksSection(
+            tracks: <Track>[track],
+            totals: const <String, RouteTotals>{
+              'track-1': RouteTotals(
+                distanceMeters: 100,
+                displayDistanceMeters: 100,
+                segmentCount: 1,
+                moving: Duration(minutes: 40),
+                stopped: Duration(minutes: 20),
+                stopCount: 1,
+                qualityEventCount: 0,
+                visibleGapCount: 0,
+              ),
+            },
+            hasMore: false,
+            onRefresh: null,
+            onLoadMore: null,
+            onViewMap: null,
+            onExport: null,
+            onDelete: null,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Moving 40 min'), findsOneWidget);
+    expect(find.text('1 stop(s) • 20 min'), findsOneWidget);
+    expect(
+      find.textContaining('steps'),
+      findsNothing,
+      reason: 'steps not counted',
+    );
+  });
+}
+
+/// Points [spacing] seconds apart, [east] metres east of a synthetic origin.
+TrackSegmentWithPoints _timedSegment(
+  Track track,
+  List<double> east, {
+  required int spacing,
+  required double accuracy,
+}) {
+  const metersPerDegree = 111195.07973436875;
+  final base = _segment(track, 1, <(double, double)>[
+    for (final meters in east)
+      (0.5, 0.5 + meters / (metersPerDegree * 0.99996192)),
+  ]);
+  return TrackSegmentWithPoints(
+    segment: base.segment,
+    points: <TrackPoint>[
+      for (var index = 0; index < base.points.length; index += 1)
+        TrackPoint(
+          id: base.points[index].id,
+          trackId: track.id,
+          segmentId: base.segment.id,
+          sequence: index + 1,
+          latitude: base.points[index].latitude,
+          longitude: base.points[index].longitude,
+          capturedAt: track.startedAt.add(Duration(seconds: index * spacing)),
+          persistedAt: track.startedAt.add(Duration(seconds: index * spacing)),
+          activityType: TrackingActivityType.unknown,
+          activityConfidence: 40,
+          motionState: MotionState.moving,
+          isMocked: false,
+          mockDetectionAvailable: true,
+          accepted: true,
+          qualityFlags: 0,
+          horizontalAccuracy: accuracy,
+        ),
+    ],
+  );
 }
 
 Future<void> _scrollHome(WidgetTester tester, double distance) async {

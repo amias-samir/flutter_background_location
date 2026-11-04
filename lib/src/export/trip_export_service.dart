@@ -4,12 +4,15 @@ import '../application/route_geometry_assembler.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
 import '../domain/route_geometry.dart';
+import '../domain/route_recording_detail.dart';
+import '../domain/route_summary.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
 import '../domain/trip.dart';
 import '../domain/tracking_continuity.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
+import '../domain/track_stop.dart';
 import '../storage/track_repository.dart';
 import '../storage/trip_repository.dart';
 import 'track_export_service.dart';
@@ -68,8 +71,10 @@ final class TripExportService {
     final tripBundle = await _trips.loadTripBundleForOwner(owner, tripId);
     final sourceParts = <RouteGeometrySourcePart>[];
     final combinedSegments = <TrackSegmentWithPoints>[];
+    final combinedStops = <TrackStop>[];
     final allGaps = <TrackingContinuityGap>[];
     Track? firstTrack;
+    var allLegsClean = true;
     var materializedPoints = 0;
 
     for (final leg in tripBundle.legs) {
@@ -81,7 +86,9 @@ final class TripExportService {
         );
       }
       firstTrack ??= track;
+      allLegsClean &= track.recordingDetail == RouteRecordingDetail.clean;
       final trackBundle = await repository.loadTrackBundle(track.id);
+      combinedStops.addAll(trackBundle.stops);
       final legacyIds = repository is LegacyGapEvidenceRepository
           ? await (repository as LegacyGapEvidenceRepository)
               .safeLegacyAutomaticAfterSegmentIds(track.id)
@@ -151,10 +158,41 @@ final class TripExportService {
       nextSequence: trip.acceptedPointCount + trip.rejectedPointCount + 1,
       currentSegmentId: null,
       config: firstTrack.config,
+      // A Trip exports as clean only when every leg was recorded clean.
+      recordingDetail:
+          allLegsClean ? RouteRecordingDetail.clean : RouteRecordingDetail.full,
     );
+    final totals = tripBundle.summary;
     final bundle = TrackBundle(
       track: syntheticTrack,
       segments: combinedSegments,
+      stops: combinedStops..sort((a, b) => a.startedAt.compareTo(b.startedAt)),
+      // The Trip's stored totals, written like a route's summary.
+      summary: totals == null
+          ? null
+          : RouteSummary(
+              trackId: trip.id,
+              startedAt: totals.startedAt,
+              endedAt: totals.endedAt,
+              firstFixAt: totals.firstFixAt,
+              lastFixAt: totals.lastFixAt,
+              distanceMeters: totals.distanceMeters,
+              cleanedDistanceMeters: totals.cleanedDistanceMeters,
+              acceptedPointCount: totals.acceptedPointCount,
+              rejectedPointCount: totals.rejectedPointCount,
+              segmentCount: totals.segmentCount,
+              recording: totals.recording,
+              moving: totals.moving,
+              stopped: totals.stopped,
+              stopCount: totals.stopCount,
+              maxSpeedMetersPerSecond: totals.maxSpeedMetersPerSecond,
+              stepCount: totals.stepCount,
+              qualityEventCount: totals.qualityEventCount,
+              visibleGapCount: totals.visibleGapCount,
+              stopEvidenceRunCount: totals.stopEvidenceRunCount,
+              stopsSource: TrackStopSource.recorded,
+              updatedAt: totals.updatedAt,
+            ),
     );
     final trackArtifact = TrackExportService(
       repository: repository,
@@ -165,7 +203,7 @@ final class TripExportService {
       options: options,
       report: report,
     );
-    final fallback = trackArtifact.fileName.replaceFirst('track_', 'trip_');
+    final fallback = trackArtifact.fileName;
     final resolvedName = resolveExportFileName(
       format: format,
       fallbackFileName: fallback,

@@ -6,6 +6,8 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.PowerManager
 import java.util.UUID
+import org.json.JSONException
+import org.json.JSONObject
 
 internal class TrackingStateStore(context: Context) {
     private val appContext = context.applicationContext
@@ -52,6 +54,11 @@ internal class TrackingStateStore(context: Context) {
 
     val lastProfileTransitionAt: Long?
         get() = preferences.getLong(KEY_LAST_PROFILE_TRANSITION_AT, 0L).takeIf { it > 0L }
+
+    /** Coordinate-free reason for the last moving/stationary profile change. */
+    val lastProfileTransitionReason: String?
+        get() = preferences.getString(KEY_LAST_PROFILE_TRANSITION_REASON, null)
+            ?.takeIf { it.isNotBlank() }
 
     val stationaryExitProbeRequestedAt: Long?
         get() = preferences.getLong(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT, 0L)
@@ -155,13 +162,21 @@ internal class TrackingStateStore(context: Context) {
         profile: String,
         message: String? = null,
         timestamp: Long = System.currentTimeMillis(),
+        transitionReason: String? = null,
     ) {
         val profileChanged = this.profile != profile
         preferences.edit()
             .putString(KEY_STATE, state)
             .putString(KEY_PROFILE, profile)
             .apply {
-                if (profileChanged) putLong(KEY_LAST_PROFILE_TRANSITION_AT, timestamp)
+                if (profileChanged) {
+                    putLong(KEY_LAST_PROFILE_TRANSITION_AT, timestamp)
+                    if (transitionReason == null) {
+                        remove(KEY_LAST_PROFILE_TRANSITION_REASON)
+                    } else {
+                        putString(KEY_LAST_PROFILE_TRANSITION_REASON, transitionReason)
+                    }
+                }
             }
             .apply {
                 if (message == null) remove(KEY_MESSAGE) else putString(KEY_MESSAGE, message)
@@ -181,10 +196,12 @@ internal class TrackingStateStore(context: Context) {
             generationId = generationId,
         )
         preferences.edit()
+            .endUnflushedStepCheckpoint(evidence.generationId)
             .putString(KEY_CAPTURE_GENERATION_ID, evidence.generationId)
             .putLong(KEY_NATIVE_SESSION_STARTED_AT, evidence.startedAt)
             .putString(KEY_CAPTURE_START_REASON, evidence.startReason)
             .putLong(KEY_LAST_PROFILE_TRANSITION_AT, evidence.startedAt)
+            .remove(KEY_LAST_PROFILE_TRANSITION_REASON)
             .remove(KEY_LAST_PROVIDER_CALLBACK_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
@@ -215,6 +232,44 @@ internal class TrackingStateStore(context: Context) {
             .putLong(KEY_LAST_PROVIDER_CALLBACK_AT, timestamp)
             .apply()
         persistedProviderCallbackAt = timestamp
+    }
+
+    /**
+     * The running generation's steps, saved every heartbeat so a process
+     * death leaves them behind. Asynchronous, like the heartbeat.
+     */
+    fun checkpointSteps(snapshot: StepSnapshot) {
+        preferences.edit()
+            .putString(KEY_STEP_CHECKPOINT, StepRecordCodec.encode(snapshot))
+            .apply()
+    }
+
+    /** An ended generation's final steps, durable before capture stops. */
+    fun finalizeSteps(snapshot: StepSnapshot) {
+        preferences.edit()
+            .putString(KEY_STEP_FINAL, StepRecordCodec.encode(snapshot))
+            .remove(KEY_STEP_CHECKPOINT)
+            .commitOrThrow("persist final steps")
+    }
+
+    /**
+     * `{captureGenerationId, stepCount, stepCoverage}` of the newest ended
+     * generation: its final flush, or the checkpoint its process left behind
+     * (`ended_unflushed`). Kept until a newer generation ends.
+     */
+    fun stepFinal(): Map<String, Any?>? =
+        StepRecordCodec.decode(preferences.getString(KEY_STEP_FINAL, null))
+            ?.let(StepRecordCodec::toStatusMap)
+
+    /**
+     * Capture ends with no live step count: a checkpoint left behind belongs
+     * to a generation whose process died, and becomes its final now.
+     */
+    fun endUnflushedSteps() {
+        if (!preferences.contains(KEY_STEP_CHECKPOINT)) return
+        preferences.edit()
+            .endUnflushedStepCheckpoint(newGenerationId = null)
+            .commitOrThrow("end unflushed steps")
     }
 
     fun markLocationRequestFailure(
@@ -353,6 +408,15 @@ internal class TrackingStateStore(context: Context) {
             .putLong(KEY_SERVICE_HEARTBEAT_AT, timestamp)
             .putBoolean(KEY_HEARTBEAT_CAPTURE_ACTIVE, captureActive)
             .apply()
+    }
+
+    /**
+     * Records that the device began shutting down during capture, so the gap
+     * before the next boot can be explained. Synchronous: shutdown leaves no
+     * time for an asynchronous write.
+     */
+    fun markShutdownObserved(timestamp: Long = System.currentTimeMillis()) {
+        preferences.edit().putLong(KEY_LAST_SHUTDOWN_OBSERVED_AT, timestamp).commit()
     }
 
     fun markServiceStopped() {
@@ -495,13 +559,19 @@ internal class TrackingStateStore(context: Context) {
             "serviceAlive" to serviceAlive,
             "captureAlive" to captureAlive,
             "captureGenerationId" to captureGenerationId,
+            "stepCount" to LocationTrackingService.stepCount(captureGenerationId),
+            "stepCoverage" to LocationTrackingService.stepCoverage(captureGenerationId),
+            "stepFinal" to stepFinal(),
             "nativeSessionStartedAt" to nativeSessionStartedAt,
             "captureStartReason" to captureStartReason,
             "serviceHeartbeatAt" to heartbeatAt,
+            "lastShutdownObservedAt" to preferences.getLong(KEY_LAST_SHUTDOWN_OBSERVED_AT, 0L)
+                .takeIf { it > 0L },
             "heartbeatFresh" to heartbeatFresh,
             "heartbeatCaptureActive" to heartbeatCaptureActive,
             "lastProviderCallbackAt" to lastProviderCallbackAt,
             "lastProfileTransitionAt" to lastProfileTransitionAt,
+            "profileTransitionReason" to lastProfileTransitionReason,
             "stationaryExitProbeRequestedAt" to stationaryExitProbeRequestedAt,
             "stationaryExitProbeCompletedAt" to stationaryExitProbeCompletedAt,
             "stationaryExitProbeOutcome" to stationaryExitProbeOutcome,
@@ -546,12 +616,30 @@ internal class TrackingStateStore(context: Context) {
         }
     }
 
+    /**
+     * A checkpoint of another generation was never finalized: its process
+     * died. Its last heartbeat becomes that generation's final.
+     */
+    private fun SharedPreferences.Editor.endUnflushedStepCheckpoint(
+        newGenerationId: String?,
+    ): SharedPreferences.Editor {
+        val checkpoint = preferences.getString(KEY_STEP_CHECKPOINT, null) ?: return this
+        val snapshot = StepRecordCodec.decode(checkpoint) ?: return remove(KEY_STEP_CHECKPOINT)
+        if (snapshot.generationId == newGenerationId) return this
+        val ended = snapshot.copy(
+            coverage = snapshot.coverage.copy(state = StepCoverage.STATE_ENDED_UNFLUSHED),
+        )
+        return putString(KEY_STEP_FINAL, StepRecordCodec.encode(ended))
+            .remove(KEY_STEP_CHECKPOINT)
+    }
+
     private fun SharedPreferences.Editor.clearActiveCaptureEvidence(): SharedPreferences.Editor =
         remove(KEY_CAPTURE_GENERATION_ID)
             .remove(KEY_NATIVE_SESSION_STARTED_AT)
             .remove(KEY_CAPTURE_START_REASON)
             .remove(KEY_LAST_PROVIDER_CALLBACK_AT)
             .remove(KEY_LAST_PROFILE_TRANSITION_AT)
+            .remove(KEY_LAST_PROFILE_TRANSITION_REASON)
             .remove(KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT)
             .remove(KEY_STATIONARY_EXIT_PROBE_OUTCOME)
@@ -590,12 +678,14 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_CONFIGURATION = "tracking_configuration"
         private const val KEY_SERVICE_STARTED_AT = "service_started_at"
         private const val KEY_SERVICE_HEARTBEAT_AT = "service_heartbeat_at"
+        private const val KEY_LAST_SHUTDOWN_OBSERVED_AT = "last_shutdown_observed_at"
         private const val KEY_HEARTBEAT_CAPTURE_ACTIVE = "heartbeat_capture_active"
         private const val KEY_CAPTURE_GENERATION_ID = "capture_generation_id"
         private const val KEY_NATIVE_SESSION_STARTED_AT = "native_session_started_at"
         private const val KEY_CAPTURE_START_REASON = "capture_start_reason"
         private const val KEY_LAST_PROVIDER_CALLBACK_AT = "last_provider_callback_at"
         private const val KEY_LAST_PROFILE_TRANSITION_AT = "last_profile_transition_at"
+        private const val KEY_LAST_PROFILE_TRANSITION_REASON = "last_profile_transition_reason"
         private const val KEY_STATIONARY_EXIT_PROBE_REQUESTED_AT =
             "stationary_exit_probe_requested_at"
         private const val KEY_STATIONARY_EXIT_PROBE_COMPLETED_AT =
@@ -621,6 +711,8 @@ internal class TrackingStateStore(context: Context) {
         private const val KEY_SESSION_CONTROL_TOKEN = "session_control_token"
         private const val KEY_COMMAND_REVISION = "command_revision"
         private const val KEY_LAST_COMMAND_ID = "last_command_id"
+        private const val KEY_STEP_CHECKPOINT = "step_checkpoint"
+        private const val KEY_STEP_FINAL = "step_final"
         private const val SERVICE_START_GRACE_MS = 90_000L
         private const val SERVICE_HEARTBEAT_STALE_AFTER_MS = 180_000L
         private const val PROVIDER_CALLBACK_PERSIST_INTERVAL_MS = 15_000L
@@ -643,4 +735,62 @@ internal class TrackingStateStore(context: Context) {
             return manager.isIgnoringBatteryOptimizations(context.packageName)
         }
     }
+}
+
+/** JSON for the persisted step checkpoint and final; no Android types. */
+internal object StepRecordCodec {
+    fun encode(snapshot: StepSnapshot): String = JSONObject().apply {
+        put("captureGenerationId", snapshot.generationId)
+        put("stepCount", snapshot.steps ?: JSONObject.NULL)
+        put(
+            "stepCoverage",
+            JSONObject().apply {
+                val coverage = snapshot.coverage
+                put("state", coverage.state)
+                put("countedThrough", coverage.countedThrough ?: JSONObject.NULL)
+                put("lastRiseAt", coverage.lastRiseAt ?: JSONObject.NULL)
+                put("uncountedMs", coverage.uncountedMs)
+                put("sensor", coverage.sensor ?: JSONObject.NULL)
+                put("reregistrations", coverage.reregistrations)
+            },
+        )
+    }.toString()
+
+    fun decode(text: String?): StepSnapshot? {
+        if (text.isNullOrBlank()) return null
+        return try {
+            val json = JSONObject(text)
+            val generationId = json.stringOrNull("captureGenerationId")
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
+            val coverage = json.optJSONObject("stepCoverage")
+            StepSnapshot(
+                generationId = generationId,
+                steps = json.longOrNull("stepCount"),
+                coverage = StepCoverage(
+                    state = coverage?.stringOrNull("state") ?: StepCoverage.STATE_UNAVAILABLE,
+                    countedThrough = coverage?.longOrNull("countedThrough"),
+                    lastRiseAt = coverage?.longOrNull("lastRiseAt"),
+                    uncountedMs = coverage?.longOrNull("uncountedMs") ?: 0L,
+                    sensor = coverage?.stringOrNull("sensor"),
+                    reregistrations = coverage?.longOrNull("reregistrations")?.toInt() ?: 0,
+                ),
+            )
+        } catch (_: JSONException) {
+            null
+        }
+    }
+
+    /** The `stepFinal` status map. */
+    fun toStatusMap(snapshot: StepSnapshot): Map<String, Any?> = linkedMapOf(
+        "captureGenerationId" to snapshot.generationId,
+        "stepCount" to snapshot.steps,
+        "stepCoverage" to snapshot.coverage.toMap(),
+    )
+
+    private fun JSONObject.longOrNull(key: String): Long? =
+        if (isNull(key)) null else (opt(key) as? Number)?.toLong()
+
+    private fun JSONObject.stringOrNull(key: String): String? =
+        if (isNull(key)) null else opt(key) as? String
 }

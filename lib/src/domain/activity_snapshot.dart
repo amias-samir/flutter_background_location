@@ -130,6 +130,23 @@ final class ActivitySnapshot {
     );
   }
 
+  /// This reading in the shape [ActivitySnapshot.fromMap] decodes, as a route
+  /// stores the readings journaled with a fix.
+  Map<String, Object?> toStoredMap() => <String, Object?>{
+        'type': type.value,
+        'confidence': confidence,
+        if (recordedAt != null) 'timestamp': recordedAt!.millisecondsSinceEpoch,
+        'evidenceState': evidenceState.name,
+        'source': source,
+        if (rawType != null) 'rawType': rawType,
+        if (age != null) 'ageMs': age!.inMilliseconds,
+        if (probabilities.isNotEmpty)
+          'probabilities': <String, int>{
+            for (final entry in probabilities.entries)
+              entry.key.value: entry.value,
+          },
+      };
+
   /// Decodes a native activity-channel payload.
   factory ActivitySnapshot.fromMap(Map<Object?, Object?> map) {
     final timestamp = map['timestamp'] ?? map['activityTimestamp'];

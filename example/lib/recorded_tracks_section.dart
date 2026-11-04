@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
+import 'route_totals.dart';
+
 enum RecordedTrackAction {
   exportGeoJson,
   exportKml,
@@ -21,9 +23,13 @@ class RecordedTracksSection extends StatelessWidget {
     required this.onViewMap,
     required this.onExport,
     required this.onDelete,
+    this.totals = const <String, RouteTotals>{},
   });
 
   final List<Track> tracks;
+
+  /// Stored totals by track ID; a track without an entry shows none.
+  final Map<String, RouteTotals> totals;
   final bool hasMore;
   final Future<void> Function()? onRefresh;
   final Future<void> Function()? onLoadMore;
@@ -152,20 +158,38 @@ class RecordedTracksSection extends StatelessWidget {
                 label: track.status.name,
                 color: statusColor,
               ),
-              _RouteDetail(
-                icon: Icons.pin_drop_outlined,
-                label: '${track.acceptedPointCount} points',
-              ),
+              // The corrected distance once the route was reviewed. The
+              // point count is a sampling statistic and stays on the map.
               _RouteDetail(
                 icon: Icons.straighten_rounded,
-                label:
-                    '${(track.totalDistanceMeters / 1000).toStringAsFixed(2)} km',
+                label: kilometres(
+                  totals[track.id]?.displayDistanceMeters ??
+                      track.totalDistanceMeters,
+                ),
               ),
               _RouteDetail(
                 icon: Icons.polyline_outlined,
                 label:
                     '${track.segmentCount} segment${track.segmentCount == 1 ? '' : 's'}',
               ),
+              if (totals[track.id] case final totals?) ...<Widget>[
+                _RouteDetail(
+                  icon: Icons.timer_outlined,
+                  label: 'Moving ${hoursMinutes(totals.moving)}',
+                ),
+                if (totals.stopCount > 0)
+                  _RouteDetail(
+                    icon: Icons.local_parking_rounded,
+                    label:
+                        '${totals.stopCount} stop(s) • '
+                        '${hoursMinutes(totals.stopped)}',
+                  ),
+                if (totals.stepsText case final steps?)
+                  _RouteDetail(
+                    icon: Icons.directions_walk_rounded,
+                    label: steps,
+                  ),
+              ],
             ],
           ),
         ),

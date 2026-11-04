@@ -118,6 +118,27 @@ void main() {
 
   tearDown(() => harness.repository.close());
 
+  test('LBO-17A drain-all reports whether any upload work exists', () async {
+    final uploader = _ControlledUploader();
+    final batchUploader = TrackingBatchUploader(
+      repository: harness.repository,
+      uploader: uploader,
+      maximumPointCount: 25,
+    );
+
+    expect(await batchUploader.tryDrainAll(), isFalse);
+
+    final trackId = await harness.createActiveTrack(trackId: 'pending-upload');
+    await harness.append(trackId: trackId, latitude: 0.001, longitude: 0.001);
+    await harness.repository.completeTrack(trackId, reason: 'finished');
+
+    expect(await batchUploader.tryDrainAll(), isTrue);
+    expect(uploader.batches.map((batch) => batch.trackId), <String>[trackId]);
+    // Drained work leaves nothing to poll for.
+    expect(await batchUploader.tryDrainAll(), isFalse);
+    await batchUploader.dispose();
+  });
+
   test('drains different tracks independently and joins same-track callers',
       () async {
     final firstTrack = await harness.createActiveTrack(trackId: 'upload-a');

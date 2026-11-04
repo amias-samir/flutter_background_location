@@ -4,7 +4,8 @@ import Foundation
 /// Active-capture-only, coordinate-free motion collector.
 ///
 /// Raw device-motion samples are reduced on a private queue and are never
-/// emitted to Flutter or persisted.
+/// emitted to Flutter or persisted. All state lives on that serial queue: the
+/// public methods enqueue onto it and every Core Motion handler hops onto it.
 final class MotionSensorFusion {
   private let pedometer = CMPedometer()
   private let motion = CMMotionManager()
@@ -23,8 +24,8 @@ final class MotionSensorFusion {
   private var probeActive = false
   private var probeStartedAt = Date.distantPast
   private var lastProbeCompletedAt = Date.distantPast
-  private var dutyWindowStartedAt = Date.distantPast
-  private var probeDurationUsedMs = 0.0
+  private var probeBudget = RollingProbeBudget()
+  private var stepCadence = StepCadenceWindow(startedAt: 0)
   private var accelerationSamples = 0
   private var accelerationSquaredSum = 0.0
   private var rotationSamples = 0
@@ -36,7 +37,22 @@ final class MotionSensorFusion {
   }
 
   func start(configuration: TrackingConfiguration) {
-    stop()
+    queue.addOperation { [weak self] in self?.startOnQueue(configuration: configuration) }
+  }
+
+  func stop() {
+    queue.addOperation { [weak self] in self?.stopOnQueue() }
+  }
+
+  /// Starts one ambiguity probe if enhanced mode, cooldown, and duty allow.
+  func requestAmbiguityProbe(stationaryCandidate: Bool = false) {
+    queue.addOperation { [weak self] in
+      self?.startProbeOnQueue(stationaryCandidate: stationaryCandidate)
+    }
+  }
+
+  private func startOnQueue(configuration: TrackingConfiguration) {
+    stopOnQueue()
     self.configuration = configuration
     active = true
     generation += 1
@@ -49,24 +65,30 @@ final class MotionSensorFusion {
       return
     }
     let currentGeneration = generation
-    pedometer.startUpdates(from: Date()) { [weak self] data, _ in
-      guard let self, self.active, self.generation == currentGeneration,
-        let steps = data?.numberOfSteps.intValue, steps > 0
-      else {
-        return
+    let startedAt = Date()
+    stepCadence = StepCadenceWindow(startedAt: startedAt.timeIntervalSince1970)
+    pedometer.startUpdates(from: startedAt) { [weak self] data, _ in
+      guard let steps = data?.numberOfSteps.intValue else { return }
+      let receivedAt = Date().timeIntervalSince1970
+      self?.queue.addOperation { [weak self] in
+        guard let self, self.active, self.generation == currentGeneration,
+          self.stepCadence.observe(totalSteps: steps, at: receivedAt)
+        else {
+          return
+        }
+        self.emit(
+          state: "moving",
+          confidence: 95,
+          reason: "fresh_step",
+          supporting: ["step"],
+          stepDetected: true
+        )
       }
-      self.emit(
-        state: "moving",
-        confidence: 95,
-        reason: "fresh_step",
-        supporting: ["step"],
-        stepDetected: true
-      )
     }
     emit(state: "unknown", confidence: 0, reason: "sensor_fusion_ready")
   }
 
-  func stop() {
+  private func stopOnQueue() {
     active = false
     generation += 1
     pedometer.stopUpdates()
@@ -76,7 +98,7 @@ final class MotionSensorFusion {
   }
 
   @discardableResult
-  func requestAmbiguityProbe(stationaryCandidate: Bool = false) -> Bool {
+  private func startProbeOnQueue(stationaryCandidate: Bool) -> Bool {
     guard active,
       configuration.motionFusionMode == "enhancedSensorFusion",
       !probeActive,
@@ -90,12 +112,12 @@ final class MotionSensorFusion {
     else {
       return false
     }
-    if now.timeIntervalSince(dutyWindowStartedAt) >= 3_600 {
-      dutyWindowStartedAt = now
-      probeDurationUsedMs = 0
-    }
-    guard probeDurationUsedMs + configuration.sensorProbeDurationMs
-      <= configuration.sensorProbeMaximumDurationPerHourMs
+    guard
+      probeBudget.allows(
+        at: now.timeIntervalSince1970,
+        duration: configuration.sensorProbeDurationMs / 1_000,
+        maximum: configuration.sensorProbeMaximumDurationPerHourMs / 1_000
+      )
     else {
       return false
     }
@@ -141,7 +163,10 @@ final class MotionSensorFusion {
     motion.stopDeviceMotionUpdates()
     let now = Date()
     let durationMs = max(0, now.timeIntervalSince(probeStartedAt) * 1_000)
-    probeDurationUsedMs += durationMs
+    probeBudget.record(
+      start: probeStartedAt.timeIntervalSince1970,
+      end: now.timeIntervalSince1970
+    )
     lastProbeCompletedAt = now
     let accelerationEnergy = rms(accelerationSquaredSum, accelerationSamples)
     let rotationEnergy = rms(rotationSquaredSum, rotationSamples)
@@ -163,7 +188,7 @@ final class MotionSensorFusion {
         "accelerationMotionEnergy": accelerationEnergy,
         "gyroscopeSampleCount": rotationSamples,
         "rotationEnergy": rotationEnergy,
-        "probeDutyUsedMs": probeDurationUsedMs,
+        "probeDutyUsedMs": probeBudget.used(at: now.timeIntervalSince1970) * 1_000,
       ]
     )
     resetProbeFeatures()

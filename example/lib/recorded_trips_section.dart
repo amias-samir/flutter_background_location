@@ -3,26 +3,23 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
+import 'route_totals.dart';
+
 final class RecordedTripSummary {
-  const RecordedTripSummary({
-    required this.trip,
-    required this.segmentCount,
-    required this.gapCount,
-    this.qualityEventCount = 0,
-    this.visibleGapCount = 0,
-  });
+  const RecordedTripSummary({required this.trip, this.totals});
 
   final Trip trip;
-  final int segmentCount;
-  final int gapCount;
-  final int qualityEventCount;
-  final int visibleGapCount;
+
+  /// The Trip's stored totals; null when the facade keeps none.
+  final RouteTotals? totals;
 }
 
 enum RecordedTripAction {
   exportGeoJson,
   exportKml,
   exportGpx,
+  exportCleanedGpx,
+  exportDiagnostics,
   viewMap,
   continueTrip,
   delete,
@@ -39,7 +36,15 @@ class RecordedTripsSection extends StatelessWidget {
     required this.onContinue,
     required this.onExport,
     required this.onDelete,
+    this.onExportDiagnostics,
+    this.onExportCleaned,
+    this.showDiagnostics = true,
   });
+
+  /// Whether the cards show quality events and visible gaps and offer the
+  /// diagnostic export. Off in a clean build ([RouteRecordingDetail.clean]),
+  /// which records neither.
+  final bool showDiagnostics;
 
   final List<RecordedTripSummary> trips;
   final bool hasMore;
@@ -50,6 +55,13 @@ class RecordedTripsSection extends StatelessWidget {
   final Future<void> Function(String tripId, TrackExportFormat format)?
   onExport;
   final Future<void> Function(Trip trip)? onDelete;
+
+  /// Exports GeoJSON with point features, rejected points and per-fix
+  /// diagnostics, for explaining a field test.
+  final Future<void> Function(String tripId)? onExportDiagnostics;
+
+  /// Exports GPX of the cleaned route view, where each stop is one point.
+  final Future<void> Function(Trip trip)? onExportCleaned;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -169,27 +181,47 @@ class RecordedTripsSection extends StatelessWidget {
                 icon: Icons.calendar_view_day,
                 label: '${trip.legCount} day(s)',
               ),
-              _TripDetail(
-                icon: Icons.pin_drop_outlined,
-                label: '${trip.acceptedPointCount} points',
-              ),
+              // The corrected distance once a day was reviewed. The point
+              // count is a sampling statistic and stays on the map.
               _TripDetail(
                 icon: Icons.straighten_rounded,
-                label:
-                    '${(trip.measuredDistanceMeters / 1000).toStringAsFixed(2)} km',
+                label: kilometres(
+                  summary.totals?.displayDistanceMeters ??
+                      trip.measuredDistanceMeters,
+                ),
               ),
-              _TripDetail(
-                icon: Icons.polyline_outlined,
-                label: '${summary.segmentCount} segment(s)',
-              ),
-              _TripDetail(
-                icon: Icons.warning_amber_rounded,
-                label: '${summary.qualityEventCount} quality event(s)',
-              ),
-              _TripDetail(
-                icon: Icons.broken_image_outlined,
-                label: '${summary.visibleGapCount} visible gap(s)',
-              ),
+              if (summary.totals case final totals?) ...<Widget>[
+                _TripDetail(
+                  icon: Icons.polyline_outlined,
+                  label: '${totals.segmentCount} segment(s)',
+                ),
+                _TripDetail(
+                  icon: Icons.timer_outlined,
+                  label: 'Moving ${hoursMinutes(totals.moving)}',
+                ),
+                if (totals.stopCount > 0)
+                  _TripDetail(
+                    icon: Icons.local_parking_rounded,
+                    label:
+                        '${totals.stopCount} stop(s) • '
+                        '${hoursMinutes(totals.stopped)}',
+                  ),
+                if (totals.stepsText case final steps?)
+                  _TripDetail(
+                    icon: Icons.directions_walk_rounded,
+                    label: steps,
+                  ),
+                if (showDiagnostics) ...<Widget>[
+                  _TripDetail(
+                    icon: Icons.warning_amber_rounded,
+                    label: '${totals.qualityEventCount} quality event(s)',
+                  ),
+                  _TripDetail(
+                    icon: Icons.broken_image_outlined,
+                    label: '${totals.visibleGapCount} visible gap(s)',
+                  ),
+                ],
+              ],
             ],
           ),
         ),
@@ -215,6 +247,19 @@ class RecordedTripsSection extends StatelessWidget {
               'Export GPX',
               canExport && onExport != null,
             ),
+            _item(
+              RecordedTripAction.exportCleanedGpx,
+              Icons.auto_fix_high_outlined,
+              'Export cleaned GPX',
+              canExport && onExportCleaned != null,
+            ),
+            if (showDiagnostics)
+              _item(
+                RecordedTripAction.exportDiagnostics,
+                Icons.troubleshoot_outlined,
+                'Export diagnostic GeoJSON',
+                canExport && onExportDiagnostics != null,
+              ),
             _item(
               RecordedTripAction.viewMap,
               Icons.map_outlined,
@@ -258,6 +303,10 @@ class RecordedTripsSection extends StatelessWidget {
         unawaited(onExport?.call(trip.id, TrackExportFormat.kml));
       case RecordedTripAction.exportGpx:
         unawaited(onExport?.call(trip.id, TrackExportFormat.gpx));
+      case RecordedTripAction.exportCleanedGpx:
+        unawaited(onExportCleaned?.call(trip));
+      case RecordedTripAction.exportDiagnostics:
+        unawaited(onExportDiagnostics?.call(trip.id));
       case RecordedTripAction.viewMap:
         unawaited(onViewMap?.call(trip));
       case RecordedTripAction.continueTrip:
@@ -314,7 +363,14 @@ class _TripDetail extends StatelessWidget {
         children: <Widget>[
           Icon(icon, size: 11, color: foreground),
           const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 11, color: foreground)),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: foreground),
+            ),
+          ),
         ],
       ),
     );

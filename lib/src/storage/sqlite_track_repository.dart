@@ -8,12 +8,20 @@ import 'package:uuid/uuid.dart';
 import '../domain/activity_snapshot.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
+import '../domain/quality_run_rules.dart';
 import '../domain/motion_evidence.dart';
+import '../domain/persisted_tracking_config.dart';
+import '../domain/route_recording_detail.dart';
+import '../domain/route_review.dart';
+import '../domain/route_summary.dart';
+import '../domain/step_coverage.dart';
 import '../domain/track.dart';
 import '../domain/track_data_page.dart';
 import '../domain/track_point.dart';
 import '../domain/track_query.dart';
 import '../domain/track_segment.dart';
+import '../domain/track_stop.dart';
+import '../domain/track_stop_places.dart';
 import '../domain/tracker_status.dart';
 import '../domain/trip.dart';
 import '../domain/trip_query.dart';
@@ -24,8 +32,12 @@ import '../domain/tracking_error.dart';
 import '../domain/tracking_privacy.dart';
 import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
+import 'route_compaction_store.dart';
+import 'route_review_store.dart';
+import 'route_summary_store.dart';
 import 'track_repository.dart';
 import 'trip_repository.dart';
+import '../domain/track_geodesy.dart';
 
 /// Configures connection-scoped SQLite behavior used by the track repository.
 ///
@@ -35,6 +47,10 @@ Future<void> configureTrackDatabase(Database database) async {
   await database.execute('PRAGMA foreign_keys = ON');
   await database.rawQuery('PRAGMA busy_timeout = 5000');
   await database.rawQuery('PRAGMA journal_mode = WAL');
+  // Native fixes are acknowledged after the commit returns, so a commit must
+  // survive power loss. WAL with NORMAL (Android's framework default) may
+  // roll back the newest commits after a power cut; FULL syncs the WAL first.
+  await database.execute('PRAGMA synchronous = FULL');
 }
 
 final class SqliteTrackRepository
@@ -45,9 +61,13 @@ final class SqliteTrackRepository
         PaginatedTrackRepository,
         StreamingTrackRepository,
         ConfigurationEpochRepository,
+        ActiveConfigurationEpochRepository,
         MutableConfigurationEpochRepository,
         ContinuityTrackRepository,
         GapSegmentRepository,
+        RouteSummaryRepository,
+        RouteReviewRepository,
+        KeyedHealthEventRepository,
         LegacyGapEvidenceRepository,
         OwnerScopedTrackRepository,
         PrivacyTrackRepository,
@@ -56,7 +76,10 @@ final class SqliteTrackRepository
         TripUploadOutboxRepository,
         TripPrivacyRepository,
         QualityDiagnosticsRepository,
-        DerivedGeometryRepository {
+        DerivedGeometryRepository,
+        TrackStopRepository,
+        DecisionTailRepository,
+        RecordingDetailRepository {
   SqliteTrackRepository({
     required this.path,
     DatabaseFactory? databaseFactoryOverride,
@@ -103,6 +126,44 @@ final class SqliteTrackRepository
       StreamController<Track?>.broadcast();
   Track? _currentTrackSnapshot;
 
+  RouteRecordingDetail _newRouteRecordingDetail = RouteRecordingDetail.full;
+  bool _recordsDiagnosticHealthEvents = true;
+
+  @override
+  set newRouteRecordingDetail(RouteRecordingDetail value) {
+    _newRouteRecordingDetail = value == RouteRecordingDetail.clean
+        ? RouteRecordingDetail.clean
+        : RouteRecordingDetail.full;
+  }
+
+  @override
+  set recordsDiagnosticHealthEvents(bool value) {
+    _recordsDiagnosticHealthEvents = value;
+  }
+
+  int _healthEventsSincePrune = 0;
+
+  /// Health event types that prove a lifecycle boundary. Legacy gap
+  /// classification reads them, so they are never pruned.
+  static const _gapEvidenceHealthEventTypes = <String>[
+    'native_tracker_interrupted',
+    'native_tracker_failed',
+    'previous_session_interrupted',
+    'termination_recovery_started_gap_possible',
+    'authorization_changed',
+  ];
+
+  /// Whether a health event of [type] is stored: diagnostic events only
+  /// when [recordsDiagnosticHealthEvents] is on, lifecycle evidence always.
+  bool _storesHealthEvent(String type) =>
+      _recordsDiagnosticHealthEvents ||
+      _gapEvidenceHealthEventTypes.contains(type);
+
+  /// Newest diagnostic health events kept per track (and for events without a
+  /// track); pruning runs after every [_healthEventPruneInterval] inserts.
+  static const _maximumDiagnosticHealthEventsPerTrack = 500;
+  static const _healthEventPruneInterval = 50;
+
   Database? _database;
 
   static DateTime _utcNow() => DateTime.now().toUtc();
@@ -140,7 +201,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 14,
+        version: 19,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -152,8 +213,80 @@ final class SqliteTrackRepository
     // Trip completion outbox without a destructive version bump.
     await _createTripUploadOutboxSchema(_db);
     await _createSchema13EvidenceTables(_db);
-    await _repairInitialConfigurationEpochs(_db);
+    // Also ensured on every open: an upgrade from a database without
+    // track_points returns before the schema 16 and 17 branches.
+    await _createTrackStopsSchema(_db);
+    await RouteSummaryStore.ensureSchema(_db);
+    await RouteReviewStore.ensureSchema(_db);
+    await RouteCompactionStore.ensureSchema(_db);
+    await _db.transaction(_repairInitialConfigurationEpochs);
+    await _refreshStaleSummaries();
     await _emitCurrentTrack();
+  }
+
+  /// Recomputes summaries that are missing, such as after the schema 17
+  /// upgrade, or written under an older definition; one transaction per
+  /// track.
+  Future<void> _refreshStaleSummaries() async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT track.id FROM tracks AS track
+      LEFT JOIN track_summaries AS summary ON summary.track_id = track.id
+      WHERE summary.track_id IS NULL OR summary.summary_version < ?
+      ''',
+      <Object?>[RouteSummaryStore.summaryVersion],
+    );
+    for (final row in rows) {
+      await _db.transaction(
+        (transaction) =>
+            _refreshSummary(transaction, row['id']! as String, _clock()),
+      );
+    }
+  }
+
+  /// Recomputes [trackId]'s summary, and its Trip's, from the stored rows.
+  Future<void> _refreshSummary(
+    DatabaseExecutor executor,
+    String trackId,
+    DateTime now,
+  ) async {
+    final (recordsStops, maximumPlausibleSpeed) =
+        await _summaryInputs(executor, trackId);
+    await RouteSummaryStore.refresh(
+      executor,
+      trackId,
+      recordsStops: recordsStops,
+      maximumPlausibleSpeedMetersPerSecond: maximumPlausibleSpeed,
+      now: now,
+    );
+    final tripId = await RouteSummaryStore.tripIdOf(executor, trackId);
+    if (tripId != null) {
+      await RouteSummaryStore.refreshTrip(executor, tripId, now: now);
+    }
+  }
+
+  /// Whether [trackId] records stops live (adaptive capture under quality
+  /// policy 3 or later), and its plausible-speed limit, from its newest
+  /// configuration epoch.
+  static Future<(bool, double)> _summaryInputs(
+    DatabaseExecutor executor,
+    String trackId,
+  ) async {
+    final rows = await executor.query(
+      'tracking_configuration_epochs',
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      orderBy: 'activation_sequence DESC',
+      limit: 1,
+    );
+    if (rows.isEmpty) return (false, 70.0);
+    final epoch = TrackingConfigurationEpoch.fromDatabase(rows.single);
+    final config = epoch.resolvedConfig;
+    return (
+      config.captureIntent == RouteCaptureIntent.adaptive &&
+          epoch.qualityPolicyVersion >= 3,
+      config.maximumPlausibleSpeedMetersPerSecond,
+    );
   }
 
   static Future<void> _createSchema(Database database, int version) async {
@@ -342,6 +475,10 @@ final class SqliteTrackRepository
     await _createDerivedGeometrySchema(database);
     await _createContinuityAndTripSchema(database);
     await _createSchema13EvidenceTables(database);
+    await _createTrackStopsSchema(database);
+    await RouteSummaryStore.ensureSchema(database);
+    await RouteReviewStore.ensureSchema(database);
+    await RouteCompactionStore.ensureSchema(database);
   }
 
   static Future<void> _upgradeSchema(
@@ -554,6 +691,151 @@ final class SqliteTrackRepository
     if (oldVersion < 14) {
       await _repairMeasuredDistances(database);
     }
+    if (oldVersion < 15) {
+      await _ensureEpochContinuityPolicyColumn(database);
+    }
+    if (oldVersion < 16) {
+      await _createTrackStopsSchema(database);
+    }
+    if (oldVersion < 17) {
+      await RouteSummaryStore.ensureSchema(database);
+      await _consolidateStopsByPlace(database);
+      // Summaries are computed when the database opens.
+    }
+    if (oldVersion < 18) {
+      await RouteSummaryStore.ensureSchema(database);
+      await RouteReviewStore.ensureSchema(database);
+      await RouteReviewStore.seedLiveStepGenerations(database);
+      // Reviews of older routes run in the background after the open.
+    }
+    if (oldVersion < 19) {
+      // Routes recorded before schema 19 keep everything they recorded.
+      await RouteCompactionStore.ensureSchema(database);
+    }
+  }
+
+  /// Schema 17 stores one stop row per place: earlier rows of one visit are
+  /// combined into the first ([TrackStopPlaces.group]) and the rest deleted.
+  static Future<void> _consolidateStopsByPlace(Database database) async {
+    final tables = await database.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table' "
+      "AND name = 'track_stops'",
+    );
+    if (tables.isEmpty) return;
+    final tracks = await database.rawQuery(
+      'SELECT track_id FROM track_stops GROUP BY track_id HAVING COUNT(*) > 1',
+    );
+    for (final track in tracks) {
+      final rows = await database.query(
+        'track_stops',
+        where: 'track_id = ?',
+        whereArgs: <Object?>[track['track_id']],
+      );
+      for (final place in TrackStopPlaces.group(rows.map(_trackStopFromRow))) {
+        if (place.length < 2) continue;
+        final merged = TrackStopPlaces.combine(place);
+        await database.update(
+          'track_stops',
+          _placeColumns(merged),
+          where: 'id = ?',
+          whereArgs: <Object?>[merged.id],
+        );
+        for (final stay in place.skip(1)) {
+          await database.delete(
+            'track_stops',
+            where: 'id = ?',
+            whereArgs: <Object?>[stay.id],
+          );
+        }
+      }
+    }
+  }
+
+  /// Columns of a stored place stop that combining stays can change.
+  static Map<String, Object?> _placeColumns(TrackStop place) =>
+      <String, Object?>{
+        'status': place.isOpen ? 'open' : 'closed',
+        'kind': place.kind,
+        'latitude': place.latitude,
+        'longitude': place.longitude,
+        'centre_sigma_m': place.centreSigmaMeters,
+        'radius_m': place.radiusMeters,
+        'last_seen_at': _timestamp(place.lastSeenAt),
+        'ended_at': place.endedAt == null ? null : _timestamp(place.endedAt!),
+        'last_sequence': place.lastSequence,
+        'departure_point_id': place.departurePointId,
+        'evidence_count': place.evidenceCount,
+      };
+
+  /// Schema 16: stops recorded by quality policy 3, one row per stay of two
+  /// minutes or more. Additive and idempotent; an older build ignores it.
+  static Future<void> _createTrackStopsSchema(DatabaseExecutor database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS track_stops (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        segment_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        latitude REAL NOT NULL,
+        longitude REAL NOT NULL,
+        centre_sigma_m REAL NOT NULL,
+        radius_m REAL NOT NULL,
+        started_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        ended_at TEXT,
+        first_sequence INTEGER,
+        last_sequence INTEGER,
+        arrival_point_id TEXT,
+        departure_point_id TEXT,
+        evidence_count INTEGER NOT NULL,
+        quality_policy_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        FOREIGN KEY(segment_id) REFERENCES track_segments(id)
+          ON DELETE CASCADE,
+        FOREIGN KEY(arrival_point_id) REFERENCES track_points(id)
+          ON DELETE SET NULL,
+        FOREIGN KEY(departure_point_id) REFERENCES track_points(id)
+          ON DELETE SET NULL,
+        CHECK(status IN ('open', 'closed')),
+        CHECK(evidence_count >= 0),
+        CHECK(status = 'open' OR ended_at IS NOT NULL)
+      )
+    ''');
+    await database.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_track_stops_open
+      ON track_stops(track_id) WHERE status = 'open'
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_track_stops_track_started
+      ON track_stops(track_id, started_at)
+    ''');
+  }
+
+  /// Schema 15 records the continuity classifier version on each epoch so a
+  /// later classifier applies only to epochs created under it.
+  ///
+  /// Existing epochs keep NULL, read as
+  /// [TrackingPolicyVersions.legacyContinuityPolicy]. The check is idempotent
+  /// because sqflite lowers the stored version without a downgrade callback,
+  /// so a downgraded database can run this branch again.
+  static Future<void> _ensureEpochContinuityPolicyColumn(
+    DatabaseExecutor executor,
+  ) async {
+    final columns = await executor.rawQuery(
+      'PRAGMA table_info(tracking_configuration_epochs)',
+    );
+    if (columns.isEmpty ||
+        columns.any((row) => row['name'] == 'continuity_policy_version')) {
+      return;
+    }
+    await executor.execute(
+      'ALTER TABLE tracking_configuration_epochs '
+      'ADD COLUMN continuity_policy_version INTEGER '
+      'CHECK(continuity_policy_version IS NULL OR continuity_policy_version > 0)',
+    );
   }
 
   /// Repairs distance totals created by continuity policy version 1.
@@ -1139,6 +1421,8 @@ final class SqliteTrackRepository
         created_at TEXT NOT NULL,
         activation_sequence INTEGER NOT NULL,
         activated_at TEXT NOT NULL,
+        continuity_policy_version INTEGER
+          CHECK(continuity_policy_version IS NULL OR continuity_policy_version > 0),
         FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE,
         UNIQUE(track_id, epoch_number),
         UNIQUE(track_id, activation_sequence),
@@ -1161,6 +1445,12 @@ final class SqliteTrackRepository
     ''');
   }
 
+  /// Creates epoch 1 for routes recorded before epochs existed.
+  ///
+  /// Only tracks without epoch 1 are read, so a normal startup does no
+  /// per-track work. Repaired epochs carry the legacy policy labels and only
+  /// the repaired track's own points are linked. Run it inside a transaction
+  /// so an epoch and its point links commit together.
   static Future<void> _repairInitialConfigurationEpochs(
     DatabaseExecutor executor,
   ) async {
@@ -1177,9 +1467,21 @@ final class SqliteTrackRepository
     );
     if (epochTables.isEmpty) return;
 
-    final tracks = await executor.query(
-      'tracks',
-      columns: <String>['id', 'configuration_json', 'started_at'],
+    final tracks = await executor.rawQuery('''
+      SELECT id, configuration_json, started_at
+      FROM tracks
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM tracking_configuration_epochs AS epoch
+        WHERE epoch.track_id = tracks.id AND epoch.epoch_number = 1
+      )
+    ''');
+    if (tracks.isEmpty) return;
+    final pointColumns = await executor.rawQuery(
+      'PRAGMA table_info(track_points)',
+    );
+    final linksPoints = pointColumns.any(
+      (row) => row['name'] == 'configuration_epoch_id',
     );
     for (final row in tracks) {
       final trackId = row['id'] as String?;
@@ -1192,55 +1494,43 @@ final class SqliteTrackRepository
           startedAt == null) {
         continue;
       }
+      final TrackingConfig resolved;
       try {
-        final resolved = TrackingConfig.fromJson(configurationJson);
+        resolved = decodePersistedTrackingConfig(configurationJson);
         resolved.validate(context: 'Persisted TrackingConfig');
-        await executor.insert(
-          'tracking_configuration_epochs',
-          <String, Object?>{
-            'id': _initialConfigurationEpochId(trackId),
-            'track_id': trackId,
-            'epoch_number': 1,
-            'resolved_configuration_json': resolved.toJson(),
-            'preset_definition_version':
-                TrackingPolicyVersions.presetDefinition,
-            'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
-            'created_at': startedAt,
-            'activation_sequence': 1,
-            'activated_at': startedAt,
-          },
-          conflictAlgorithm: ConflictAlgorithm.ignore,
-        );
       } on Object {
         // Malformed or incomplete legacy configuration is unknown evidence.
         // Do not infer a default epoch for it.
+        continue;
+      }
+      final epochId = _initialConfigurationEpochId(trackId);
+      await executor.insert(
+        'tracking_configuration_epochs',
+        <String, Object?>{
+          'id': epochId,
+          'track_id': trackId,
+          'epoch_number': 1,
+          'resolved_configuration_json': resolved.toJson(),
+          'preset_definition_version':
+              TrackingPolicyVersions.legacyPresetDefinition,
+          'quality_policy_version': TrackingPolicyVersions.legacyQualityPolicy,
+          'created_at': startedAt,
+          'activation_sequence': 1,
+          'activated_at': startedAt,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      if (linksPoints) {
+        await executor.rawUpdate(
+          '''
+          UPDATE track_points
+          SET configuration_epoch_id = ?
+          WHERE track_id = ? AND configuration_epoch_id IS NULL
+          ''',
+          <Object?>[epochId, trackId],
+        );
       }
     }
-
-    final pointColumns = await executor.rawQuery(
-      'PRAGMA table_info(track_points)',
-    );
-    if (!pointColumns.any(
-      (row) => row['name'] == 'configuration_epoch_id',
-    )) {
-      return;
-    }
-    await executor.rawUpdate('''
-      UPDATE track_points
-      SET configuration_epoch_id = (
-        SELECT epoch.id
-        FROM tracking_configuration_epochs AS epoch
-        WHERE epoch.track_id = track_points.track_id
-          AND epoch.epoch_number = 1
-      )
-      WHERE configuration_epoch_id IS NULL
-        AND EXISTS (
-          SELECT 1
-          FROM tracking_configuration_epochs AS epoch
-          WHERE epoch.track_id = track_points.track_id
-            AND epoch.epoch_number = 1
-        )
-    ''');
   }
 
   static String _initialConfigurationEpochId(String trackId) =>
@@ -1353,6 +1643,7 @@ final class SqliteTrackRepository
         'tracker_provider': 'native',
         'configuration_json': config.toJson(),
         'session_control_token': sessionControlToken,
+        'recording_detail': _newRouteRecordingDetail.name,
         'created_at': _timestamp(now),
         'updated_at': _timestamp(now),
       });
@@ -1365,6 +1656,7 @@ final class SqliteTrackRepository
           'resolved_configuration_json': config.toJson(),
           'preset_definition_version': TrackingPolicyVersions.presetDefinition,
           'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+          'continuity_policy_version': TrackingPolicyVersions.continuityPolicy,
           'created_at': _timestamp(now),
           'activation_sequence': 1,
           'activated_at': _timestamp(now),
@@ -1474,6 +1766,7 @@ final class SqliteTrackRepository
       }
       final segmentId = track.currentSegmentId;
       if (segmentId == null) throw StateError('Active track has no segment.');
+      await _closeOpenStop(transaction, trackId, now);
       await transaction.update(
         'track_segments',
         <String, Object?>{
@@ -1510,6 +1803,7 @@ final class SqliteTrackRepository
           trackId,
         ],
       );
+      await _refreshSummary(transaction, trackId, now);
       await _recordOperation(
         transaction,
         trackId,
@@ -1674,6 +1968,7 @@ final class SqliteTrackRepository
       )) {
         return;
       }
+      await _closeOpenStop(transaction, trackId, now);
       final segmentId = track.currentSegmentId;
       if (segmentId != null) {
         await transaction.update(
@@ -1720,6 +2015,7 @@ final class SqliteTrackRepository
         where: 'track_id = ?',
         whereArgs: <Object?>[trackId],
       );
+      await _refreshSummary(transaction, trackId, now);
       await _recordOperation(
         transaction,
         trackId,
@@ -1741,6 +2037,7 @@ final class SqliteTrackRepository
           track.status == TrackStatus.interrupted) {
         return;
       }
+      await _closeOpenStop(transaction, trackId, now);
       final segmentId = track.currentSegmentId;
       if (segmentId != null) {
         await transaction.update(
@@ -1781,6 +2078,7 @@ final class SqliteTrackRepository
           trackId,
         ],
       );
+      await _refreshSummary(transaction, trackId, now);
     });
     await _emitCurrentTrack();
   }
@@ -1793,6 +2091,21 @@ final class SqliteTrackRepository
   Future<PointAppendResult> appendPointWithContinuity(
     PointWriteRequest request,
     TrackingContinuityDecision? continuity,
+  ) =>
+      _appendPoint(request, continuity, null);
+
+  @override
+  Future<PointAppendResult> appendPointWithStop(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
+  ) =>
+      _appendPoint(request, continuity, stop);
+
+  Future<PointAppendResult> _appendPoint(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
   ) async {
     final result = await _db.transaction((transaction) async {
       final nativeEventId = request.sample.eventId;
@@ -1807,7 +2120,8 @@ final class SqliteTrackRepository
           final point = TrackPoint.fromDatabase(existing.single);
           final gapRows = await transaction.query(
             'track_continuity_gaps',
-            where: 'track_id = ? AND after_point_id = ?',
+            where: 'track_id = ? AND after_point_id = ? '
+                'AND review_run_id IS NULL',
             whereArgs: <Object?>[request.trackId, point.id],
             orderBy: 'continuity_policy_version DESC',
             limit: 1,
@@ -1867,6 +2181,14 @@ final class SqliteTrackRepository
       }
 
       final now = _clock();
+      await RouteSummaryStore.create(
+        transaction,
+        request.trackId,
+        recordsStops: configurationEpoch.resolvedConfig.captureIntent ==
+                RouteCaptureIntent.adaptive &&
+            configurationEpoch.qualityPolicyVersion >= 3,
+        now: now,
+      );
       var segmentId = beforeSegmentId;
       final shouldSplit = request.accepted &&
           continuity?.treatment == TrackingGapTreatment.startNewSegment &&
@@ -1927,14 +2249,18 @@ final class SqliteTrackRepository
         request.sample.capturedAt,
         configurationEpoch.resolvedConfig.activityFreshnessThreshold,
       );
-      final motionEvidenceId = await _persistMotionEvidence(
-        transaction,
-        trackId: request.trackId,
-        configurationEpochId: configurationEpoch.id,
-        evidence: request.sample.capturedMotionEvidence,
-        samplingProfile: request.sample.samplingProfile,
-        now: now,
-      );
+      // A clean route stores no motion evidence; only diagnostics read it.
+      final clean = track.recordingDetail == RouteRecordingDetail.clean;
+      final motionEvidenceId = clean
+          ? null
+          : await _persistMotionEvidence(
+              transaction,
+              trackId: request.trackId,
+              configurationEpochId: configurationEpoch.id,
+              evidence: request.sample.capturedMotionEvidence,
+              samplingProfile: request.sample.samplingProfile,
+              now: now,
+            );
       final id = _idGenerator();
       await transaction.insert('track_points', <String, Object?>{
         'id': id,
@@ -1995,7 +2321,18 @@ final class SqliteTrackRepository
                 : _timestamp(request.sample.nativeSessionStartedAt!),
         'native_lifecycle': request.sample.nativeLifecycle?.name,
         'sampling_profile': request.sample.samplingProfile?.name,
-        'quality_policy_version': configurationEpoch.qualityPolicyVersion,
+        'step_count': request.sample.stepCount,
+        'activity_recorded_at': request.activity.recordedAt == null
+            ? null
+            : _timestamp(request.activity.recordedAt!),
+        'activity_readings_json': request.sample.activityReadings.isEmpty
+            ? null
+            : jsonEncode(<Map<String, Object?>>[
+                for (final reading in request.sample.activityReadings)
+                  reading.toStoredMap(),
+              ]),
+        'quality_policy_version': request.qualityPolicyVersion ??
+            configurationEpoch.qualityPolicyVersion,
         'accepted': request.accepted ? 1 : 0,
         'quality_flags': request.qualityFlags,
         'rejection_reason': request.rejectionReason,
@@ -2065,7 +2402,11 @@ final class SqliteTrackRepository
       }
 
       TrackingContinuityGap? committedGap;
-      if (continuity != null && previousAccepted != null) {
+      // A clean route keeps only the gaps that mark a segment boundary, which
+      // route geometry and exports join segments by, and none is visible.
+      if (continuity != null &&
+          previousAccepted != null &&
+          (!clean || beforeSegmentId != segmentId)) {
         final providerGap =
             request.sample.capturedAt.difference(previousAccepted.capturedAt);
         final rawReceiptGap = previousRaw?.nativeReceivedAt == null ||
@@ -2074,10 +2415,17 @@ final class SqliteTrackRepository
             : request.sample.nativeReceivedAt!
                 .difference(previousRaw!.nativeReceivedAt!);
         final gapId = _idGenerator();
-        await transaction.insert(
+        final gapVisible = !clean &&
+            TrackingContinuityGap.visibleFor(
+              cause: continuity.cause,
+              providerGap: providerGap.isNegative ? null : providerGap,
+              straightLineDistanceMeters: connectorDistance,
+            );
+        final gapInserted = await transaction.insert(
           'track_continuity_gaps',
           <String, Object?>{
             'id': gapId,
+            'visible': gapVisible ? 1 : 0,
             'track_id': request.trackId,
             'before_point_id': previousAccepted.id,
             'after_point_id': id,
@@ -2104,10 +2452,18 @@ final class SqliteTrackRepository
           },
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
+        if (gapInserted != 0) {
+          await RouteSummaryStore.onGap(
+            transaction,
+            request.trackId,
+            visible: gapVisible,
+            now: now,
+          );
+        }
         final gapRows = await transaction.query(
           'track_continuity_gaps',
           where: 'track_id = ? AND after_point_id = ? '
-              'AND continuity_policy_version = ?',
+              'AND continuity_policy_version = ? AND review_run_id IS NULL',
           whereArgs: <Object?>[
             request.trackId,
             id,
@@ -2120,7 +2476,39 @@ final class SqliteTrackRepository
         }
       }
 
-      if (request.accepted && previousAccepted != null) {
+      final rows = await transaction.query(
+        'track_points',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      final point = TrackPoint.fromDatabase(rows.single);
+      // Before the quality run: poor fixes at the stop this change records
+      // are stop evidence.
+      final committedStop = stop == null
+          ? null
+          : await _applyStopChange(
+              transaction,
+              point: point,
+              change: stop,
+              now: now,
+            );
+      if (stop != null) {
+        await RouteSummaryStore.onStopsChanged(
+          transaction,
+          request.trackId,
+          now: now,
+        );
+      }
+
+      // A rejected run needs a raw point after the previous accepted one;
+      // without one the scan below would find nothing. A clean route stores
+      // no quality runs.
+      if (!clean &&
+          request.accepted &&
+          previousAccepted != null &&
+          previousRaw != null &&
+          previousRaw.sequence > previousAccepted.sequence) {
         await _persistQualityRun(
           transaction,
           trackId: request.trackId,
@@ -2129,7 +2517,8 @@ final class SqliteTrackRepository
           afterSequence: sequence,
           maximumAcceptedAccuracyMeters:
               configurationEpoch.resolvedConfig.maximumAcceptedAccuracyMeters,
-          policyVersion: configurationEpoch.qualityPolicyVersion,
+          policyVersion: request.qualityPolicyVersion ??
+              configurationEpoch.qualityPolicyVersion,
           now: now,
         );
       }
@@ -2153,22 +2542,343 @@ final class SqliteTrackRepository
           request.trackId,
         ],
       );
-      final rows = await transaction.query(
-        'track_points',
-        where: 'id = ?',
-        whereArgs: <Object?>[id],
-        limit: 1,
+      final stepCount = request.sample.stepCount;
+      if (stepCount != null) {
+        final (before, after) = await RouteSummaryStore.onStepCount(
+          transaction,
+          trackId: request.trackId,
+          segmentId: segmentId,
+          generation: request.sample.captureGenerationId,
+          stepCount: stepCount,
+          coverage: request.sample.stepCoverage,
+          now: now,
+        );
+        if (_recordsDiagnosticHealthEvents) {
+          await _recordStepCoverageChange(
+            transaction,
+            trackId: request.trackId,
+            before: before,
+            coverage: request.sample.stepCoverage,
+            after: after,
+            at: request.sample.capturedAt,
+          );
+        }
+      }
+      await RouteSummaryStore.onPointStored(
+        transaction,
+        trackId: request.trackId,
+        accepted: request.accepted,
+        capturedAt: request.sample.capturedAt,
+        speed: request.sample.speed,
+        speedAccuracy: request.sample.speedAccuracy,
+        maximumPlausibleSpeedMetersPerSecond: configurationEpoch
+            .resolvedConfig.maximumPlausibleSpeedMetersPerSecond,
+        now: now,
       );
-      final point = TrackPoint.fromDatabase(rows.single);
       return PointAppendResult(
         point: point,
         segmentId: segmentId,
         duplicate: false,
         gap: committedGap,
+        stop: committedStop,
       );
     });
     await _emitCurrentTrack();
     return result;
+  }
+
+  /// Applies [change] for [point], the fix just appended, in its transaction.
+  Future<TrackStop?> _applyStopChange(
+    Transaction transaction, {
+    required TrackPoint point,
+    required TrackStopChange change,
+    required DateTime now,
+  }) async {
+    final capturedAt = _timestamp(point.capturedAt);
+    switch (change) {
+      case TrackStopOpen():
+        if (change.qualityPolicyVersion >= 5) {
+          await _downgradeRunsBeforeStop(
+            transaction,
+            trackId: point.trackId,
+            segmentId: point.segmentId,
+            startedAt: change.startedAt,
+            now: now,
+          );
+        }
+        // One open stop per track; a stale one ends at its last held fix.
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_stops
+          SET status = 'closed', ended_at = last_seen_at, updated_at = ?
+          WHERE track_id = ? AND status = 'open'
+          ''',
+          <Object?>[_timestamp(now), point.trackId],
+        );
+        return _storeStay(
+          transaction,
+          TrackStop(
+            id: '',
+            trackId: point.trackId,
+            segmentId: point.segmentId,
+            kind: change.kind,
+            latitude: change.latitude,
+            longitude: change.longitude,
+            centreSigmaMeters: change.centreSigmaMeters,
+            radiusMeters: change.radiusMeters,
+            startedAt: change.startedAt,
+            lastSeenAt: point.capturedAt,
+            evidenceCount: change.priorEvidenceCount + 1,
+            qualityPolicyVersion: change.qualityPolicyVersion,
+            firstSequence: change.firstSequence ?? point.sequence,
+            lastSequence: point.sequence,
+            arrivalPointId: change.arrivalPointId,
+          ),
+          now,
+        );
+      case TrackStopRecord():
+        if (change.qualityPolicyVersion >= 5) {
+          await _downgradeRunsBeforeStop(
+            transaction,
+            trackId: point.trackId,
+            segmentId: point.segmentId,
+            startedAt: change.startedAt,
+            now: now,
+          );
+        }
+        // Written closed: the accompanying fix is the departure.
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_stops
+          SET status = 'closed', ended_at = last_seen_at, updated_at = ?
+          WHERE track_id = ? AND status = 'open'
+          ''',
+          <Object?>[_timestamp(now), point.trackId],
+        );
+        return _storeStay(
+          transaction,
+          TrackStop(
+            id: '',
+            trackId: point.trackId,
+            segmentId: point.segmentId,
+            kind: change.kind,
+            latitude: change.latitude,
+            longitude: change.longitude,
+            centreSigmaMeters: change.centreSigmaMeters,
+            radiusMeters: change.radiusMeters,
+            startedAt: change.startedAt,
+            lastSeenAt: change.lastSeenAt,
+            endedAt: point.capturedAt,
+            evidenceCount: change.evidenceCount,
+            qualityPolicyVersion: change.qualityPolicyVersion,
+            firstSequence: change.firstSequence,
+            lastSequence: change.lastSequence,
+            arrivalPointId: change.arrivalPointId,
+            departurePointId: point.id,
+          ),
+          now,
+        );
+      case TrackStopExtend():
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_stops
+          SET last_seen_at = ?, last_sequence = ?,
+              evidence_count = evidence_count + 1, updated_at = ?
+          WHERE track_id = ? AND status = 'open'
+          ''',
+          <Object?>[
+            capturedAt,
+            point.sequence,
+            _timestamp(now),
+            point.trackId,
+          ],
+        );
+      case TrackStopClose(departure: true):
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_stops
+          SET status = 'closed', ended_at = ?, departure_point_id = ?,
+              updated_at = ?
+          WHERE track_id = ? AND status = 'open'
+          ''',
+          <Object?>[capturedAt, point.id, _timestamp(now), point.trackId],
+        );
+      case TrackStopClose(departure: false):
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_stops
+          SET status = 'closed', ended_at = last_seen_at, updated_at = ?
+          WHERE track_id = ? AND status = 'open'
+          ''',
+          <Object?>[_timestamp(now), point.trackId],
+        );
+    }
+    final rows = await transaction.query(
+      'track_stops',
+      where: 'track_id = ? AND review_run_id IS NULL',
+      whereArgs: <Object?>[point.trackId],
+      orderBy: 'updated_at DESC, started_at DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _trackStopFromRow(rows.single);
+  }
+
+  /// Stores [stay], open or closed, one row per place: a stay that continues
+  /// the newest closed stop of its segment ([TrackStopPlaces.continues])
+  /// extends that row, otherwise it is a new one.
+  Future<TrackStop?> _storeStay(
+    Transaction transaction,
+    TrackStop stay,
+    DateTime now,
+  ) async {
+    final previous = await transaction.query(
+      'track_stops',
+      where: 'track_id = ? AND segment_id = ? AND status = ? '
+          'AND review_run_id IS NULL',
+      whereArgs: <Object?>[stay.trackId, stay.segmentId, 'closed'],
+      orderBy: 'ended_at DESC',
+      limit: 1,
+    );
+    if (previous.isNotEmpty) {
+      final place = _trackStopFromRow(previous.single);
+      if (TrackStopPlaces.continues(place, stay)) {
+        final merged = TrackStopPlaces.combine(<TrackStop>[place, stay]);
+        await transaction.update(
+          'track_stops',
+          <String, Object?>{
+            ..._placeColumns(merged),
+            'updated_at': _timestamp(now),
+          },
+          where: 'id = ?',
+          whereArgs: <Object?>[place.id],
+        );
+        return _trackStopById(transaction, place.id);
+      }
+    }
+    final id = _idGenerator();
+    await transaction.insert('track_stops', <String, Object?>{
+      'id': id,
+      'track_id': stay.trackId,
+      'segment_id': stay.segmentId,
+      ..._placeColumns(stay),
+      'started_at': _timestamp(stay.startedAt),
+      'first_sequence': stay.firstSequence,
+      'arrival_point_id': stay.arrivalPointId,
+      'quality_policy_version': stay.qualityPolicyVersion,
+      'created_at': _timestamp(now),
+      'updated_at': _timestamp(now),
+    });
+    return _trackStopById(transaction, id);
+  }
+
+  /// Ends [trackId]'s open stop, if any, at its last fix: used when a
+  /// lifecycle change ends the segment while the device is still at a stop.
+  Future<void> _closeOpenStop(
+    DatabaseExecutor executor,
+    String trackId,
+    DateTime now,
+  ) async {
+    final open = await executor.query(
+      'track_stops',
+      columns: <String>['id', 'last_seen_at'],
+      where: 'track_id = ? AND status = ? AND review_run_id IS NULL',
+      whereArgs: <Object?>[trackId, 'open'],
+      limit: 1,
+    );
+    if (open.isEmpty) return;
+    final tracks = await executor.query(
+      'tracks',
+      columns: <String>['last_point_at'],
+      where: 'id = ?',
+      whereArgs: <Object?>[trackId],
+      limit: 1,
+    );
+    final lastSeen = DateTime.parse(open.single['last_seen_at']! as String);
+    final lastPoint = tracks.isEmpty
+        ? null
+        : DateTime.tryParse('${tracks.single['last_point_at']}');
+    final endedAt =
+        lastPoint != null && lastPoint.isAfter(lastSeen) ? lastPoint : lastSeen;
+    await executor.update(
+      'track_stops',
+      <String, Object?>{
+        'status': 'closed',
+        'ended_at': _timestamp(endedAt.toUtc()),
+        'updated_at': _timestamp(now),
+      },
+      where: 'id = ?',
+      whereArgs: <Object?>[open.single['id']],
+    );
+    await RouteSummaryStore.onStopsChanged(executor, trackId, now: now);
+  }
+
+  Future<TrackStop?> _trackStopById(
+      DatabaseExecutor executor, String id) async {
+    final rows = await executor.query(
+      'track_stops',
+      where: 'id = ?',
+      whereArgs: <Object?>[id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _trackStopFromRow(rows.single);
+  }
+
+  /// [trackId]'s stops, one row per place ([TrackStopPlaces]), oldest first:
+  /// its current review's, or those recorded live.
+  Future<List<TrackStop>> _trackStops(
+    DatabaseExecutor executor,
+    String trackId,
+  ) async {
+    final rows = await executor.query(
+      'track_stops',
+      where:
+          'track_id = ? AND ${RouteSummaryStore.currentRowsSql('track_stops')}',
+      whereArgs: <Object?>[trackId],
+      orderBy: 'started_at ASC, id ASC',
+    );
+    return List<TrackStop>.unmodifiable(rows.map(_trackStopFromRow));
+  }
+
+  @override
+  Future<TrackStop?> findOpenTrackStop(String trackId) async {
+    final rows = await _db.query(
+      'track_stops',
+      where: 'track_id = ? AND status = ? AND review_run_id IS NULL',
+      whereArgs: <Object?>[trackId, 'open'],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _trackStopFromRow(rows.single);
+  }
+
+  @override
+  Future<List<TrackStop>> listTrackStops(String trackId) =>
+      _trackStops(_db, trackId);
+
+  static TrackStop _trackStopFromRow(Map<String, Object?> row) {
+    DateTime? time(String key) {
+      final value = row[key];
+      return value == null ? null : DateTime.parse(value as String).toUtc();
+    }
+
+    return TrackStop(
+      id: row['id']! as String,
+      trackId: row['track_id']! as String,
+      segmentId: row['segment_id']! as String,
+      kind: row['kind']! as String,
+      latitude: (row['latitude']! as num).toDouble(),
+      longitude: (row['longitude']! as num).toDouble(),
+      centreSigmaMeters: (row['centre_sigma_m']! as num).toDouble(),
+      radiusMeters: (row['radius_m']! as num).toDouble(),
+      startedAt: time('started_at')!,
+      lastSeenAt: time('last_seen_at')!,
+      endedAt: time('ended_at'),
+      evidenceCount: (row['evidence_count']! as num).toInt(),
+      qualityPolicyVersion: (row['quality_policy_version']! as num).toInt(),
+      firstSequence: (row['first_sequence'] as num?)?.toInt(),
+      lastSequence: (row['last_sequence'] as num?)?.toInt(),
+      arrivalPointId: row['arrival_point_id'] as String?,
+      departurePointId: row['departure_point_id'] as String?,
+    );
   }
 
   Future<String?> _persistMotionEvidence(
@@ -2249,6 +2959,38 @@ final class SqliteTrackRepository
     return id;
   }
 
+  /// Live stops of [trackId] as windows for [QualityRunRules].
+  static Future<List<QualityRunStopWindow>> _liveStopWindows(
+    DatabaseExecutor executor,
+    String trackId,
+  ) async {
+    final stops = await executor.query(
+      'track_stops',
+      columns: <String>['started_at', 'last_seen_at', 'ended_at'],
+      where: 'track_id = ? AND review_run_id IS NULL',
+      whereArgs: <Object?>[trackId],
+    );
+    return <QualityRunStopWindow>[
+      for (final stop in stops)
+        QualityRunStopWindow(
+          startedAt: DateTime.parse(stop['started_at']! as String).toUtc(),
+          endedAt: DateTime.parse(
+            (stop['ended_at'] ?? stop['last_seen_at'])! as String,
+          ).toUtc(),
+        ),
+    ];
+  }
+
+  static QualityRunFix _runFix(Map<String, Object?> row) => QualityRunFix(
+        sequence: (row['sequence']! as num).toInt(),
+        capturedAt: DateTime.parse(row['captured_at']! as String).toUtc(),
+        qualityFlags: (row['quality_flags'] as num?)?.toInt() ?? 0,
+        horizontalAccuracy: (row['horizontal_accuracy'] as num?)?.toDouble(),
+        speed: (row['speed'] as num?)?.toDouble(),
+        speedAccuracy: (row['speed_accuracy'] as num?)?.toDouble(),
+        rejectionReason: row['rejection_reason'] as String?,
+      );
+
   Future<void> _persistQualityRun(
     Transaction transaction, {
     required String trackId,
@@ -2265,7 +3007,10 @@ final class SqliteTrackRepository
         'sequence',
         'captured_at',
         'horizontal_accuracy',
+        'speed',
+        'speed_accuracy',
         'rejection_reason',
+        'quality_flags',
       ],
       where: 'track_id = ? AND sequence > ? AND sequence < ? '
           'AND accepted = 0',
@@ -2273,50 +3018,106 @@ final class SqliteTrackRepository
       orderBy: 'sequence ASC',
     );
     if (rows.isEmpty) return;
-    final accuracy = rows
-        .map((row) => (row['horizontal_accuracy'] as num?)?.toDouble())
-        .whereType<double>()
-        .where((value) => value.isFinite && value >= 0)
-        .toList()
-      ..sort();
-    final firstAt =
-        DateTime.parse(rows.first['captured_at']! as String).toUtc();
-    final lastAt = DateTime.parse(rows.last['captured_at']! as String).toUtc();
-    final duration = lastAt.difference(firstAt);
-    final maximum = accuracy.isEmpty ? null : accuracy.last;
-    final median = accuracy.isEmpty
-        ? null
-        : accuracy.length.isOdd
-            ? accuracy[accuracy.length ~/ 2]
-            : (accuracy[accuracy.length ~/ 2 - 1] +
-                    accuracy[accuracy.length ~/ 2]) /
-                2;
-    final visible = rows.length >= 3 ||
-        duration >= const Duration(seconds: 30) ||
-        (maximum != null && maximum > maximumAcceptedAccuracyMeters * 1.5);
-    final reasons = rows
-        .map((row) => row['rejection_reason']?.toString())
-        .whereType<String>()
-        .toSet()
-        .toList()
-      ..sort();
+    final fixes = rows.map(_runFix).toList(growable: false);
+    final verdict = QualityRunRules.decide(
+      rows: fixes,
+      stops: policyVersion >= 3
+          ? await _liveStopWindows(transaction, trackId)
+          : const <QualityRunStopWindow>[],
+      maximumAcceptedAccuracyMeters: maximumAcceptedAccuracyMeters,
+      policyVersion: policyVersion,
+    );
     await transaction.insert('track_quality_runs', <String, Object?>{
       'id': _idGenerator(),
       'track_id': trackId,
-      'first_raw_sequence': (rows.first['sequence']! as num).toInt(),
-      'last_raw_sequence': (rows.last['sequence']! as num).toInt(),
-      'rejected_count': rows.length,
-      'duration_ms': duration.isNegative ? 0 : duration.inMilliseconds,
-      'maximum_uncertainty_m': maximum,
-      'median_uncertainty_m': median,
+      'first_raw_sequence': fixes.first.sequence,
+      'last_raw_sequence': fixes.last.sequence,
+      'rejected_count': fixes.length,
+      'duration_ms': verdict.duration.inMilliseconds,
+      'maximum_uncertainty_m': verdict.maximumUncertaintyMeters,
+      'median_uncertainty_m': verdict.medianUncertaintyMeters,
       'before_point_id': beforePoint.id,
       'after_point_id': afterPointId,
-      'severity': visible ? 'visibleGap' : 'informational',
-      'threshold_reason':
-          reasons.isEmpty ? 'rejected_fix_run' : reasons.join(','),
+      'severity': verdict.visible ? 'visibleGap' : 'informational',
+      'threshold_reason': verdict.thresholdReason,
+      'stop_evidence': verdict.stopEvidence ? 1 : 0,
       'policy_version': policyVersion,
       'created_at': _timestamp(now),
     });
+    await RouteSummaryStore.onQualityRun(
+      transaction,
+      trackId,
+      stopEvidence: verdict.stopEvidence,
+      visible: verdict.visible,
+      now: now,
+    );
+  }
+
+  /// Quality policy 5 rule `Q1`: when a stop of [trackId] opens at
+  /// [startedAt], its segment's visible runs that show no travel and ended
+  /// within [QualityRunRules.stopArrivalAllowance] before it become
+  /// informational. Poor
+  /// fixes on the approach to a place are decided before its stop exists;
+  /// severity only ever goes down.
+  Future<void> _downgradeRunsBeforeStop(
+    Transaction transaction, {
+    required String trackId,
+    required String segmentId,
+    required DateTime startedAt,
+    required DateTime now,
+  }) async {
+    final runs = await transaction.rawQuery(
+      '''
+      SELECT r.id, r.first_raw_sequence, r.last_raw_sequence
+      FROM track_quality_runs r
+      JOIN track_points p
+        ON p.track_id = r.track_id AND p.sequence = r.last_raw_sequence
+      WHERE r.track_id = ? AND r.severity = 'visibleGap'
+        AND r.review_run_id IS NULL
+        AND COALESCE(r.stop_evidence, 0) = 0 AND p.segment_id = ?
+        AND p.captured_at >= ?
+      ''',
+      <Object?>[
+        trackId,
+        segmentId,
+        _timestamp(startedAt.subtract(QualityRunRules.stopArrivalAllowance)),
+      ],
+    );
+    var downgraded = 0;
+    for (final run in runs) {
+      final rows = await transaction.query(
+        'track_points',
+        columns: <String>[
+          'sequence',
+          'captured_at',
+          'horizontal_accuracy',
+          'speed',
+          'speed_accuracy',
+          'rejection_reason',
+          'quality_flags',
+        ],
+        where: 'track_id = ? AND sequence >= ? AND sequence <= ? '
+            'AND accepted = 0',
+        whereArgs: <Object?>[
+          trackId,
+          run['first_raw_sequence'],
+          run['last_raw_sequence'],
+        ],
+      );
+      if (!QualityRunRules.downgradedByStop(rows.map(_runFix).toList())) {
+        continue;
+      }
+      downgraded += await transaction.rawUpdate(
+        "UPDATE track_quality_runs SET severity = 'informational' WHERE id = ?",
+        <Object?>[run['id']],
+      );
+    }
+    await RouteSummaryStore.onQualityRunsDowngraded(
+      transaction,
+      trackId,
+      count: downgraded,
+      now: now,
+    );
   }
 
   @override
@@ -2439,16 +3240,498 @@ final class SqliteTrackRepository
       SELECT g.*
       FROM track_continuity_gaps g
       JOIN trip_legs l ON l.track_id = g.track_id
-      WHERE l.trip_id = ?
+      WHERE l.trip_id = ? AND ${RouteSummaryStore.currentRowsSql('g')}
       ORDER BY l.leg_number ASC, g.created_at ASC, g.id ASC
       ''',
       <Object?>[tripId],
+    );
+    final summary = await _db.transaction(
+      (transaction) =>
+          RouteSummaryStore.refreshTrip(transaction, tripId, now: _clock()),
     );
     return TripBundle(
       trip: trip,
       legs: legRows.map(TripLeg.fromDatabase),
       gaps: gapRows.map(TrackingContinuityGap.fromDatabase),
+      summary: summary,
     );
+  }
+
+  @override
+  Future<RouteSummary?> routeSummary(String trackId) async {
+    final stored = await RouteSummaryStore.readTrack(_db, trackId);
+    if (stored != null) return stored;
+    if (await getTrack(trackId) == null) return null;
+    await refreshRouteSummary(trackId);
+    return RouteSummaryStore.readTrack(_db, trackId);
+  }
+
+  @override
+  Future<TripSummary?> tripSummary(String tripId) => _db.transaction(
+        (transaction) =>
+            RouteSummaryStore.refreshTrip(transaction, tripId, now: _clock()),
+      );
+
+  @override
+  Future<void> refreshRouteSummary(String trackId) => _db.transaction(
+        (transaction) => _refreshSummary(transaction, trackId, _clock()),
+      );
+
+  @override
+  Future<List<String>> tracksAwaitingStops({
+    int limit = 20,
+    TrackingOwner? owner,
+  }) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT track.id FROM tracks AS track
+      JOIN track_summaries AS summary ON summary.track_id = track.id
+      WHERE summary.stops_source = ? AND track.status IN (?, ?)
+        ${owner == null ? '' : 'AND track.user_id = ? AND track.organization_id = ?'}
+      ORDER BY track.started_at ASC
+      LIMIT ?
+      ''',
+      <Object?>[
+        TrackStopSource.pending,
+        TrackStatus.completed.name,
+        TrackStatus.failed.name,
+        if (owner != null) ...<Object?>[owner.userId, owner.organizationId],
+        limit,
+      ],
+    );
+    return rows.map((row) => row['id']! as String).toList(growable: false);
+  }
+
+  @override
+  Future<List<String>> tracksAwaitingReview({
+    int limit = 20,
+    TrackingOwner? owner,
+  }) =>
+      _awaitingReview(limit: limit, owner: owner);
+
+  @override
+  Future<bool> awaitsReview(String trackId) async =>
+      (await _awaitingReview(limit: 1, trackId: trackId)).isNotEmpty;
+
+  @override
+  Future<List<TrackingConfigurationEpoch>> configurationEpochsOf(
+    String trackId,
+  ) async {
+    final rows = await _db.query(
+      'tracking_configuration_epochs',
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      orderBy: 'activation_sequence ASC',
+    );
+    return rows
+        .map(TrackingConfigurationEpoch.fromDatabase)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<Set<String>> keptPointIdsOf(String runId) async {
+    final rows = await _db.query(
+      'derived_geometry_points',
+      columns: <String>['source_point_id'],
+      where: 'run_id = ?',
+      whereArgs: <Object?>[runId],
+    );
+    return <String>{for (final row in rows) row['source_point_id']! as String};
+  }
+
+  Future<List<String>> _awaitingReview({
+    required int limit,
+    TrackingOwner? owner,
+    String? trackId,
+  }) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT track.id FROM tracks AS track
+      LEFT JOIN track_summaries AS summary ON summary.track_id = track.id
+      WHERE track.status IN (?, ?)
+        ${owner == null ? '' : 'AND track.user_id = ? AND track.organization_id = ?'}
+        ${trackId == null ? '' : 'AND track.id = ?'}
+        AND EXISTS (
+          SELECT 1 FROM tracking_configuration_epochs epoch
+          WHERE epoch.track_id = track.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM tracking_configuration_epochs epoch
+          WHERE epoch.track_id = track.id AND epoch.quality_policy_version >= ?
+        )
+        AND (summary.review_version IS NULL OR summary.review_version < ?)
+      ORDER BY track.started_at ASC
+      LIMIT ?
+      ''',
+      <Object?>[
+        TrackStatus.completed.name,
+        TrackStatus.failed.name,
+        if (owner != null) ...<Object?>[owner.userId, owner.organizationId],
+        if (trackId != null) trackId,
+        RouteReview.qualityPolicyVersion,
+        RouteReview.version,
+        limit,
+      ],
+    );
+    return rows.map((row) => row['id']! as String).toList(growable: false);
+  }
+
+  @override
+  Future<String?> storeRouteReview(RouteReview review) =>
+      _db.transaction((transaction) async {
+        final trackId = review.trackId;
+        final track = await _requiredTrack(transaction, trackId);
+        if (track.status != TrackStatus.completed &&
+            track.status != TrackStatus.failed) {
+          return null;
+        }
+        final newest = (await transaction.rawQuery(
+          'SELECT MAX(sequence) AS sequence FROM track_points WHERE track_id = ?',
+          <Object?>[trackId],
+        ))
+            .single['sequence'] as num?;
+        if ((newest?.toInt() ?? 0) != review.sourceMaximumSequence) return null;
+        final now = _clock();
+        await _deleteReviewRuns(transaction, trackId);
+        final runId = _idGenerator();
+        await transaction.insert('derived_geometry_runs', <String, Object?>{
+          'id': runId,
+          'track_id': trackId,
+          'name': 'reviewed',
+          'algorithm': RouteReview.algorithm,
+          'algorithm_version': '${RouteReview.version}',
+          'configuration_json': jsonEncode(<String, Object?>{
+            'qualityPolicyVersion': RouteReview.qualityPolicyVersion,
+            'continuityPolicyVersion': RouteReview.continuityPolicyVersion,
+          }),
+          'source_maximum_sequence': review.sourceMaximumSequence,
+          'status': 'completed',
+          'point_count': review.keptPoints.length,
+          'created_at': _timestamp(now),
+          'completed_at': _timestamp(now),
+        });
+        final batch = transaction.batch();
+        for (final point in review.keptPoints) {
+          batch.insert('derived_geometry_points', <String, Object?>{
+            'run_id': runId,
+            'source_point_id': point.id,
+            'segment_id': point.segmentId,
+            'sequence': point.sequence,
+            'latitude': point.latitude,
+            'longitude': point.longitude,
+            'matched': 1,
+          });
+        }
+        String ordinal(int index) => index.toString().padLeft(6, '0');
+        for (final (index, stop) in review.stops.indexed) {
+          batch.insert('track_stops', <String, Object?>{
+            'id': '$runId:stop:${ordinal(index)}',
+            'track_id': trackId,
+            'segment_id': stop.segmentId,
+            ..._placeColumns(stop),
+            'started_at': _timestamp(stop.startedAt),
+            'first_sequence': stop.firstSequence,
+            'arrival_point_id': stop.arrivalPointId,
+            'quality_policy_version': stop.qualityPolicyVersion,
+            'created_at': _timestamp(now),
+            'updated_at': _timestamp(now),
+            'review_run_id': runId,
+          });
+        }
+        for (final (index, gap) in review.gaps.indexed) {
+          final providerGap = gap.providerGap;
+          final rawReceiptGap = gap.rawReceiptGap;
+          batch.insert(
+            'track_continuity_gaps',
+            <String, Object?>{
+              'id': '$runId:gap:${ordinal(index)}',
+              'visible': gap.visible ? 1 : 0,
+              'track_id': trackId,
+              'before_point_id': gap.beforePointId,
+              'after_point_id': gap.afterPointId,
+              'before_segment_id': gap.beforeSegmentId,
+              'after_segment_id': gap.afterSegmentId,
+              'provider_gap_ms': providerGap == null || providerGap.isNegative
+                  ? null
+                  : providerGap.inMilliseconds,
+              'raw_receipt_gap_ms':
+                  rawReceiptGap == null || rawReceiptGap.isNegative
+                      ? null
+                      : rawReceiptGap.inMilliseconds,
+              'straight_line_distance_m': gap.straightLineDistanceMeters,
+              'cause': gap.decision.cause.name,
+              'treatment': gap.decision.treatment.name,
+              'distance_treatment':
+                  (gap.decision.excludeConnectorFromMeasuredDistance
+                          ? TrackingGapDistanceTreatment.excluded
+                          : TrackingGapDistanceTreatment.measured)
+                      .name,
+              'native_capture_generation': gap.nativeCaptureGeneration,
+              'configuration_epoch_id': gap.configurationEpochId,
+              'continuity_policy_version': gap.decision.policyVersion,
+              'created_at': _timestamp(now),
+              'review_run_id': runId,
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+        }
+        for (final (index, run) in review.qualityRuns.indexed) {
+          batch.insert('track_quality_runs', <String, Object?>{
+            'id': '$runId:run:${ordinal(index)}',
+            'track_id': trackId,
+            'first_raw_sequence': run.firstRawSequence,
+            'last_raw_sequence': run.lastRawSequence,
+            'rejected_count': run.rejectedCount,
+            'duration_ms': run.verdict.duration.inMilliseconds,
+            'maximum_uncertainty_m': run.verdict.maximumUncertaintyMeters,
+            'median_uncertainty_m': run.verdict.medianUncertaintyMeters,
+            'before_point_id': run.beforePointId,
+            'after_point_id': run.afterPointId,
+            'severity': run.visible ? 'visibleGap' : 'informational',
+            'threshold_reason': run.verdict.thresholdReason,
+            'stop_evidence': run.verdict.stopEvidence ? 1 : 0,
+            'policy_version': RouteReview.qualityPolicyVersion,
+            'created_at': _timestamp(now),
+            'review_run_id': runId,
+          });
+        }
+        for (final generation in review.stepGenerations) {
+          batch.insert('track_step_generations', <String, Object?>{
+            'id': '$runId:${generation.captureGenerationId}',
+            'track_id': trackId,
+            'segment_id': generation.segmentId,
+            'capture_generation_id': generation.captureGenerationId,
+            'step_count': generation.stepCount,
+            'last_rise_at': generation.lastRiseAt == null
+                ? null
+                : _timestamp(generation.lastRiseAt!),
+            'stopped_at': generation.stoppedAt == null
+                ? null
+                : _timestamp(generation.stoppedAt!),
+            'decided_by': 'review',
+            'review_run_id': runId,
+            'updated_at': _timestamp(now),
+          });
+        }
+        await batch.commit(noResult: true);
+        // The summary row exists before the review becomes current.
+        await _refreshSummary(transaction, trackId, now);
+        final summary = await RouteSummaryStore.readTrack(transaction, trackId);
+        await transaction.update(
+          'track_summaries',
+          <String, Object?>{
+            'review_run_id': runId,
+            'review_version': RouteReview.version,
+            'corrected_distance_m': review.correctedDistanceMeters,
+            // The review recorded the stops a pending route was waiting for.
+            if (summary?.stopsSource == TrackStopSource.pending)
+              'stops_source': TrackStopSource.derived,
+            'updated_at': _timestamp(now),
+          },
+          where: 'track_id = ?',
+          whereArgs: <Object?>[trackId],
+        );
+        await _refreshSummary(transaction, trackId, now);
+        return runId;
+      });
+
+  @override
+  Future<void> deleteRouteReview(String trackId) =>
+      _db.transaction((transaction) async {
+        await _deleteReviewRuns(transaction, trackId);
+        await _refreshSummary(transaction, trackId, _clock());
+      });
+
+  /// Deletes [trackId]'s review runs, their kept fixes and every row they
+  /// derived; the rows recorded live count again.
+  Future<void> _deleteReviewRuns(
+    DatabaseExecutor executor,
+    String trackId,
+  ) async {
+    final runs = await executor.query(
+      'derived_geometry_runs',
+      columns: <String>['id'],
+      where: 'track_id = ? AND algorithm = ?',
+      whereArgs: <Object?>[trackId, RouteReview.algorithm],
+    );
+    for (final run in runs) {
+      final runId = run['id']! as String;
+      await RouteReviewStore.deleteReviewRows(executor, runId);
+      await executor.delete(
+        'derived_geometry_points',
+        where: 'run_id = ?',
+        whereArgs: <Object?>[runId],
+      );
+      await executor.delete(
+        'derived_geometry_runs',
+        where: 'id = ?',
+        whereArgs: <Object?>[runId],
+      );
+    }
+    await executor.update(
+      'track_summaries',
+      <String, Object?>{
+        'review_run_id': null,
+        'review_version': null,
+        'corrected_distance_m': null,
+      },
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+    );
+  }
+
+  @override
+  Future<void> storeDerivedStops(String trackId, List<TrackStop> stops) async {
+    await _db.transaction((transaction) async {
+      final summary = await RouteSummaryStore.readTrack(transaction, trackId);
+      if (summary == null || summary.stopsSource != TrackStopSource.pending) {
+        return;
+      }
+      final now = _clock();
+      for (final place in TrackStopPlaces.merge(stops)) {
+        await transaction.insert('track_stops', <String, Object?>{
+          'id': _idGenerator(),
+          'track_id': trackId,
+          'segment_id': place.segmentId,
+          ..._placeColumns(place),
+          // Derived stops are always closed.
+          'status': 'closed',
+          'ended_at': _timestamp(place.endedAt ?? place.lastSeenAt),
+          'started_at': _timestamp(place.startedAt),
+          'first_sequence': place.firstSequence,
+          'arrival_point_id': place.arrivalPointId,
+          'quality_policy_version': place.qualityPolicyVersion,
+          'created_at': _timestamp(now),
+          'updated_at': _timestamp(now),
+        });
+      }
+      await RouteSummaryStore.setStopsSource(
+        transaction,
+        trackId,
+        TrackStopSource.derived,
+        now: now,
+      );
+      await RouteSummaryStore.onStopsChanged(transaction, trackId, now: now);
+      final tripId = await RouteSummaryStore.tripIdOf(transaction, trackId);
+      if (tripId != null) {
+        await RouteSummaryStore.refreshTrip(transaction, tripId, now: now);
+      }
+    });
+  }
+
+  @override
+  Future<void> recordStepCount(
+    String trackId, {
+    required String? captureGenerationId,
+    required int stepCount,
+    StepCoverage? coverage,
+  }) async {
+    await _db.transaction((transaction) async {
+      final track = await _requiredTrack(transaction, trackId);
+      final segmentId = track.currentSegmentId;
+      if (segmentId == null) return;
+      final now = _clock();
+      final (before, after) = await RouteSummaryStore.onStepCount(
+        transaction,
+        trackId: trackId,
+        segmentId: segmentId,
+        generation: captureGenerationId,
+        stepCount: stepCount,
+        coverage: coverage,
+        now: now,
+      );
+      if (_recordsDiagnosticHealthEvents) {
+        await _recordStepCoverageChange(
+          transaction,
+          trackId: trackId,
+          before: before,
+          coverage: coverage,
+          after: after,
+          at: now,
+        );
+      }
+    });
+  }
+
+  /// A count-free health event when a generation's step counter coverage
+  /// turns suspect or stalled, or counts again after either.
+  static Future<void> _recordStepCoverageChange(
+    DatabaseExecutor executor, {
+    required String trackId,
+    required String? before,
+    required StepCoverage? coverage,
+    required String? after,
+    required DateTime at,
+  }) async {
+    if (coverage == null || before == after) return;
+    final type = switch (after) {
+      'suspect' => 'step_counter_suspect',
+      'stalled' => 'step_counter_stalled',
+      'counting' when before == 'suspect' || before == 'stalled' =>
+        'step_counter_recovered',
+      _ => null,
+    };
+    if (type == null) return;
+    await executor.insert(
+        'tracking_health_events',
+        <String, Object?>{
+          'id': 'step:$trackId:${at.toUtc().microsecondsSinceEpoch}:$type',
+          'track_id': trackId,
+          'type': type,
+          'occurred_at': _timestamp(at),
+          'details_json': jsonEncode(<String, Object?>{
+            'state': after,
+            if (coverage.sensor case final sensor?) 'sensor': sensor,
+            'reregistrations': coverage.reregistrations,
+            if (coverage.uncounted > Duration.zero)
+              'uncountedMs': coverage.uncounted.inMilliseconds,
+          }),
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  @override
+  Future<void> recordKeyedHealthEvent({
+    required String key,
+    String? trackId,
+    required String type,
+    required DateTime occurredAt,
+    Map<String, Object?>? details,
+  }) async {
+    if (!_storesHealthEvent(type)) return;
+    await _db.insert(
+      'tracking_health_events',
+      <String, Object?>{
+        'id': key,
+        'track_id': trackId,
+        'type': type,
+        'occurred_at': _timestamp(occurredAt),
+        'details_json': details == null ? null : jsonEncode(details),
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  @override
+  Future<void> recordCleanedGeometry(
+    String trackId, {
+    required String runId,
+    required double distanceMeters,
+  }) async {
+    await _db.transaction((transaction) async {
+      final now = _clock();
+      await RouteSummaryStore.onCleanedGeometry(
+        transaction,
+        trackId,
+        runId: runId,
+        distanceMeters: distanceMeters,
+        now: now,
+      );
+      final tripId = await RouteSummaryStore.tripIdOf(transaction, trackId);
+      if (tripId != null) {
+        await RouteSummaryStore.refreshTrip(transaction, tripId, now: now);
+      }
+    });
   }
 
   @override
@@ -2618,6 +3901,7 @@ final class SqliteTrackRepository
           'tracker_provider': 'native',
           'configuration_json': config.toJson(),
           'session_control_token': sessionControlToken,
+          'recording_detail': _newRouteRecordingDetail.name,
           'created_at': _timestamp(now),
           'updated_at': _timestamp(now),
         });
@@ -2631,6 +3915,8 @@ final class SqliteTrackRepository
             'preset_definition_version':
                 TrackingPolicyVersions.presetDefinition,
             'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+            'continuity_policy_version':
+                TrackingPolicyVersions.continuityPolicy,
             'created_at': _timestamp(now),
             'activation_sequence': 1,
             'activated_at': _timestamp(now),
@@ -2858,6 +4144,8 @@ final class SqliteTrackRepository
             tripId: trip.id,
           );
         }
+        // Ending the day or the Trip ends a current stop at its last fix.
+        await _closeOpenStop(transaction, trackId, now);
         if (track.currentSegmentId != null) {
           await transaction.update(
             'track_segments',
@@ -2921,6 +4209,7 @@ final class SqliteTrackRepository
         where: 'id = ?',
         whereArgs: <Object?>[operationRecordId],
       );
+      await _refreshSummary(transaction, trackId, now);
     });
     await _emitCurrentTrack();
   }
@@ -3625,6 +4914,27 @@ final class SqliteTrackRepository
   }
 
   @override
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(
+    String trackId,
+  ) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT epoch.*
+      FROM tracking_configuration_epochs AS epoch
+      JOIN tracks ON tracks.id = epoch.track_id
+      WHERE epoch.track_id = ?
+        AND epoch.activation_sequence <= tracks.next_sequence
+      ORDER BY epoch.activation_sequence DESC
+      LIMIT 1
+      ''',
+      <Object?>[trackId],
+    );
+    return rows.isEmpty
+        ? null
+        : TrackingConfigurationEpoch.fromDatabase(rows.single);
+  }
+
+  @override
   Future<TrackingConfigurationEpoch?> getConfigurationEpoch({
     required TrackingOwner owner,
     required String trackId,
@@ -3774,6 +5084,7 @@ final class SqliteTrackRepository
         'resolved_configuration_json': operation.proposedConfig.toJson(),
         'preset_definition_version': TrackingPolicyVersions.presetDefinition,
         'quality_policy_version': TrackingPolicyVersions.qualityPolicy,
+        'continuity_policy_version': TrackingPolicyVersions.continuityPolicy,
         'created_at': _timestamp(operation.createdAt),
         'activation_sequence': activationSequence,
         'activated_at': _timestamp(now),
@@ -4160,6 +5471,7 @@ final class SqliteTrackRepository
           trackId: track.id,
         );
       }
+      await _closeOpenStop(transaction, track.id, now);
       if (track.currentSegmentId != null) {
         await transaction.update(
           'track_segments',
@@ -4203,6 +5515,7 @@ final class SqliteTrackRepository
         where: 'id = ?',
         whereArgs: <Object?>[operationId],
       );
+      await _refreshSummary(transaction, track.id, now);
     });
     await _emitCurrentTrack();
   }
@@ -4438,7 +5751,8 @@ final class SqliteTrackRepository
   ) async {
     final rows = await _db.query(
       'track_continuity_gaps',
-      where: 'track_id = ?',
+      where: 'track_id = ? AND '
+          '${RouteSummaryStore.currentRowsSql('track_continuity_gaps')}',
       whereArgs: <Object?>[trackId],
       orderBy: 'created_at ASC, id ASC',
     );
@@ -4472,18 +5786,54 @@ final class SqliteTrackRepository
           WHERE health.track_id = after_segment.track_id
             AND health.occurred_at >= before_segment.started_at
             AND health.occurred_at <= after_segment.started_at
-            AND health.type IN (
-              'native_tracker_interrupted',
-              'native_tracker_failed',
-              'previous_session_interrupted',
-              'termination_recovery_started_gap_possible',
-              'authorization_changed'
-            )
+            AND health.type IN (${List<String>.filled(_gapEvidenceHealthEventTypes.length, '?').join(', ')})
         )
       ''',
-      <Object?>[trackId],
+      <Object?>[trackId, ..._gapEvidenceHealthEventTypes],
     );
     return rows.map((row) => row['after_segment_id']! as String).toSet();
+  }
+
+  @override
+  Future<DecisionTail?> decisionTail(
+    String trackId, {
+    required String segmentId,
+    int contextAcceptedPoints = 30,
+    int maximumPoints = 5000,
+  }) async {
+    final segments = await _db.query(
+      'track_segments',
+      columns: <String>['started_at'],
+      where: 'id = ? AND track_id = ?',
+      whereArgs: <Object?>[segmentId, trackId],
+      limit: 1,
+    );
+    if (segments.isEmpty) return null;
+    final startedAt =
+        DateTime.parse(segments.single['started_at']! as String).toUtc();
+    final context = await _db.query(
+      'track_points',
+      columns: <String>['sequence'],
+      where: 'track_id = ? AND segment_id = ? AND accepted = 1',
+      whereArgs: <Object?>[trackId, segmentId],
+      orderBy: 'sequence DESC',
+      limit: 1,
+      offset: math.max(0, contextAcceptedPoints - 1),
+    );
+    final fromSequence =
+        context.isEmpty ? 0 : (context.single['sequence']! as num).toInt();
+    final newest = await _db.query(
+      'track_points',
+      where: 'track_id = ? AND segment_id = ? AND sequence >= ?',
+      whereArgs: <Object?>[trackId, segmentId, fromSequence],
+      orderBy: 'sequence DESC',
+      limit: maximumPoints,
+    );
+    return DecisionTail(
+      segmentStartedAt: startedAt,
+      points:
+          newest.reversed.map(TrackPoint.fromDatabase).toList(growable: false),
+    );
   }
 
   static Future<TrackPoint?> _lastRawPoint(
@@ -4561,7 +5911,12 @@ final class SqliteTrackRepository
           ),
         );
       }
-      return TrackBundle(track: track, segments: segments);
+      return TrackBundle(
+        track: track,
+        segments: segments,
+        stops: await _trackStops(transaction, trackId),
+        summary: await RouteSummaryStore.readTrack(transaction, trackId),
+      );
     });
   }
 
@@ -5149,18 +6504,73 @@ final class SqliteTrackRepository
       );
 
   @override
+  Future<int> compactCleanRoutes({
+    int limit = 20,
+    TrackingOwner? owner,
+  }) async {
+    final pending = await RouteCompactionStore.tracksAwaitingCompaction(
+      _db,
+      limit: limit,
+      userId: owner?.userId,
+      organizationId: owner?.organizationId,
+    );
+    var compacted = 0;
+    for (final trackId in pending) {
+      final done = await _db.transaction(
+        (transaction) => RouteCompactionStore.compact(
+          transaction,
+          trackId,
+          keptHealthEventTypes: _gapEvidenceHealthEventTypes,
+          compactedAt: _timestamp(_clock()),
+        ),
+      );
+      if (done) compacted++;
+    }
+    return compacted;
+  }
+
+  @override
   Future<void> recordHealthEvent({
     String? trackId,
     required String type,
     Map<String, Object?>? details,
-  }) =>
-      _db.insert('tracking_health_events', <String, Object?>{
-        'id': _idGenerator(),
-        'track_id': trackId,
-        'type': type,
-        'occurred_at': _timestamp(_clock()),
-        'details_json': details == null ? null : jsonEncode(details),
-      });
+  }) async {
+    if (!_storesHealthEvent(type)) return;
+    await _db.insert('tracking_health_events', <String, Object?>{
+      'id': _idGenerator(),
+      'track_id': trackId,
+      'type': type,
+      'occurred_at': _timestamp(_clock()),
+      'details_json': details == null ? null : jsonEncode(details),
+    });
+    if (++_healthEventsSincePrune < _healthEventPruneInterval) return;
+    _healthEventsSincePrune = 0;
+    await _pruneDiagnosticHealthEvents(trackId);
+  }
+
+  /// Keeps the newest diagnostic events for [trackId] and every lifecycle
+  /// evidence event.
+  Future<void> _pruneDiagnosticHealthEvents(String? trackId) async {
+    final protected =
+        List<String>.filled(_gapEvidenceHealthEventTypes.length, '?')
+            .join(', ');
+    await _db.rawDelete(
+      '''
+      DELETE FROM tracking_health_events
+      WHERE id IN (
+        SELECT id FROM tracking_health_events
+        WHERE track_id IS ? AND type NOT IN ($protected)
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT -1 OFFSET ?
+      )
+      ''',
+      <Object?>[
+        trackId,
+        ..._gapEvidenceHealthEventTypes,
+        _maximumDiagnosticHealthEventsPerTrack,
+      ],
+    );
+  }
 
   static Future<Track> _requiredTrack(
     DatabaseExecutor executor,
@@ -5802,17 +7212,12 @@ final class SqliteTrackRepository
     double latitude2,
     double longitude2,
   ) {
-    const radius = 6371008.8;
-    final lat1 = latitude1 * math.pi / 180;
-    final lat2 = latitude2 * math.pi / 180;
-    final deltaLatitude = (latitude2 - latitude1) * math.pi / 180;
-    final deltaLongitude = (longitude2 - longitude1) * math.pi / 180;
-    final a = math.sin(deltaLatitude / 2) * math.sin(deltaLatitude / 2) +
-        math.cos(lat1) *
-            math.cos(lat2) *
-            math.sin(deltaLongitude / 2) *
-            math.sin(deltaLongitude / 2);
-    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return TrackGeodesy.sphericalHaversineMeters(
+      latitude1,
+      longitude1,
+      latitude2,
+      longitude2,
+    );
   }
 
   @override
@@ -6116,6 +7521,25 @@ final class SqliteTrackRepository
     required String trackId,
     required String runId,
   }) async {
+    final review = await _db.query(
+      'derived_geometry_runs',
+      columns: <String>['id'],
+      where: 'id = ? AND track_id = ? AND algorithm = ?',
+      whereArgs: <Object?>[runId, trackId, RouteReview.algorithm],
+      limit: 1,
+    );
+    if (review.isNotEmpty) {
+      final owned = await getTrackForOwner(owner, trackId);
+      if (owned == null) {
+        throw const TrackingOwnershipException(
+          code: 'track_not_found_in_owner_scope',
+          message: 'The derived route is not available in this owner scope.',
+        );
+      }
+      // Deleting a review removes the rows it derived as well.
+      await deleteRouteReview(trackId);
+      return;
+    }
     final count = await _db.rawDelete('''
       DELETE FROM derived_geometry_runs
       WHERE id = ? AND track_id = ? AND EXISTS (
@@ -6215,13 +7639,23 @@ final class SqliteTrackRepository
       SELECT accepted, horizontal_accuracy, activity_evidence_state
       FROM track_points WHERE track_id IN ($placeholders)
       ''', trackIds);
+    // A reviewed route's runs and gaps are its current review's.
+    final runRows = RouteSummaryStore.currentRowsSql('track_quality_runs');
+    final gapRowsSql =
+        RouteSummaryStore.currentRowsSql('track_continuity_gaps');
     final qualityRows = await _db.rawQuery('''
       SELECT severity FROM track_quality_runs
-      WHERE track_id IN ($placeholders)
+      WHERE track_id IN ($placeholders) AND $runRows
       ''', trackIds);
     final gapRows = await _db.rawQuery('''
       SELECT cause FROM track_continuity_gaps
-      WHERE track_id IN ($placeholders)
+      WHERE track_id IN ($placeholders) AND $gapRowsSql
+      ''', trackIds);
+    // Stored with each run (schema 17), and filled in for older runs when
+    // their summary was recomputed.
+    final stopEvidenceRows = await _db.rawQuery('''
+      SELECT COUNT(*) AS count FROM track_quality_runs
+      WHERE track_id IN ($placeholders) AND stop_evidence = 1 AND $runRows
       ''', trackIds);
     final acceptedAccuracy = <double>[];
     final rejectedAccuracy = <double>[];
@@ -6265,6 +7699,8 @@ final class SqliteTrackRepository
       acceptedAccuracyP95Meters: _percentile(acceptedAccuracy, 0.95),
       rejectedAccuracyP50Meters: _percentile(rejectedAccuracy, 0.50),
       rejectedAccuracyP95Meters: _percentile(rejectedAccuracy, 0.95),
+      stopEvidenceRunCount:
+          (stopEvidenceRows.single['count'] as num?)?.toInt() ?? 0,
     );
   }
 

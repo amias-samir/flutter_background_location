@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_background_location_tracker/src/domain/activity_snapshot.dart';
@@ -98,10 +99,7 @@ void main() {
       trackId: trackId,
       format: TrackExportFormat.geoJson,
     );
-    expect(
-      geoJson.contents,
-      _readGolden('exports/characterization_route.geojson'),
-    );
+    _expectGolden(geoJson.contents, 'exports/characterization_route.geojson');
     expect(geoJson.pointCount, 4);
     expect(geoJson.segmentCount, 2);
 
@@ -109,18 +107,28 @@ void main() {
       trackId: trackId,
       format: TrackExportFormat.kml,
     );
-    expect(kml.contents, _readGolden('exports/characterization_route.kml'));
+    _expectGolden(kml.contents, 'exports/characterization_route.kml');
 
     final gpx = await exporter.renderTrack(
       trackId: trackId,
       format: TrackExportFormat.gpx,
     );
-    expect(gpx.contents, _readGolden('exports/characterization_route.gpx'));
+    _expectGolden(gpx.contents, 'exports/characterization_route.gpx');
   });
 }
 
 String _readGolden(String relativePath) =>
     readFixture(relativePath).replaceFirst(RegExp(r'\n$'), '');
+
+/// Compares [actual] with a golden fixture; with `FBL_UPDATE_GOLDENS=1` the
+/// fixture is rewritten instead, for a reviewed format change.
+void _expectGolden(String actual, String relativePath) {
+  if (Platform.environment['FBL_UPDATE_GOLDENS'] == '1') {
+    File('test/fixtures/$relativePath').writeAsStringSync('$actual\n');
+    return;
+  }
+  expect(actual, _readGolden(relativePath));
+}
 
 Object? _normalize(Object? value) {
   if (value is Map) {

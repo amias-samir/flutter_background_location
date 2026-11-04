@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import '../domain/track_geodesy.dart';
 import '../domain/track_point.dart';
 
 /// Evidence returned for the middle anchor of a three-point route window.
@@ -24,8 +25,22 @@ final class UncertaintyAwareSpikeClassifier {
     this.minimumDetourRatio = 1.6,
   });
 
+  /// Reported uncertainty is scaled by this before it can support a spike.
+  static const uncertaintyMultiplier = 1.25;
+
+  /// Inbound or outbound speeds above this make a spike implausible.
+  static const maximumSpeedMetersPerSecond = 70.0;
+
   final double minimumDeviationMeters;
   final double minimumDetourRatio;
+
+  /// Thresholds recorded in the provenance of each run that uses them.
+  Map<String, Object?> get configuration => <String, Object?>{
+        'minimumDeviationMeters': minimumDeviationMeters,
+        'minimumDetourRatio': minimumDetourRatio,
+        'uncertaintyMultiplier': uncertaintyMultiplier,
+        'maximumSpeedMetersPerSecond': maximumSpeedMetersPerSecond,
+      };
 
   RouteSpikeAssessment assess(
     TrackPoint before,
@@ -44,7 +59,7 @@ final class UncertaintyAwareSpikeClassifier {
     ].reduce(math.max);
     final requiredDeviation = math.max(
       minimumDeviationMeters,
-      uncertainty * 1.25,
+      uncertainty * uncertaintyMultiplier,
     );
     final inboundSeconds = candidate.capturedAt
             .difference(before.capturedAt)
@@ -54,8 +69,10 @@ final class UncertaintyAwareSpikeClassifier {
     final outboundSeconds =
         after.capturedAt.difference(candidate.capturedAt).inMilliseconds.abs() /
             1000;
-    final plausible = (inboundSeconds == 0 || inbound / inboundSeconds <= 70) &&
-        (outboundSeconds == 0 || outbound / outboundSeconds <= 70);
+    final plausible = (inboundSeconds == 0 ||
+            inbound / inboundSeconds <= maximumSpeedMetersPerSecond) &&
+        (outboundSeconds == 0 ||
+            outbound / outboundSeconds <= maximumSpeedMetersPerSecond);
     final supported = deviation >= requiredDeviation &&
         detourRatio >= minimumDetourRatio &&
         plausible;
@@ -111,13 +128,18 @@ final class UncertaintyWeightedRouteSmoother {
   TrackPoint point,
   TrackPoint end,
 ) {
+  // Project in one longitude frame across the antimeridian.
+  final pointLongitude =
+      TrackGeodesy.unwrapLongitude(start.longitude, point.longitude);
+  final endLongitude =
+      TrackGeodesy.unwrapLongitude(start.longitude, end.longitude);
   final meanLat = (start.latitude + end.latitude) * math.pi / 360;
   final scaleX = math.cos(meanLat);
   final ax = start.longitude * scaleX;
   final ay = start.latitude;
-  final bx = end.longitude * scaleX;
+  final bx = endLongitude * scaleX;
   final by = end.latitude;
-  final px = point.longitude * scaleX;
+  final px = pointLongitude * scaleX;
   final py = point.latitude;
   final dx = bx - ax;
   final dy = by - ay;
@@ -125,7 +147,7 @@ final class UncertaintyWeightedRouteSmoother {
   final t = lengthSquared == 0
       ? 0.0
       : (((px - ax) * dx + (py - ay) * dy) / lengthSquared).clamp(0.0, 1.0);
-  return (ay + dy * t, (ax + dx * t) / scaleX);
+  return (ay + dy * t, TrackGeodesy.wrapLongitude((ax + dx * t) / scaleX));
 }
 
 double _pointToChordMeters(
@@ -155,12 +177,10 @@ double _distanceCoordinates(
   double latitude2,
   double longitude2,
 ) {
-  const radius = 6371008.8;
-  final lat1 = latitude1 * math.pi / 180;
-  final lat2 = latitude2 * math.pi / 180;
-  final dLat = (latitude2 - latitude1) * math.pi / 180;
-  final dLon = (longitude2 - longitude1) * math.pi / 180;
-  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(lat1) * math.cos(lat2) * math.sin(dLon / 2) * math.sin(dLon / 2);
-  return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  return TrackGeodesy.sphericalHaversineMeters(
+    latitude1,
+    longitude1,
+    latitude2,
+    longitude2,
+  );
 }

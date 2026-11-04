@@ -36,7 +36,10 @@ void main() {
 
     await configureTrackDatabase(database);
 
-    expect(database.executedSql, <String>['PRAGMA foreign_keys = ON']);
+    expect(database.executedSql, <String>[
+      'PRAGMA foreign_keys = ON',
+      'PRAGMA synchronous = FULL',
+    ]);
     expect(
       database.queriedSql,
       <String>[
@@ -89,7 +92,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 14);
+    expect(await inspected.getVersion(), 19);
     final tables = await inspected.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
@@ -192,7 +195,7 @@ void main() {
       databasePath,
       options: OpenDatabaseOptions(singleInstance: false),
     );
-    expect(await inspected.getVersion(), 14);
+    expect(await inspected.getVersion(), 19);
     final tripRows = await inspected.query(
       'trips',
       columns: const <String>['measured_distance_m'],
@@ -935,8 +938,9 @@ void main() {
     expect(epoch.epochNumber, 1);
     expect(epoch.activationSequence, 1);
     expect(epoch.resolvedConfig.toMap(), harness.config.toMap());
-    expect(epoch.presetDefinitionVersion, 4);
-    expect(epoch.qualityPolicyVersion, 1);
+    expect(
+        epoch.presetDefinitionVersion, TrackingPolicyVersions.presetDefinition);
+    expect(epoch.qualityPolicyVersion, TrackingPolicyVersions.qualityPolicy);
 
     await expectLater(
       harness.repository.getConfigurationEpoch(
@@ -1037,7 +1041,10 @@ void main() {
     await directory.delete(recursive: true);
 
     expect(rows, hasLength(1));
-    expect(rows.single['quality_policy_version'], 1);
+    expect(
+      rows.single['quality_policy_version'],
+      TrackingPolicyVersions.qualityPolicy,
+    );
   });
 
   test('deleteTrack removes the selected terminal track and child rows',
@@ -1356,7 +1363,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 14);
+    expect(version, 19);
     expect(
       tables.map((row) => row['name']),
       containsAll(<String>[
@@ -1367,6 +1374,9 @@ void main() {
         'track_privacy_operations',
         'derived_geometry_runs',
         'derived_geometry_points',
+        'track_stops',
+        'track_summaries',
+        'trip_summaries',
       ]),
     );
     expect(columns.map((row) => row['name']), contains('native_event_id'));
@@ -1511,7 +1521,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 14);
+    expect(version, 19);
     final preservedPoint = rows.singleWhere(
       (row) => row['id'] == 'preserved-point',
     );
@@ -1613,7 +1623,7 @@ void main() {
     await inspected.close();
     await directory.delete(recursive: true);
 
-    expect(version, 14);
+    expect(version, 19);
     expect(epoch['track_id'], 'v4-track');
     expect(point['id'], 'v4-point');
     expect(point['configuration_epoch_id'], epoch['id']);

@@ -1,0 +1,1600 @@
+{
+  "version": 1,
+  "note": "Motion policy 2 decisions shared by Dart MotionGate, Kotlin StationaryPolicyV2 and Swift StationaryPolicyV2. Times are seconds from the scenario start; fixes are metres east and north of a synthetic origin. Expectations hold after the step. Dart has no profile and does not model fix-driven departures, so it skips `profile` and every step from the first `positionDriven` one on. Types use the stable Dart values; natives map in_vehicle to automotive and on_bicycle to cycling. Generated values only.",
+  "origin": {
+    "latitude": 0.5,
+    "longitude": 0.5
+  },
+  "config": {
+    "stationaryConfidenceThreshold": 75,
+    "movingConfidenceThreshold": 60,
+    "movingConfirmationCount": 1,
+    "confirmationSeconds": 90,
+    "maximumAcceptedAccuracyMeters": 20
+  },
+  "scenarios": [
+    {
+      "name": "cafe_dips_are_neutral_and_the_stop_is_entered",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 5,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 10,
+          "reading": {
+            "type": "unknown",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 15,
+          "reading": {
+            "type": "stationary",
+            "confidence": 98,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 20,
+          "reading": {
+            "type": "stationary",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 25,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 71,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 35,
+          "fix": {
+            "east": 2,
+            "north": -3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 45,
+          "fix": {
+            "east": -4,
+            "north": 1,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 55,
+          "fix": {
+            "east": 5,
+            "north": 6,
+            "accuracy": 15,
+            "speed": null,
+            "speedAccuracy": null,
+            "vertical": false
+          }
+        },
+        {
+          "t": 65,
+          "fix": {
+            "east": -1,
+            "north": -5,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 75,
+          "fix": {
+            "east": 3,
+            "north": 2,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 85,
+          "fix": {
+            "east": -6,
+            "north": 3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 95,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 100,
+          "reading": {
+            "type": "stationary",
+            "confidence": 36,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 105,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 71,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 110,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 71,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        }
+      ]
+    },
+    {
+      "name": "core_motion_dips_are_neutral_and_the_stop_is_entered",
+      "platforms": [
+        "dart",
+        "ios"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 5,
+          "reading": {
+            "type": "unknown",
+            "confidence": 33,
+            "source": "ios_core_motion_activity"
+          }
+        },
+        {
+          "t": 10,
+          "reading": {
+            "type": "stationary",
+            "confidence": 67,
+            "source": "ios_core_motion_activity"
+          }
+        },
+        {
+          "t": 15,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "ios_core_motion_activity"
+          }
+        },
+        {
+          "t": 25,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 67,
+            "source": "ios_core_motion_activity"
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 35,
+          "fix": {
+            "east": 2,
+            "north": -3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 45,
+          "fix": {
+            "east": -4,
+            "north": 1,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 55,
+          "fix": {
+            "east": 5,
+            "north": 6,
+            "accuracy": 15,
+            "speed": null,
+            "speedAccuracy": null,
+            "vertical": false
+          }
+        },
+        {
+          "t": 65,
+          "fix": {
+            "east": -1,
+            "north": -5,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 75,
+          "fix": {
+            "east": 3,
+            "north": 2,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 85,
+          "fix": {
+            "east": -6,
+            "north": 3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 95,
+          "reading": {
+            "type": "unknown",
+            "confidence": 33,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 100,
+          "reading": {
+            "type": "stationary",
+            "confidence": 67,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        }
+      ]
+    },
+    {
+      "name": "activity_silence_keeps_the_stop",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 150,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 185,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 1700,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 1705,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        }
+      ]
+    },
+    {
+      "name": "two_consecutive_moving_readings_leave",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 150,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 185,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 200,
+          "reading": {
+            "type": "walking",
+            "confidence": 90,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 205,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 210,
+          "reading": {
+            "type": "walking",
+            "confidence": 90,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 215,
+          "reading": {
+            "type": "walking",
+            "confidence": 92,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ]
+    },
+    {
+      "name": "vehicle_readings_need_confidence_75",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 150,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 185,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 200,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 74,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 205,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 74,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 210,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 96,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 215,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 96,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ]
+    },
+    {
+      "name": "enter_walking_transition_leaves",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 150,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 185,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 200,
+          "reading": {
+            "type": "walking",
+            "confidence": 100,
+            "source": "android_activity_transition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ]
+    },
+    {
+      "name": "exit_still_transition_leaves",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 150,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 185,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 200,
+          "reading": {
+            "type": "stationary",
+            "confidence": 0,
+            "source": "android_activity_transition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ]
+    },
+    {
+      "name": "enter_still_transition_starts_an_episode_at_once",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_transition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 90,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 180,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a_departure_ignores_older_still_readings",
+      "platforms": [
+        "dart",
+        "android"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 150,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 185,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 200,
+          "reading": {
+            "type": "walking",
+            "confidence": 100,
+            "source": "android_activity_transition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 205,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 230,
+          "tick": true,
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 236,
+          "tick": true,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        }
+      ]
+    },
+    {
+      "name": "core_motion_moving_confidence",
+      "platforms": [
+        "dart",
+        "ios"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 30,
+          "tick": true,
+          "expect": {
+            "episode": true
+          }
+        },
+        {
+          "t": 40,
+          "reading": {
+            "type": "walking",
+            "confidence": 67,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": true
+          }
+        },
+        {
+          "t": 45,
+          "tick": true,
+          "expect": {
+            "episode": true
+          }
+        },
+        {
+          "t": 50,
+          "tick": true,
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 60,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": false
+          }
+        },
+        {
+          "t": 95,
+          "tick": true,
+          "expect": {
+            "episode": true
+          }
+        },
+        {
+          "t": 100,
+          "reading": {
+            "type": "walking",
+            "confidence": 100,
+            "source": "ios_core_motion_activity"
+          },
+          "expect": {
+            "episode": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "reacquisition_burst_is_not_a_departure",
+      "platforms": [
+        "dart",
+        "android",
+        "ios"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 5,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 10,
+          "reading": {
+            "type": "unknown",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 15,
+          "reading": {
+            "type": "stationary",
+            "confidence": 98,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 20,
+          "reading": {
+            "type": "stationary",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 25,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 71,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 35,
+          "fix": {
+            "east": 2,
+            "north": -3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 45,
+          "fix": {
+            "east": -4,
+            "north": 1,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 55,
+          "fix": {
+            "east": 5,
+            "north": 6,
+            "accuracy": 15,
+            "speed": null,
+            "speedAccuracy": null,
+            "vertical": false
+          }
+        },
+        {
+          "t": 65,
+          "fix": {
+            "east": -1,
+            "north": -5,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 75,
+          "fix": {
+            "east": 3,
+            "north": 2,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 85,
+          "fix": {
+            "east": -6,
+            "north": 3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 95,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2000,
+          "fix": {
+            "east": 45,
+            "north": 10,
+            "accuracy": 12,
+            "speed": 0,
+            "speedAccuracy": 6,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2005,
+          "fix": {
+            "east": 55,
+            "north": -20,
+            "accuracy": 13,
+            "speed": 0,
+            "speedAccuracy": 8,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2010,
+          "fix": {
+            "east": 30,
+            "north": 40,
+            "accuracy": 10,
+            "speed": 0,
+            "speedAccuracy": 6,
+            "vertical": true
+          }
+        },
+        {
+          "t": 2015,
+          "fix": {
+            "east": -60,
+            "north": 20,
+            "accuracy": 9,
+            "speed": 0,
+            "speedAccuracy": 10,
+            "vertical": true
+          }
+        },
+        {
+          "t": 2020,
+          "fix": {
+            "east": 70,
+            "north": 15,
+            "accuracy": 9,
+            "speed": 0,
+            "speedAccuracy": 14,
+            "vertical": true
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2070,
+          "fix": {
+            "east": 40,
+            "north": 35,
+            "accuracy": 9,
+            "speed": 0,
+            "speedAccuracy": 6,
+            "vertical": true
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2075,
+          "fix": {
+            "east": 5,
+            "north": -3,
+            "accuracy": 4,
+            "speed": 0,
+            "speedAccuracy": 3,
+            "vertical": true
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2100,
+          "fix": {
+            "east": 60,
+            "north": 15,
+            "accuracy": 2,
+            "speed": 3.4,
+            "speedAccuracy": 1.2,
+            "vertical": true
+          },
+          "positionDriven": true,
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ],
+      "note": "iOS replays the reading steps with source ios_core_motion_activity and Core Motion confidences (unknown 40 as 33)."
+    },
+    {
+      "name": "sustained_displacement_without_doppler_departs",
+      "platforms": [
+        "dart",
+        "android",
+        "ios"
+      ],
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 5,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 10,
+          "reading": {
+            "type": "unknown",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 15,
+          "reading": {
+            "type": "stationary",
+            "confidence": 98,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 20,
+          "reading": {
+            "type": "stationary",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 25,
+          "reading": {
+            "type": "in_vehicle",
+            "confidence": 71,
+            "source": "android_activity_recognition"
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 35,
+          "fix": {
+            "east": 2,
+            "north": -3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 45,
+          "fix": {
+            "east": -4,
+            "north": 1,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 55,
+          "fix": {
+            "east": 5,
+            "north": 6,
+            "accuracy": 15,
+            "speed": null,
+            "speedAccuracy": null,
+            "vertical": false
+          }
+        },
+        {
+          "t": 65,
+          "fix": {
+            "east": -1,
+            "north": -5,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 75,
+          "fix": {
+            "east": 3,
+            "north": 2,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          }
+        },
+        {
+          "t": 85,
+          "fix": {
+            "east": -6,
+            "north": 3,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 2.5,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 95,
+          "reading": {
+            "type": "unknown",
+            "confidence": 40,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 300,
+          "fix": {
+            "east": 30,
+            "north": 0,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 3,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 320,
+          "fix": {
+            "east": 45,
+            "north": 0,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 3,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 340,
+          "fix": {
+            "east": 60,
+            "north": 0,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 3,
+            "vertical": true
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 365,
+          "fix": {
+            "east": 75,
+            "north": 0,
+            "accuracy": 3,
+            "speed": 0,
+            "speedAccuracy": 3,
+            "vertical": true
+          },
+          "positionDriven": true,
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ],
+      "note": "iOS replays the reading steps with source ios_core_motion_activity and Core Motion confidences (unknown 40 as 33)."
+    },
+    {
+      "name": "entry_without_fixes_ignores_a_lone_reacquisition_outlier",
+      "platforms": [
+        "dart",
+        "android",
+        "ios"
+      ],
+      "note": "A still phone on a table delivers no fix, so the stop is entered without one. After half an hour the first fix is a re-acquisition outlier 50 m off; anchoring on it made the true position 13 minutes later look like a sustained departure. Two fixes must agree before positions can end the stop.",
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 99,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 120,
+          "expect": {
+            "episode": true,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 180,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 1800,
+          "fix": {
+            "east": 0,
+            "north": 50,
+            "accuracy": 7.1,
+            "speed": 0,
+            "speedAccuracy": 6,
+            "vertical": true
+          },
+          "positionDriven": true,
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 1813,
+          "fix": {
+            "east": 0,
+            "north": 2,
+            "accuracy": 12.7,
+            "speed": null,
+            "speedAccuracy": null,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2557,
+          "fix": {
+            "east": 0,
+            "north": -28,
+            "accuracy": 7.6,
+            "speed": 0,
+            "speedAccuracy": 4.3,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2567,
+          "fix": {
+            "east": 2,
+            "north": -10,
+            "accuracy": 12.6,
+            "speed": null,
+            "speedAccuracy": null,
+            "vertical": true
+          },
+          "expect": {
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 2573,
+          "fix": {
+            "east": -3,
+            "north": -16,
+            "accuracy": 4.2,
+            "speed": 0.03,
+            "speedAccuracy": 0.1,
+            "vertical": true
+          },
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        }
+      ]
+    },
+    {
+      "name": "entry_without_fixes_departs_on_doppler_before_an_anchor",
+      "platforms": [
+        "dart",
+        "android",
+        "ios"
+      ],
+      "note": "With no anchor yet, a clearly measured Doppler speed still ends the stop.",
+      "steps": [
+        {
+          "t": 0,
+          "reading": {
+            "type": "stationary",
+            "confidence": 100,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        },
+        {
+          "t": 30,
+          "reading": {
+            "type": "stationary",
+            "confidence": 99,
+            "source": "android_activity_recognition"
+          },
+          "expect": {
+            "episode": true
+          }
+        },
+        {
+          "t": 180,
+          "expect": {
+            "episode": true,
+            "profile": "stationary"
+          }
+        },
+        {
+          "t": 600,
+          "fix": {
+            "east": 40,
+            "north": 0,
+            "accuracy": 2,
+            "speed": 3.4,
+            "speedAccuracy": 1.2,
+            "vertical": true
+          },
+          "positionDriven": true,
+          "expect": {
+            "episode": false,
+            "profile": "moving"
+          }
+        }
+      ]
+    }
+  ]
+}
