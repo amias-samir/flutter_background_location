@@ -1,6 +1,7 @@
 import '../domain/activity_snapshot.dart';
 import '../domain/export_models.dart';
 import '../domain/location_sample.dart';
+import '../domain/route_recording_detail.dart';
 import '../domain/route_review.dart';
 import '../domain/route_summary.dart';
 import '../domain/step_coverage.dart';
@@ -225,6 +226,31 @@ abstract interface class RouteReviewRepository {
 
 /// Optional capability: health events recorded once per key, so events
 /// rebuilt from journal payloads replayed after a restart never repeat.
+/// Optional capability: the detail recorded beside the clean route
+/// ([RouteRecordingDetail]).
+///
+/// [TrackingClient] sets both properties from
+/// [TrackingConfiguration.recordingDetail] before it opens the repository.
+/// Repositories without this capability record everything.
+abstract interface class RecordingDetailRepository {
+  /// Detail stamped on routes created from now on:
+  /// [RouteRecordingDetail.full] (the default) or
+  /// [RouteRecordingDetail.clean]. A route keeps its stamp for life.
+  set newRouteRecordingDetail(RouteRecordingDetail value);
+
+  /// Whether diagnostic health events are stored (the default). Events that
+  /// prove a lifecycle boundary are always stored.
+  set recordsDiagnosticHealthEvents(bool value);
+
+  /// Compacts up to [limit] completed or failed clean routes not yet
+  /// compacted, oldest first, one transaction each; with [owner], only that
+  /// owner's. Their journaled activity readings, motion evidence and
+  /// diagnostic health events are removed; their points, acceptance,
+  /// distance, stops, steps, summaries and uploads stay. Returns how many
+  /// routes were compacted.
+  Future<int> compactCleanRoutes({int limit = 20, TrackingOwner? owner});
+}
+
 abstract interface class KeyedHealthEventRepository {
   /// Records a health event under [key] unless one is already recorded.
   Future<void> recordKeyedHealthEvent({

@@ -200,6 +200,11 @@ internal class StepCounterDiagnosticsRing(private val capacity: Int) {
 
     @Synchronized
     fun snapshot(): List<StepCounterDiagnosticEntry> = entries.toList()
+
+    @Synchronized
+    fun clear() {
+        entries.clear()
+    }
 }
 
 /**
@@ -617,8 +622,13 @@ internal class StepCounter(
         )
     }
 
-    /** Appends a diagnostic: timings, sensor and device state, no step counts. */
+    /**
+     * Appends a diagnostic: timings, sensor and device state, no step counts.
+     * Clean detail ([DiagnosticsMode]) keeps none; the watchdog never reads
+     * them.
+     */
     private fun record(event: String) {
+        if (!DiagnosticsMode.full) return
         val nowMs = SystemClock.elapsedRealtime()
         val watchdog = watchdog
         val sensor = activeSensor ?: sessionSensor
@@ -674,8 +684,12 @@ internal class StepCounter(
         fun isAvailable(context: Context): Boolean =
             preferredSensor(context.getSystemService(Context.SENSOR_SERVICE) as SensorManager) != null
 
-        /** The newest diagnostics, oldest first. */
-        fun diagnostics(): List<Map<String, Any?>> = diagnosticsRing.snapshot().map { it.toMap() }
+        /** The newest diagnostics, oldest first; none in clean detail. */
+        fun diagnostics(): List<Map<String, Any?>> =
+            if (DiagnosticsMode.full) diagnosticsRing.snapshot().map { it.toMap() } else emptyList()
+
+        /** Drops every kept diagnostic. */
+        fun clearDiagnostics() = diagnosticsRing.clear()
 
         private fun preferredSensor(sensors: SensorManager): Sensor? =
             sensors.getDefaultSensor(Sensor.TYPE_STEP_COUNTER, true)

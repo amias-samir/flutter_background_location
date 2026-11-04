@@ -40,10 +40,20 @@ final class RouteMapContent {
 }
 
 class TrackMapPage extends StatefulWidget {
-  const TrackMapPage({super.key, required this.tracking, required this.track});
+  const TrackMapPage({
+    super.key,
+    required this.tracking,
+    required this.track,
+    this.showDiagnostics = true,
+  });
 
   final Tracking tracking;
   final Track track;
+
+  /// Whether the page offers the route's views and continuity and draws
+  /// gaps and uncertain stretches; a clean build shows the clean route and
+  /// its stops only.
+  final bool showDiagnostics;
 
   @override
   State<TrackMapPage> createState() => _TrackMapPageState();
@@ -58,6 +68,7 @@ class _TrackMapPageState extends State<TrackMapPage> {
   @override
   Widget build(BuildContext context) => _RouteMapScaffold(
     title: 'Recorded route',
+    showDiagnostics: widget.showDiagnostics,
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
     onViewChanged: (value) => setState(() => _view = value),
@@ -188,10 +199,18 @@ Iterable<RouteGeometrySourcePart> _sourceParts(
 );
 
 class TripMapPage extends StatefulWidget {
-  const TripMapPage({super.key, required this.tracking, required this.trip});
+  const TripMapPage({
+    super.key,
+    required this.tracking,
+    required this.trip,
+    this.showDiagnostics = true,
+  });
 
   final MultiDayTripController tracking;
   final Trip trip;
+
+  /// As [TrackMapPage.showDiagnostics].
+  final bool showDiagnostics;
 
   @override
   State<TripMapPage> createState() => _TripMapPageState();
@@ -212,6 +231,7 @@ class _TripMapPageState extends State<TripMapPage> {
   @override
   Widget build(BuildContext context) => _RouteMapScaffold(
     title: widget.trip.routeId ?? 'Multi-day Trip',
+    showDiagnostics: widget.showDiagnostics,
     continuity: _continuity,
     onContinuityChanged: (value) => setState(() => _continuity = value),
     onViewChanged: (value) => setState(() => _view = value),
@@ -336,6 +356,7 @@ Future<Map<String, maplibre.LatLng>> cleanedCoordinates(
 class _RouteMapScaffold extends StatelessWidget {
   const _RouteMapScaffold({
     required this.title,
+    required this.showDiagnostics,
     required this.continuity,
     required this.onContinuityChanged,
     required this.onViewChanged,
@@ -343,6 +364,7 @@ class _RouteMapScaffold extends StatelessWidget {
   });
 
   final String title;
+  final bool showDiagnostics;
   final RouteGeometryContinuity continuity;
   final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
   final ValueChanged<RouteView> onViewChanged;
@@ -370,6 +392,7 @@ class _RouteMapScaffold extends StatelessWidget {
           children: <Widget>[
             RouteMapHeader(
               content: content,
+              showDiagnostics: showDiagnostics,
               continuity: continuity,
               onContinuityChanged: onContinuityChanged,
               onViewChanged: onViewChanged,
@@ -385,12 +408,15 @@ class _RouteMapScaffold extends StatelessWidget {
                               (continuity, content.view),
                             ),
                             route: route,
+                            showDiagnostics: showDiagnostics,
                           ),
                         ),
-                        const Positioned(
+                        Positioned(
                           left: 12,
                           bottom: 12,
-                          child: _RouteEndpointLegend(),
+                          child: _RouteEndpointLegend(
+                            showDiagnostics: showDiagnostics,
+                          ),
                         ),
                       ],
                     ),
@@ -411,9 +437,14 @@ class RouteMapHeader extends StatelessWidget {
     required this.continuity,
     required this.onContinuityChanged,
     required this.onViewChanged,
+    this.showDiagnostics = true,
   });
 
   final RouteMapContent content;
+
+  /// Whether the header offers views and continuity and shows the route's
+  /// point, part, quality event and visible gap counts.
+  final bool showDiagnostics;
   final RouteGeometryContinuity continuity;
   final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
   final ValueChanged<RouteView> onViewChanged;
@@ -432,33 +463,43 @@ class RouteMapHeader extends StatelessWidget {
         children: <Widget>[
           Row(
             children: <Widget>[
-              Expanded(child: Text(routeHeadline(content.route))),
-              const SizedBox(width: 8),
-              PopupMenuButton<RouteGeometryContinuity>(
-                tooltip: 'Route continuity',
-                initialValue: continuity,
-                onSelected: onContinuityChanged,
-                itemBuilder: (_) =>
-                    const <PopupMenuEntry<RouteGeometryContinuity>>[
-                      PopupMenuItem(
-                        value: RouteGeometryContinuity.preserveEvidenceSegments,
-                        child: Text('Keep parts separate'),
-                      ),
-                      PopupMenuItem(
-                        value: RouteGeometryContinuity.connectDailyLegs,
-                        child: Text('Connect days'),
-                      ),
-                      PopupMenuItem(
-                        value: RouteGeometryContinuity
-                            .connectAllChronologicalPoints,
-                        child: Text('Connect all'),
-                      ),
-                    ],
-                icon: const Icon(Icons.alt_route_rounded),
+              Expanded(
+                child: Text(
+                  routeHeadline(
+                    content.route,
+                    showDiagnostics: showDiagnostics,
+                  ),
+                ),
               ),
+              if (showDiagnostics) ...<Widget>[
+                const SizedBox(width: 8),
+                PopupMenuButton<RouteGeometryContinuity>(
+                  tooltip: 'Route continuity',
+                  initialValue: continuity,
+                  onSelected: onContinuityChanged,
+                  itemBuilder: (_) =>
+                      const <PopupMenuEntry<RouteGeometryContinuity>>[
+                        PopupMenuItem(
+                          value:
+                              RouteGeometryContinuity.preserveEvidenceSegments,
+                          child: Text('Keep parts separate'),
+                        ),
+                        PopupMenuItem(
+                          value: RouteGeometryContinuity.connectDailyLegs,
+                          child: Text('Connect days'),
+                        ),
+                        PopupMenuItem(
+                          value: RouteGeometryContinuity
+                              .connectAllChronologicalPoints,
+                          child: Text('Connect all'),
+                        ),
+                      ],
+                  icon: const Icon(Icons.alt_route_rounded),
+                ),
+              ],
             ],
           ),
-          if (content.views.length > 1)
+          if (showDiagnostics && content.views.length > 1)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: SegmentedButton<RouteView>(
@@ -484,33 +525,36 @@ class RouteMapHeader extends StatelessWidget {
                   ? text.bodyMedium?.copyWith(fontWeight: FontWeight.w600)
                   : text.bodySmall,
             ),
-          Text(switch (continuity) {
-            RouteGeometryContinuity.preserveEvidenceSegments =>
-              'Recorded daily and lifecycle parts stay separate.',
-            RouteGeometryContinuity.connectDailyLegs =>
-              'Only daily boundaries receive straight inferred connectors.',
-            RouteGeometryContinuity.connectAllChronologicalPoints =>
-              'All parts receive straight inferred connectors; inferred distance is excluded.',
-            RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
-              'Only proven automatic callback gaps are joined.',
-          }, style: text.bodySmall),
+          if (showDiagnostics)
+            Text(switch (continuity) {
+              RouteGeometryContinuity.preserveEvidenceSegments =>
+                'Recorded daily and lifecycle parts stay separate.',
+              RouteGeometryContinuity.connectDailyLegs =>
+                'Only daily boundaries receive straight inferred connectors.',
+              RouteGeometryContinuity.connectAllChronologicalPoints =>
+                'All parts receive straight inferred connectors; inferred distance is excluded.',
+              RouteGeometryContinuity.mergeAutomaticCallbackGaps =>
+                'Only proven automatic callback gaps are joined.',
+            }, style: text.bodySmall),
         ],
       ),
     );
   }
 }
 
-/// The map header's first line: what is drawn, and the route database's
-/// counts of stops, quality events and visible gaps.
-String routeHeadline(RouteGeometry route) => <String>[
-  '${route.pointCount} points',
-  '${route.totals?.stopCount ?? route.stopMarkers.length} stop(s)',
-  '${route.geometryPartCount} drawable part(s)',
-  if (route.totals case final totals?) ...<String>[
-    '${totals.qualityEventCount} quality event(s)',
-    '${totals.visibleGapCount} visible gap(s)',
-  ],
-].join(' • ');
+/// The map header's first line: the route database's count of stops and,
+/// with [showDiagnostics], what is drawn and its counts of quality events
+/// and visible gaps.
+String routeHeadline(RouteGeometry route, {bool showDiagnostics = true}) =>
+    <String>[
+      if (showDiagnostics) '${route.pointCount} points',
+      '${route.totals?.stopCount ?? route.stopMarkers.length} stop(s)',
+      if (showDiagnostics) '${route.geometryPartCount} drawable part(s)',
+      if (route.totals case final totals? when showDiagnostics) ...<String>[
+        '${totals.qualityEventCount} quality event(s)',
+        '${totals.visibleGapCount} visible gap(s)',
+      ],
+    ].join(' • ');
 
 /// The map header's distance and time lines, from the route database. The
 /// distance comes first: the corrected one once the route was reviewed,
@@ -538,9 +582,16 @@ List<String> routeTotalsLines(RouteTotals? totals, {required bool cleaned}) {
 }
 
 class TrackRouteMap extends StatefulWidget {
-  const TrackRouteMap({super.key, required this.route});
+  const TrackRouteMap({
+    super.key,
+    required this.route,
+    this.showDiagnostics = true,
+  });
 
   final RouteGeometry route;
+
+  /// Whether gaps and uncertain stretches are drawn.
+  final bool showDiagnostics;
 
   @override
   State<TrackRouteMap> createState() => _TrackRouteMapState();
@@ -593,7 +644,10 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
     }
     // Stretches whose fixes zig-zag inside their own uncertainty: the route
     // went somewhere here, but the positions can't say exactly where.
-    for (final stretch in widget.route.uncertainSegments) {
+    for (final stretch
+        in widget.showDiagnostics
+            ? widget.route.uncertainSegments
+            : const <List<maplibre.LatLng>>[]) {
       await controller.addLine(
         maplibre.LineOptions(
           geometry: stretch,
@@ -603,7 +657,10 @@ class _TrackRouteMapState extends State<TrackRouteMap> {
         ),
       );
     }
-    for (final marker in widget.route.gapMarkers) {
+    for (final marker
+        in widget.showDiagnostics
+            ? widget.route.gapMarkers
+            : const <maplibre.LatLng>[]) {
       await _drawCircle(
         controller,
         coordinate: marker,
@@ -718,7 +775,9 @@ String describeStop(RouteStopMarker stop) {
 }
 
 class _RouteEndpointLegend extends StatelessWidget {
-  const _RouteEndpointLegend();
+  const _RouteEndpointLegend({required this.showDiagnostics});
+
+  final bool showDiagnostics;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -727,16 +786,20 @@ class _RouteEndpointLegend extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: const <Widget>[
-          _LegendItem(color: Color(0xFFD32F2F), label: 'Start'),
-          SizedBox(width: 12),
-          _LegendItem(color: Color(0xFFF57C00), label: 'Gap'),
-          SizedBox(width: 12),
-          _LegendItem(color: Color(0xFF1565C0), label: 'Stop'),
-          SizedBox(width: 12),
-          _LegendItem(color: Color(0xFFF9A825), label: 'Uncertain'),
-          SizedBox(width: 12),
-          _LegendItem(color: Color(0xFF2E7D32), label: 'Destination'),
+        children: <Widget>[
+          const _LegendItem(color: Color(0xFFD32F2F), label: 'Start'),
+          const SizedBox(width: 12),
+          if (showDiagnostics) ...const <Widget>[
+            _LegendItem(color: Color(0xFFF57C00), label: 'Gap'),
+            SizedBox(width: 12),
+          ],
+          const _LegendItem(color: Color(0xFF1565C0), label: 'Stop'),
+          const SizedBox(width: 12),
+          if (showDiagnostics) ...const <Widget>[
+            _LegendItem(color: Color(0xFFF9A825), label: 'Uncertain'),
+            SizedBox(width: 12),
+          ],
+          const _LegendItem(color: Color(0xFF2E7D32), label: 'Destination'),
         ],
       ),
     ),

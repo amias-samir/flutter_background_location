@@ -20,6 +20,36 @@ void main() {
     );
   });
 
+  test('the recording detail switch is additive', () {
+    // Existing configurations and routes compile unchanged and keep their
+    // defaults: automatic detail, routes without a stamp are full.
+    const configuration = TrackingConfiguration();
+    expect(configuration.recordingDetail, RouteRecordingDetail.automatic);
+    const forced = TrackingConfiguration(
+      recordingDetail: RouteRecordingDetail.full,
+    );
+    expect(forced.recordingDetail, RouteRecordingDetail.full);
+    final track = Track(
+      id: 'track',
+      userId: 'user',
+      organizationId: 'org',
+      status: TrackStatus.completed,
+      startedAt: DateTime.utc(2026),
+      segmentCount: 1,
+      nextSequence: 1,
+      acceptedPointCount: 0,
+      rejectedPointCount: 0,
+      totalDistanceMeters: 0,
+      config: const TrackingConfig(),
+    );
+    expect(track.recordingDetail, RouteRecordingDetail.full);
+    expect(
+      advanced.NativeTrackingCapabilities.recordingDetailMode,
+      'recording_detail_mode',
+    );
+    expect(RouteRecordingDetail.values, hasLength(3));
+  });
+
   test('stored-route actions are separate from live-session actions', () {
     final track = Track(
       id: 'track',

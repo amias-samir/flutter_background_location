@@ -1,4 +1,5 @@
 import 'persisted_tracking_config.dart';
+import 'route_recording_detail.dart';
 import 'tracking_config.dart';
 
 /// Durable lifecycle state of one recorded route.
@@ -53,6 +54,7 @@ final class Track {
     this.completionReason,
     this.terminalReasonCode,
     this.sessionControlToken,
+    this.recordingDetail = RouteRecordingDetail.full,
   });
 
   /// Internal collision-safe route identifier used by package operations.
@@ -129,6 +131,11 @@ final class Track {
   /// Fully resolved sampling and quality configuration stored with the route.
   final TrackingConfig config;
 
+  /// Detail this route was recorded with: [RouteRecordingDetail.full] or
+  /// [RouteRecordingDetail.clean], stamped when it started and never
+  /// changed. Routes recorded before the stamp existed are full.
+  final RouteRecordingDetail recordingDetail;
+
   /// Whether this route can be continued by a Resume operation.
   bool get isResumable =>
       status == TrackStatus.paused || status == TrackStatus.interrupted;
@@ -171,6 +178,7 @@ final class Track {
       config: decodePersistedTrackingConfig(
         row['configuration_json']! as String,
       ),
+      recordingDetail: RouteRecordingDetail.stored(row['recording_detail']),
     );
   }
 }

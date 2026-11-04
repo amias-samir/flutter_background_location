@@ -11,6 +11,7 @@ import '../domain/export_models.dart';
 import '../domain/quality_run_rules.dart';
 import '../domain/motion_evidence.dart';
 import '../domain/persisted_tracking_config.dart';
+import '../domain/route_recording_detail.dart';
 import '../domain/route_review.dart';
 import '../domain/route_summary.dart';
 import '../domain/step_coverage.dart';
@@ -31,6 +32,7 @@ import '../domain/tracking_error.dart';
 import '../domain/tracking_privacy.dart';
 import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
+import 'route_compaction_store.dart';
 import 'route_review_store.dart';
 import 'route_summary_store.dart';
 import 'track_repository.dart';
@@ -76,7 +78,8 @@ final class SqliteTrackRepository
         QualityDiagnosticsRepository,
         DerivedGeometryRepository,
         TrackStopRepository,
-        DecisionTailRepository {
+        DecisionTailRepository,
+        RecordingDetailRepository {
   SqliteTrackRepository({
     required this.path,
     DatabaseFactory? databaseFactoryOverride,
@@ -122,6 +125,22 @@ final class SqliteTrackRepository
   final StreamController<Track?> _currentTrackController =
       StreamController<Track?>.broadcast();
   Track? _currentTrackSnapshot;
+
+  RouteRecordingDetail _newRouteRecordingDetail = RouteRecordingDetail.full;
+  bool _recordsDiagnosticHealthEvents = true;
+
+  @override
+  set newRouteRecordingDetail(RouteRecordingDetail value) {
+    _newRouteRecordingDetail = value == RouteRecordingDetail.clean
+        ? RouteRecordingDetail.clean
+        : RouteRecordingDetail.full;
+  }
+
+  @override
+  set recordsDiagnosticHealthEvents(bool value) {
+    _recordsDiagnosticHealthEvents = value;
+  }
+
   int _healthEventsSincePrune = 0;
 
   /// Health event types that prove a lifecycle boundary. Legacy gap
@@ -133,6 +152,12 @@ final class SqliteTrackRepository
     'termination_recovery_started_gap_possible',
     'authorization_changed',
   ];
+
+  /// Whether a health event of [type] is stored: diagnostic events only
+  /// when [recordsDiagnosticHealthEvents] is on, lifecycle evidence always.
+  bool _storesHealthEvent(String type) =>
+      _recordsDiagnosticHealthEvents ||
+      _gapEvidenceHealthEventTypes.contains(type);
 
   /// Newest diagnostic health events kept per track (and for events without a
   /// track); pruning runs after every [_healthEventPruneInterval] inserts.
@@ -176,7 +201,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 18,
+        version: 19,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -193,6 +218,7 @@ final class SqliteTrackRepository
     await _createTrackStopsSchema(_db);
     await RouteSummaryStore.ensureSchema(_db);
     await RouteReviewStore.ensureSchema(_db);
+    await RouteCompactionStore.ensureSchema(_db);
     await _db.transaction(_repairInitialConfigurationEpochs);
     await _refreshStaleSummaries();
     await _emitCurrentTrack();
@@ -452,6 +478,7 @@ final class SqliteTrackRepository
     await _createTrackStopsSchema(database);
     await RouteSummaryStore.ensureSchema(database);
     await RouteReviewStore.ensureSchema(database);
+    await RouteCompactionStore.ensureSchema(database);
   }
 
   static Future<void> _upgradeSchema(
@@ -680,6 +707,10 @@ final class SqliteTrackRepository
       await RouteReviewStore.ensureSchema(database);
       await RouteReviewStore.seedLiveStepGenerations(database);
       // Reviews of older routes run in the background after the open.
+    }
+    if (oldVersion < 19) {
+      // Routes recorded before schema 19 keep everything they recorded.
+      await RouteCompactionStore.ensureSchema(database);
     }
   }
 
@@ -1612,6 +1643,7 @@ final class SqliteTrackRepository
         'tracker_provider': 'native',
         'configuration_json': config.toJson(),
         'session_control_token': sessionControlToken,
+        'recording_detail': _newRouteRecordingDetail.name,
         'created_at': _timestamp(now),
         'updated_at': _timestamp(now),
       });
@@ -2217,14 +2249,18 @@ final class SqliteTrackRepository
         request.sample.capturedAt,
         configurationEpoch.resolvedConfig.activityFreshnessThreshold,
       );
-      final motionEvidenceId = await _persistMotionEvidence(
-        transaction,
-        trackId: request.trackId,
-        configurationEpochId: configurationEpoch.id,
-        evidence: request.sample.capturedMotionEvidence,
-        samplingProfile: request.sample.samplingProfile,
-        now: now,
-      );
+      // A clean route stores no motion evidence; only diagnostics read it.
+      final clean = track.recordingDetail == RouteRecordingDetail.clean;
+      final motionEvidenceId = clean
+          ? null
+          : await _persistMotionEvidence(
+              transaction,
+              trackId: request.trackId,
+              configurationEpochId: configurationEpoch.id,
+              evidence: request.sample.capturedMotionEvidence,
+              samplingProfile: request.sample.samplingProfile,
+              now: now,
+            );
       final id = _idGenerator();
       await transaction.insert('track_points', <String, Object?>{
         'id': id,
@@ -2366,7 +2402,11 @@ final class SqliteTrackRepository
       }
 
       TrackingContinuityGap? committedGap;
-      if (continuity != null && previousAccepted != null) {
+      // A clean route keeps only the gaps that mark a segment boundary, which
+      // route geometry and exports join segments by, and none is visible.
+      if (continuity != null &&
+          previousAccepted != null &&
+          (!clean || beforeSegmentId != segmentId)) {
         final providerGap =
             request.sample.capturedAt.difference(previousAccepted.capturedAt);
         final rawReceiptGap = previousRaw?.nativeReceivedAt == null ||
@@ -2375,11 +2415,12 @@ final class SqliteTrackRepository
             : request.sample.nativeReceivedAt!
                 .difference(previousRaw!.nativeReceivedAt!);
         final gapId = _idGenerator();
-        final gapVisible = TrackingContinuityGap.visibleFor(
-          cause: continuity.cause,
-          providerGap: providerGap.isNegative ? null : providerGap,
-          straightLineDistanceMeters: connectorDistance,
-        );
+        final gapVisible = !clean &&
+            TrackingContinuityGap.visibleFor(
+              cause: continuity.cause,
+              providerGap: providerGap.isNegative ? null : providerGap,
+              straightLineDistanceMeters: connectorDistance,
+            );
         final gapInserted = await transaction.insert(
           'track_continuity_gaps',
           <String, Object?>{
@@ -2461,8 +2502,10 @@ final class SqliteTrackRepository
       }
 
       // A rejected run needs a raw point after the previous accepted one;
-      // without one the scan below would find nothing.
-      if (request.accepted &&
+      // without one the scan below would find nothing. A clean route stores
+      // no quality runs.
+      if (!clean &&
+          request.accepted &&
           previousAccepted != null &&
           previousRaw != null &&
           previousRaw.sequence > previousAccepted.sequence) {
@@ -2510,14 +2553,16 @@ final class SqliteTrackRepository
           coverage: request.sample.stepCoverage,
           now: now,
         );
-        await _recordStepCoverageChange(
-          transaction,
-          trackId: request.trackId,
-          before: before,
-          coverage: request.sample.stepCoverage,
-          after: after,
-          at: request.sample.capturedAt,
-        );
+        if (_recordsDiagnosticHealthEvents) {
+          await _recordStepCoverageChange(
+            transaction,
+            trackId: request.trackId,
+            before: before,
+            coverage: request.sample.stepCoverage,
+            after: after,
+            at: request.sample.capturedAt,
+          );
+        }
       }
       await RouteSummaryStore.onPointStored(
         transaction,
@@ -3595,14 +3640,16 @@ final class SqliteTrackRepository
         coverage: coverage,
         now: now,
       );
-      await _recordStepCoverageChange(
-        transaction,
-        trackId: trackId,
-        before: before,
-        coverage: coverage,
-        after: after,
-        at: now,
-      );
+      if (_recordsDiagnosticHealthEvents) {
+        await _recordStepCoverageChange(
+          transaction,
+          trackId: trackId,
+          before: before,
+          coverage: coverage,
+          after: after,
+          at: now,
+        );
+      }
     });
   }
 
@@ -3651,6 +3698,7 @@ final class SqliteTrackRepository
     required DateTime occurredAt,
     Map<String, Object?>? details,
   }) async {
+    if (!_storesHealthEvent(type)) return;
     await _db.insert(
       'tracking_health_events',
       <String, Object?>{
@@ -3853,6 +3901,7 @@ final class SqliteTrackRepository
           'tracker_provider': 'native',
           'configuration_json': config.toJson(),
           'session_control_token': sessionControlToken,
+          'recording_detail': _newRouteRecordingDetail.name,
           'created_at': _timestamp(now),
           'updated_at': _timestamp(now),
         });
@@ -6455,11 +6504,38 @@ final class SqliteTrackRepository
       );
 
   @override
+  Future<int> compactCleanRoutes({
+    int limit = 20,
+    TrackingOwner? owner,
+  }) async {
+    final pending = await RouteCompactionStore.tracksAwaitingCompaction(
+      _db,
+      limit: limit,
+      userId: owner?.userId,
+      organizationId: owner?.organizationId,
+    );
+    var compacted = 0;
+    for (final trackId in pending) {
+      final done = await _db.transaction(
+        (transaction) => RouteCompactionStore.compact(
+          transaction,
+          trackId,
+          keptHealthEventTypes: _gapEvidenceHealthEventTypes,
+          compactedAt: _timestamp(_clock()),
+        ),
+      );
+      if (done) compacted++;
+    }
+    return compacted;
+  }
+
+  @override
   Future<void> recordHealthEvent({
     String? trackId,
     required String type,
     Map<String, Object?>? details,
   }) async {
+    if (!_storesHealthEvent(type)) return;
     await _db.insert('tracking_health_events', <String, Object?>{
       'id': _idGenerator(),
       'track_id': trackId,

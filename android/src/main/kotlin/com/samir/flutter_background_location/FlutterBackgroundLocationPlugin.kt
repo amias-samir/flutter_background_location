@@ -59,6 +59,7 @@ class FlutterBackgroundLocationPlugin :
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = binding.applicationContext
+        DiagnosticsMode.load(applicationContext)
         stateStore = TrackingStateStore(applicationContext)
 
         methodChannel = MethodChannel(binding.binaryMessenger, METHOD_CHANNEL).also {
@@ -814,6 +815,7 @@ class FlutterBackgroundLocationPlugin :
 
     private fun initialize(call: MethodCall, result: MethodChannel.Result) {
         val arguments = call.arguments as? Map<*, *>
+        DiagnosticsMode.apply(applicationContext, arguments?.get("recordingDetail"))
         val configuration = TrackingConfiguration.fromMap(arguments?.get("config") as? Map<*, *>)
         createNotificationChannel(configuration)
         stateStore.emitCurrentStatus()
@@ -1423,6 +1425,8 @@ class FlutterBackgroundLocationPlugin :
             "profile_stamp_at_capture",
             // `samplingPolicyVersion` 2: an unfiltered 1 Hz moving stream, sampled.
             "fix_sampling_v2",
+            // `recordingDetail` with `initialize`: clean keeps no diagnostics.
+            "recording_detail_mode",
         )
 
     private fun batteryOptimizationStatus(): Map<String, Any?> = linkedMapOf(

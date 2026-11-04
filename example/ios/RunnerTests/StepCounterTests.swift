@@ -86,7 +86,7 @@ final class StepCounterTests: XCTestCase {
   func testCoverageReportsThePedometerAndItsNewestReading() throws {
     let clock = TestClock()
     let source = FakeStepCountSource()
-    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now })
+    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { true })
     counter.start(generationId: "generation", startedAt: clock.now)
 
     let initial = try XCTUnwrap(counter.coverage(for: "generation")?.map)
@@ -142,7 +142,7 @@ final class StepCounterTests: XCTestCase {
   func testFinalizeReadsThePedometerBeforeCountingStops() throws {
     let clock = TestClock()
     let source = FakeStepCountSource()
-    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now })
+    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { true })
     let start = clock.now
     counter.start(generationId: "generation", startedAt: start)
     source.deliver(40, through: start.addingTimeInterval(30))
@@ -180,7 +180,7 @@ final class StepCounterTests: XCTestCase {
     let clock = TestClock()
     let source = FakeStepCountSource()
     source.answersQueries = false
-    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now })
+    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { true })
     counter.start(generationId: "generation", startedAt: clock.now)
     source.deliver(40, through: clock.now.addingTimeInterval(30))
     drainMainQueue()
@@ -202,7 +202,7 @@ final class StepCounterTests: XCTestCase {
   func testWalkingWithoutARisingCountIsSuspectUntilTheCountRises() throws {
     let clock = TestClock()
     let source = FakeStepCountSource()
-    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now })
+    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { true })
     let start = clock.now
     counter.start(generationId: "generation", startedAt: start)
     source.deliver(10, through: start)
@@ -366,7 +366,7 @@ final class StepCounterTests: XCTestCase {
     let clock = TestClock()
     let source = FakeStepCountSource()
     source.queryAnswer = StepCountReading(steps: 999, endDate: clock.now)
-    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now })
+    let counter = StepCounter(source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { true })
     counter.start(generationId: "generation", startedAt: clock.now)
     let finalized = expectation(description: "finalized")
     counter.finalize { _ in finalized.fulfill() }
@@ -387,5 +387,44 @@ final class StepCounterTests: XCTestCase {
       )
       XCTAssertFalse(entry.values.contains { ($0 as? Int) == 999 })
     }
+  }
+
+  func testCleanDetailKeepsNoDiagnostics() {
+    let source = FakeStepCountSource()
+    let clock = TestClock()
+    let counter = StepCounter(
+      source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { false })
+    counter.start(generationId: "generation", startedAt: clock.now)
+    counter.finalize { _ in }
+    drainMainQueue()
+    XCTAssertTrue(counter.diagnostics.isEmpty)
+  }
+
+  func testClearingDropsEveryDiagnostic() {
+    let source = FakeStepCountSource()
+    let clock = TestClock()
+    let counter = StepCounter(
+      source: source, permitted: { true }, clock: { clock.now }, keepsDiagnostics: { true })
+    counter.start(generationId: "generation", startedAt: clock.now)
+    counter.finalize { _ in }
+    drainMainQueue()
+    XCTAssertFalse(counter.diagnostics.isEmpty)
+    counter.clearDiagnostics()
+    XCTAssertTrue(counter.diagnostics.isEmpty)
+  }
+
+  func testCleanDetailKeepsOnlyTheErrorsDomainAndCode() {
+    let error = NSError(
+      domain: "kCLErrorDomain", code: 1,
+      userInfo: [NSLocalizedDescriptionKey: "something private"])
+    XCTAssertEqual(
+      DiagnosticsMode.detail("Location updates failed", error, full: false),
+      "Location updates failed (kCLErrorDomain 1).")
+    XCTAssertEqual(
+      DiagnosticsMode.detail("Location updates failed", error, full: true), "something private")
+    XCTAssertEqual(DiagnosticsMode.parse("clean"), "clean")
+    XCTAssertEqual(DiagnosticsMode.parse("full"), "full")
+    XCTAssertNil(DiagnosticsMode.parse("automatic"))
+    XCTAssertNil(DiagnosticsMode.parse(nil))
   }
 }

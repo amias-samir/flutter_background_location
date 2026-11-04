@@ -1005,8 +1005,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   /// Count-free step counter health entries, oldest first.
+  /// Applies the detail Dart sent with `initialize` ([DiagnosticsMode]);
+  /// clean drops the step counter's diagnostics. Called on the main thread.
+  func applyRecordingDetail(_ detail: Any?) {
+    if DiagnosticsMode.apply(detail) == DiagnosticsMode.clean {
+      stepCounter.clearDiagnostics()
+    }
+  }
+
   func stepCounterDiagnostics() -> [[String: Any]] {
-    stepCounter.diagnostics
+    DiagnosticsMode.isFull ? stepCounter.diagnostics : []
   }
 
   /// The capturing generation's step coverage: `unavailable` while its steps
@@ -2262,7 +2270,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       profile = .paused
       persistState()
     }
-    emitStatus(message: error.localizedDescription)
+    emitStatus(message: DiagnosticsMode.detail("Location updates failed", error))
   }
 
   func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as path_util;
 import 'package:sqflite/sqflite.dart';
@@ -17,6 +18,7 @@ import '../domain/motion_policy.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
 import '../domain/route_geometry.dart';
+import '../domain/route_recording_detail.dart';
 import '../domain/step_coverage.dart';
 import '../domain/stop_site.dart';
 import '../domain/track.dart';
@@ -328,9 +330,37 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
         _exportFileWriter = exportFileWriter,
         _uploader = uploader,
         _uploadOwner = uploadOwner,
-        _clock = clock ?? _utcNow;
+        _clock = clock ?? _utcNow,
+        recordingDetail = resolveRecordingDetail(configuration.recordingDetail);
+
+  /// The mode [requested] records in: [RouteRecordingDetail.automatic] is
+  /// [RouteRecordingDetail.full] in debug builds ([debugBuild]) and
+  /// [RouteRecordingDetail.clean] in profile and release builds.
+  static RouteRecordingDetail resolveRecordingDetail(
+    RouteRecordingDetail requested, {
+    bool debugBuild = kDebugMode,
+  }) =>
+      switch (requested) {
+        RouteRecordingDetail.clean => RouteRecordingDetail.clean,
+        RouteRecordingDetail.full => RouteRecordingDetail.full,
+        _ =>
+          debugBuild ? RouteRecordingDetail.full : RouteRecordingDetail.clean,
+      };
 
   final TrackingConfiguration configuration;
+
+  /// Detail this client records, [configuration]'s
+  /// [TrackingConfiguration.recordingDetail] resolved for this build:
+  /// [RouteRecordingDetail.full] or [RouteRecordingDetail.clean]. Routes it
+  /// starts are stamped with it.
+  final RouteRecordingDetail recordingDetail;
+
+  /// Whether diagnostics are recorded and offered: health events, native
+  /// step-counter diagnostics, raw native error text and diagnostic export
+  /// properties. True only in [RouteRecordingDetail.full]; apps can show
+  /// their debug views on the same switch.
+  bool get recordsDiagnostics => recordingDetail == RouteRecordingDetail.full;
+
   final TrackerAdapter _tracker;
   TrackRepository? _repository;
   ExportFileWriter? _exportFileWriter;
@@ -549,6 +579,12 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
         path: path_util.join(databasesPath, configuration.databaseName),
       );
     }
+    final store = _store;
+    if (store is RecordingDetailRepository) {
+      (store as RecordingDetailRepository)
+        ..newRouteRecordingDetail = recordingDetail
+        ..recordsDiagnosticHealthEvents = recordsDiagnostics;
+    }
     await _store.initialize();
     // The repository emits the current track after every change, so the
     // snapshot can use it instead of querying it again.
@@ -614,6 +650,10 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       },
     );
 
+    final nativeTracker = _tracker as Object;
+    if (nativeTracker is NativeRecordingDetailAdapter) {
+      nativeTracker.applyRecordingDetail(recordingDetail);
+    }
     await _tracker.initialize();
     _capabilityReport = await _tracker.capabilities();
     final tracker = _tracker as Object;
@@ -3197,7 +3237,11 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   ) async {
     final transitions = sample.profileTransitions;
     final store = _store;
-    if (transitions.isEmpty || store is! KeyedHealthEventRepository) return;
+    if (!recordsDiagnostics ||
+        transitions.isEmpty ||
+        store is! KeyedHealthEventRepository) {
+      return;
+    }
     for (final transition in transitions) {
       try {
         await (store as KeyedHealthEventRepository).recordKeyedHealthEvent(
@@ -3573,6 +3617,8 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     required String type,
     Map<String, Object?>? details,
   }) async {
+    // Diagnostics are recorded only in full detail.
+    if (!recordsDiagnostics) return;
     try {
       await _store.recordHealthEvent(
         trackId: trackId,
@@ -3715,7 +3761,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   Future<List<StepCounterDiagnostic>> stepCounterDiagnostics() async {
     await initialize();
     final tracker = _tracker as Object;
-    if (tracker is! StepCounterDiagnosticsAdapter) {
+    if (!recordsDiagnostics || tracker is! StepCounterDiagnosticsAdapter) {
       return const <StepCounterDiagnostic>[];
     }
     try {
@@ -3785,9 +3831,29 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     return _exports.exportTrack(
       trackId: trackId,
       format: format,
-      options: options,
+      options: _exportOptions(options),
       fileName: fileName,
       bundle: bundle,
+    );
+  }
+
+  /// [options] as this client exports them: without rejected points and
+  /// diagnostic properties unless it records diagnostics.
+  TrackExportOptions _exportOptions(TrackExportOptions options) {
+    if (recordsDiagnostics ||
+        (!options.includeRejectedPoints &&
+            !options.includeDiagnosticProperties)) {
+      return options;
+    }
+    return TrackExportOptions(
+      includePointProperties: options.includePointProperties,
+      includeActivityMetadata: options.includeActivityMetadata,
+      useUtcTimestamps: options.useUtcTimestamps,
+      allowIncompleteTrackSnapshot: options.allowIncompleteTrackSnapshot,
+      includeGeoJsonPointFeatures: options.includeGeoJsonPointFeatures,
+      includeStops: options.includeStops,
+      geometry: options.geometry,
+      geometryContinuity: options.geometryContinuity,
     );
   }
 
@@ -4734,7 +4800,7 @@ final class _OwnerBoundTrackingController
       owner: _owner,
       tripId: tripId,
       format: format,
-      options: options,
+      options: _client._exportOptions(options),
       fileName: fileName,
       routePresentationOverride: routePresentationOverride,
     );
@@ -4964,15 +5030,27 @@ final class _OwnerBoundTrackingController
 
   /// Reviews, in the background, this owner's completed routes recorded
   /// under older rules, then derives the stops of routes recorded without
-  /// live stop records. A failed pass is retried on the next open, and reads
-  /// review a route and derive its stops before returning them.
+  /// live stop records, then compacts ended clean routes. A failed pass is
+  /// retried on the next open, and reads review a route and derive its stops
+  /// before returning them.
   void scheduleBackfill() {
     _backfill ??= _details
         .backfillReviews(owner: _owner)
         .catchError((Object _) {})
         .then((_) => _details.backfillStops(owner: _owner))
         .catchError((Object _) {})
+        .then((_) => _compactCleanRoutes())
+        .catchError((Object _) {})
         .whenComplete(() => _backfill = null);
+  }
+
+  /// Compacts this owner's ended clean routes, a batch at a time, once their
+  /// stops are stored.
+  Future<void> _compactCleanRoutes() async {
+    final store = _client._store;
+    if (store is! RecordingDetailRepository) return;
+    final compaction = store as RecordingDetailRepository;
+    while (await compaction.compactCleanRoutes(owner: _owner) > 0) {}
   }
 
   RouteSummaryRepository _summaryStore() {

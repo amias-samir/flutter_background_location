@@ -258,6 +258,48 @@ void main() {
       expect(picked, RouteView.raw);
     });
 
+    testWidgets('a clean build shows only the clean route and its stops', (
+      tester,
+    ) async {
+      final track = _track('track-1', distanceMeters: 1777);
+      final route = RouteGeometry.fromReport(
+        const RouteGeometryAssembler().assemble(
+          sourceParts: _parts(
+            _bundle(track, const <double>[0, 25, 50]),
+            legNumber: 1,
+          ),
+        ),
+        totals: RouteTotals.ofRoute(
+          _summary(distanceMeters: 1777, correctedDistanceMeters: 1490),
+        ),
+      );
+      await tester.pumpWidget(
+        _app(
+          RouteMapHeader(
+            content: RouteMapContent(
+              route: route,
+              view: RouteView.cleaned,
+              views: const <RouteView>[RouteView.cleaned, RouteView.raw],
+            ),
+            continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+            onContinuityChanged: (_) {},
+            onViewChanged: (_) {},
+            showDiagnostics: false,
+          ),
+        ),
+      );
+
+      expect(find.text('2 stop(s)'), findsOneWidget);
+      expect(find.textContaining('quality event'), findsNothing);
+      expect(find.textContaining('visible gap'), findsNothing);
+      expect(find.byType(SegmentedButton<RouteView>), findsNothing);
+      expect(
+        find.byType(PopupMenuButton<RouteGeometryContinuity>),
+        findsNothing,
+      );
+      expect(find.text('Distance 1.49 km'), findsOneWidget);
+    });
+
     test('the recorded distance shows only when it differs as shown', () {
       List<String> lines({double? corrected}) => routeTotalsLines(
         RouteTotals.ofRoute(

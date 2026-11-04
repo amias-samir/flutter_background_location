@@ -6,6 +6,7 @@ import '../domain/capability_report.dart';
 import '../domain/location_sample.dart';
 import '../domain/native_tracking_protocol.dart';
 import '../domain/permission_state.dart';
+import '../domain/route_recording_detail.dart';
 import '../domain/step_coverage.dart';
 import '../domain/tracker_status.dart';
 import '../domain/tracking_config.dart';
@@ -25,6 +26,7 @@ final class NativeTrackerAdapter
         PagedNativeLocationAdapter,
         NativeJournalDiagnosticsAdapter,
         StepCounterDiagnosticsAdapter,
+        NativeRecordingDetailAdapter,
         NativeTrackingHealthAdapter,
         TrackScopedNativeDataAdapter,
         CommandLeaseTrackerAdapter {
@@ -92,9 +94,22 @@ final class NativeTrackerAdapter
   @override
   Stream<TrackerStatus> get statusStream => _statuses;
 
+  RouteRecordingDetail? _recordingDetail;
+
+  @override
+  void applyRecordingDetail(RouteRecordingDetail detail) {
+    _recordingDetail = detail;
+  }
+
   @override
   Future<void> initialize() async {
-    await _methodChannel.invokeMethod<Object?>('initialize');
+    // Native code without the `recording_detail_mode` capability ignores the
+    // argument.
+    final detail = _recordingDetail;
+    await _methodChannel.invokeMethod<Object?>(
+      'initialize',
+      detail == null ? null : <String, Object?>{'recordingDetail': detail.name},
+    );
   }
 
   @override

@@ -96,6 +96,7 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
     do {
       switch call.method {
       case "initialize":
+        service.applyRecordingDetail(arguments["recordingDetail"])
         service.initialize { [weak self] outcome in
           self?.finish(result, outcome)
         }
@@ -447,6 +448,8 @@ public final class FlutterBackgroundLocationPlugin: NSObject, FlutterPlugin {
         "profile_stamp_at_capture",
         "fix_sampling_v2",
         "step_counter_diagnostics",
+        // `recordingDetail` with `initialize`: clean keeps no diagnostics.
+        "recording_detail_mode",
       ] + (StepCounter.isAvailable ? ["step_count", "step_count_coverage"] : []),
     ]
   }

@@ -2,9 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
 class TrackingStatusCard extends StatelessWidget {
-  const TrackingStatusCard({super.key, required this.session});
+  const TrackingStatusCard({
+    super.key,
+    required this.session,
+    this.showDiagnostics = true,
+  });
 
   final TrackingSessionSnapshot? session;
+
+  /// Whether the capture diagnostics show: activity confidence, motion
+  /// evidence, capture profile, fix state, sequence and mock signal.
+  final bool showDiagnostics;
 
   @override
   Widget build(BuildContext context) {
@@ -89,16 +97,17 @@ class TrackingStatusCard extends StatelessWidget {
                   label: 'Activity',
                   value: value?.activity.type.value ?? 'unknown',
                 ),
-                _StatusMetric(
-                  icon: Icons.query_stats,
-                  label: 'Activity confidence',
-                  value: value == null
-                      ? 'unknown'
-                      : value.activity.evidenceState ==
-                            ActivityEvidenceState.fresh
-                      ? '${value.activity.confidence}% • fresh'
-                      : value.activity.evidenceState.name,
-                ),
+                if (showDiagnostics)
+                  _StatusMetric(
+                    icon: Icons.query_stats,
+                    label: 'Activity confidence',
+                    value: value == null
+                        ? 'unknown'
+                        : value.activity.evidenceState ==
+                              ActivityEvidenceState.fresh
+                        ? '${value.activity.confidence}% • fresh'
+                        : value.activity.evidenceState.name,
+                  ),
                 _StatusMetric(
                   icon: Icons.gps_fixed,
                   label: 'Location uncertainty',
@@ -106,31 +115,34 @@ class TrackingStatusCard extends StatelessWidget {
                       ? 'unavailable'
                       : '${value!.lastPoint!.horizontalAccuracy!.toStringAsFixed(1)} m',
                 ),
-                _StatusMetric(
-                  icon: Icons.sensors_rounded,
-                  label: 'Motion evidence',
-                  value: _motionEvidenceLabel(value?.motionEvidence),
-                ),
-                _StatusMetric(
-                  icon: Icons.battery_saver_outlined,
-                  label: 'Capture profile',
-                  value: value?.status.samplingProfile.name ?? 'unknown',
-                ),
-                _StatusMetric(
-                  icon: Icons.health_and_safety_outlined,
-                  label: 'Fix',
-                  value: value?.fixState.name ?? 'idle',
-                ),
-                _StatusMetric(
-                  icon: Icons.pin_outlined,
-                  label: 'Sequence',
-                  value: '${value?.lastPoint?.sequence ?? 'none'}',
-                ),
-                _StatusMetric(
-                  icon: Icons.verified_user_outlined,
-                  label: 'Mock signal',
-                  value: value?.lastPoint?.mockAssessment.name ?? 'unavailable',
-                ),
+                if (showDiagnostics) ...<Widget>[
+                  _StatusMetric(
+                    icon: Icons.sensors_rounded,
+                    label: 'Motion evidence',
+                    value: _motionEvidenceLabel(value?.motionEvidence),
+                  ),
+                  _StatusMetric(
+                    icon: Icons.battery_saver_outlined,
+                    label: 'Capture profile',
+                    value: value?.status.samplingProfile.name ?? 'unknown',
+                  ),
+                  _StatusMetric(
+                    icon: Icons.health_and_safety_outlined,
+                    label: 'Fix',
+                    value: value?.fixState.name ?? 'idle',
+                  ),
+                  _StatusMetric(
+                    icon: Icons.pin_outlined,
+                    label: 'Sequence',
+                    value: '${value?.lastPoint?.sequence ?? 'none'}',
+                  ),
+                  _StatusMetric(
+                    icon: Icons.verified_user_outlined,
+                    label: 'Mock signal',
+                    value:
+                        value?.lastPoint?.mockAssessment.name ?? 'unavailable',
+                  ),
+                ],
               ],
             ),
             if (value?.blockerCode != null)

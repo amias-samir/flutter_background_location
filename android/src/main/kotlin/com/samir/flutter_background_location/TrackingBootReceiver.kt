@@ -14,6 +14,7 @@ class TrackingBootReceiver : BroadcastReceiver() {
             return
         }
 
+        DiagnosticsMode.load(context)
         val store = TrackingStateStore(context)
         if (!store.trackingEnabled || store.isPaused || store.activeTrackId == null) return
 
@@ -23,7 +24,7 @@ class TrackingBootReceiver : BroadcastReceiver() {
         runCatching {
             ContextCompat.startForegroundService(context, serviceIntent)
         }.onFailure { error ->
-            store.fail("Android could not restore tracking: ${error.message.orEmpty()}")
+            store.fail(DiagnosticsMode.detail("Android could not restore tracking.", error))
             store.emitCurrentStatus()
         }
     }

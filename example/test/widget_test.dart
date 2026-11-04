@@ -6,6 +6,7 @@ import 'package:flutter_background_location_tracker_example/recorded_tracks_sect
 import 'package:flutter_background_location_tracker_example/recorded_trips_section.dart';
 import 'package:flutter_background_location_tracker_example/route_map_page.dart';
 import 'package:flutter_background_location_tracker_example/route_totals.dart';
+import 'package:flutter_background_location_tracker_example/tracking_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
@@ -587,6 +588,91 @@ void main() {
     expect(find.text('4321 steps'), findsOneWidget);
     expect(find.text('3 quality event(s)'), findsOneWidget);
     expect(find.text('1 visible gap(s)'), findsOneWidget);
+  });
+
+  testWidgets('a clean build leaves quality events and gaps off Trip cards', (
+    tester,
+  ) async {
+    final trip = Trip(
+      id: 'clean',
+      organizationId: 'example-organization',
+      userId: 'example-user',
+      routeId: 'clean',
+      status: TripStatus.completed,
+      startedAt: DateTime.utc(2026),
+      endedAt: DateTime.utc(2026, 1, 1, 2),
+      legCount: 1,
+      acceptedPointCount: 20,
+      rejectedPointCount: 40,
+      measuredDistanceMeters: 1234,
+      lifecycleRevision: 2,
+      createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026, 1, 1, 2),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTripsSection(
+            trips: <RecordedTripSummary>[
+              RecordedTripSummary(
+                trip: trip,
+                totals: const RouteTotals(
+                  distanceMeters: 1234,
+                  displayDistanceMeters: 1234,
+                  segmentCount: 1,
+                  moving: Duration(minutes: 95),
+                  stopped: Duration(minutes: 17),
+                  stopCount: 2,
+                  qualityEventCount: 0,
+                  visibleGapCount: 0,
+                ),
+              ),
+            ],
+            hasMore: false,
+            onRefresh: null,
+            onLoadMore: null,
+            onViewMap: null,
+            onContinue: null,
+            onExport: null,
+            onDelete: null,
+            onExportDiagnostics: (_) async {},
+            showDiagnostics: false,
+          ),
+        ),
+      ),
+    );
+    expect(find.text('2 stop(s) • 17 min'), findsOneWidget);
+    expect(find.textContaining('quality event'), findsNothing);
+    expect(find.textContaining('visible gap'), findsNothing);
+
+    await tester.tap(find.byTooltip('Trip actions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Export GPX'), findsOneWidget);
+    expect(find.text('Export diagnostic GeoJSON'), findsNothing);
+  });
+
+  testWidgets('a clean build keeps capture diagnostics off the status card', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: TrackingStatusCard(session: null, showDiagnostics: false),
+        ),
+      ),
+    );
+    expect(find.text('Activity: '), findsOneWidget);
+    expect(find.text('Location uncertainty: '), findsOneWidget);
+    for (final label in <String>[
+      'Activity confidence',
+      'Motion evidence',
+      'Capture profile',
+      'Fix',
+      'Sequence',
+      'Mock signal',
+    ]) {
+      expect(find.text('$label: '), findsNothing, reason: label);
+    }
   });
 
   testWidgets('a route card shows its stored details', (tester) async {

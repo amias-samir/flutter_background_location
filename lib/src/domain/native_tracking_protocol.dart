@@ -124,4 +124,10 @@ abstract final class NativeTrackingCapabilities {
   /// Native code applies `samplingPolicyVersion` 2: one fix per moving
   /// interval or a turn from an unfiltered 1 Hz stream.
   static const fixSamplingV2 = 'fix_sampling_v2';
+
+  /// Native code honours `recordingDetail` (`full` or `clean`) sent with
+  /// `initialize` and keeps it for starts before Dart runs: in `clean` it
+  /// keeps no step-counter diagnostics and replaces raw platform error text
+  /// with fixed messages.
+  static const recordingDetailMode = 'recording_detail_mode';
 }

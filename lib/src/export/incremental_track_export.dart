@@ -618,7 +618,7 @@ final class _PagedTrackEncoder {
       '</value></Data><Data name="geometryContinuity"><value>'
       '${options.geometryContinuity.name}'
       '</value></Data>'
-      '${routeSummaryFields(summary).entries.map((entry) => '<Data name="${entry.key}"><value>${_xmlText('${entry.value}')}</value></Data>').join()}'
+      '${routeSummaryFields(summary, evidence: exportsEvidence(track)).entries.map((entry) => '<Data name="${entry.key}"><value>${_xmlText('${entry.value}')}</value></Data>').join()}'
       '</ExtendedData>',
     );
     for (final part in plan.parts) {
@@ -706,7 +706,7 @@ final class _PagedTrackEncoder {
       'http://www.topografix.com/GPX/1/1/gpx.xsd">'
       '<metadata><name>$name</name><time>${_formatTime(track.startedAt, options)}</time>'
       '<desc>${options.geometryContinuity.name}</desc>'
-      '${_gpxSummaryExtensions(summary)}'
+      '${_gpxSummaryExtensions(summary, evidence: exportsEvidence(track))}'
       '</metadata>',
     );
     // GPX 1.1 orders waypoints before tracks.
@@ -735,7 +735,9 @@ final class _PagedTrackEncoder {
         '${options.geometryContinuity.name}'
         '</fbl:geometryContinuity>',
       );
-      for (final connector in plan.connectors) {
+      for (final connector in exportsEvidence(track)
+          ? plan.connectors
+          : const <InferredRouteConnector>[]) {
         await operation.addChunk(
           sink,
           '<fbl:gap cause="${connector.cause.name}" '
@@ -1143,7 +1145,8 @@ Map<String, Object?> _trackProperties(
       'status': track.status.name,
       'segmentCount': track.segmentCount,
       'acceptedPointCount': track.acceptedPointCount,
-      'rejectedPointCount': track.rejectedPointCount,
+      if (exportsEvidence(track))
+        'rejectedPointCount': track.rejectedPointCount,
       // A derived export reports the derived geometry's own length.
       'distanceMeters': options.geometry is DerivedTrackGeometry
           ? plan.pathMeters
@@ -1152,15 +1155,15 @@ Map<String, Object?> _trackProperties(
       'geometryContinuity': options.geometryContinuity.name,
       'sourceSegmentCount': plan.sourceSegmentCount,
       'geometryPartCount': plan.parts.length,
-      'gapCount': plan.gapCount,
+      if (exportsEvidence(track)) 'gapCount': plan.gapCount,
       'inferredConnectorCount': plan.connectors.length,
       'hasInferredConnectors': plan.connectors.isNotEmpty,
-      ...routeSummaryFields(summary),
+      ...routeSummaryFields(summary, evidence: exportsEvidence(track)),
     };
 
 /// The route summary as GPX `fbl:` metadata extensions, or nothing.
-String _gpxSummaryExtensions(RouteSummary? summary) {
-  final fields = routeSummaryFields(summary);
+String _gpxSummaryExtensions(RouteSummary? summary, {bool evidence = true}) {
+  final fields = routeSummaryFields(summary, evidence: evidence);
   if (fields.isEmpty) return '';
   final buffer = StringBuffer('<extensions>');
   for (final MapEntry(:key, :value) in fields.entries) {

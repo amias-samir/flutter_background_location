@@ -1,4 +1,6 @@
+import '../domain/route_recording_detail.dart';
 import '../domain/route_summary.dart';
+import '../domain/track.dart';
 import '../domain/track_geodesy.dart';
 import '../domain/track_point.dart';
 import '../storage/track_repository.dart';
@@ -6,8 +8,12 @@ import '../storage/track_repository.dart';
 /// Export fields of a route's stored summary, shared by every export writer
 /// so the materialized, streamed and Trip exports stay identical. Keys are
 /// stable: GeoJSON route properties, GPX `fbl:` metadata extensions and KML
-/// `ExtendedData`.
-Map<String, Object?> routeSummaryFields(RouteSummary? summary) {
+/// `ExtendedData`. Without [evidence] the quality and gap counts are left
+/// out ([exportsEvidence]).
+Map<String, Object?> routeSummaryFields(
+  RouteSummary? summary, {
+  bool evidence = true,
+}) {
   if (summary == null) return const <String, Object?>{};
   return <String, Object?>{
     'recordingSeconds': summary.recording.inSeconds,
@@ -20,12 +26,21 @@ Map<String, Object?> routeSummaryFields(RouteSummary? summary) {
     if (summary.averageMovingSpeedMetersPerSecond case final speed?)
       'averageMovingSpeedMetersPerSecond': speed,
     if (summary.stepCount case final steps?) 'stepCount': steps,
-    'qualityEventCount': summary.qualityEventCount,
-    'visibleGapCount': summary.visibleGapCount,
+    if (evidence) ...<String, Object?>{
+      'qualityEventCount': summary.qualityEventCount,
+      'visibleGapCount': summary.visibleGapCount,
+    },
     if (summary.cleanedDistanceMeters case final cleaned?)
       'cleanedDistanceMeters': cleaned,
   };
 }
+
+/// Whether [track]'s export reports its quality and gap evidence: the
+/// rejected point, quality event and gap counts and GPX `fbl:gap` elements.
+/// A clean route ([RouteRecordingDetail.clean]) exports only the clean route
+/// and its stops.
+bool exportsEvidence(Track track) =>
+    track.recordingDetail != RouteRecordingDetail.clean;
 
 /// Length of [bundle]'s accepted points, segment by segment: the distance of
 /// a derived-geometry export, whose coordinates are the derived ones.

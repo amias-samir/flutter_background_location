@@ -288,6 +288,9 @@ final class StepCounter {
   private let source: StepCountSource
   private let permitted: () -> Bool
   private let clock: () -> Date
+  /// Whether diagnostics are kept ([DiagnosticsMode]); the stall watch never
+  /// reads them.
+  private let keepsDiagnostics: () -> Bool
   private var session: StepCountSession?
   private var watch: StepStallWatch?
   /// Rotates with every session so a late reading of an earlier one is
@@ -308,11 +311,18 @@ final class StepCounter {
   init(
     source: StepCountSource = PedometerStepCountSource(),
     permitted: @escaping () -> Bool = { StepCounter.isAvailable && StepCounter.isAuthorized },
-    clock: @escaping () -> Date = Date.init
+    clock: @escaping () -> Date = Date.init,
+    keepsDiagnostics: @escaping () -> Bool = { DiagnosticsMode.isFull }
   ) {
     self.source = source
     self.permitted = permitted
     self.clock = clock
+    self.keepsDiagnostics = keepsDiagnostics
+  }
+
+  /// Drops every kept diagnostic.
+  func clearDiagnostics() {
+    diagnostics.removeAll()
   }
 
   /// Whether [generationId]'s steps are being counted.
@@ -501,6 +511,7 @@ final class StepCounter {
     replayOutcome: String? = nil,
     evidenceSource: String? = nil
   ) {
+    guard keepsDiagnostics() else { return }
     let now = Self.epochMilliseconds(clock())
     let state: String
     if session == nil {

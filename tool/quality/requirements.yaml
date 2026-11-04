@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 18
+  route_database_schema: 19
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
@@ -1266,6 +1266,38 @@ work_packages:
       - example/lib/route_map_page.dart
       - example/lib/route_totals.dart
       - example/test/route_review_test.dart
+  - id: LBO-37
+    phase: LBO
+    title: Release builds record a clean, lightweight route (schema 19 recording detail)
+    release_gate: with the default configuration a release or profile build stamps new routes clean and a debug build full; a clean route collects and decides the same fixes as a full one (accepted and held points, distance, stops, steps and uploads identical) while storing only boundary gaps (none visible), no quality runs, motion evidence or diagnostic health events, and its journaled readings are cleared once it ends, owner-scoped and idempotently; exports of a clean route omit quality, gap and rejected-point counts and fbl:gap; native code in clean detail keeps no step-counter diagnostics and no raw platform error text on both platforms; a route keeps its stamp across builds; fresh databases equal upgraded ones
+    required_before: release builds that rely on lightweight route storage
+    evidence:
+      - lib/src/domain/route_recording_detail.dart
+      - lib/src/domain/tracking_config.dart
+      - lib/src/domain/track.dart
+      - lib/src/storage/route_compaction_store.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/storage/track_repository.dart
+      - lib/src/application/tracking_client.dart
+      - lib/src/platform/native_tracker_adapter.dart
+      - lib/src/export/export_summary.dart
+      - android/src/main/kotlin/com/samir/flutter_background_location/DiagnosticsMode.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/DiagnosticsModeTest.kt
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/DiagnosticsMode.swift
+      - example/ios/RunnerTests/StepCounterTests.swift
+      - test/recording_detail_test.dart
+      - test/public_api_compatibility_test.dart
+      - example/lib/route_map_page.dart
+      - example/test/widget_test.dart
+  - id: LBO-37P
+    phase: LBO
+    title: Physical release-build check of clean recording
+    release_gate: a flutter run --release route with a stop on an Android phone and an iPhone stores recording_detail clean, no quality runs, motion evidence or diagnostic health events, boundary gaps only and cleared readings after completion, with a point count comparable to a debug run of the same walk, and the example shows only the clean route and its stops
+    required_before: release of clean recording
+    evidence_mode: physical_manual
+    evidence:
+      - test/recording_detail_test.dart
+      - tool/quality/validate_physical_qualification.dart
   - id: LBO-36
     phase: LBO
     title: Two-phone physical qualification of the consistency rules

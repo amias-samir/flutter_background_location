@@ -66,6 +66,15 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     organizationId: 'example-organization',
   );
 
+  /// Whether this build records and shows diagnostics: debug builds do,
+  /// profile and release builds record a clean route and show only it and
+  /// its stops ([TrackingConfiguration.recordingDetail]).
+  static final _recordsDiagnostics =
+      TrackingClient.resolveRecordingDetail(
+        const TrackingConfiguration().recordingDetail,
+      ) ==
+      RouteRecordingDetail.full;
+
   final List<StreamSubscription<Object?>> _subscriptions =
       <StreamSubscription<Object?>>[];
   TrackingController? _tracking;
@@ -801,7 +810,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: <Widget>[
-                TrackingStatusCard(session: _session),
+                TrackingStatusCard(
+                  session: _session,
+                  showDiagnostics: _recordsDiagnostics,
+                ),
                 if (_message != null) ...<Widget>[
                   const SizedBox(height: 12),
                   _MessageCard(message: _message!),
@@ -868,13 +880,17 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                                 builder: (_) => TripMapPage(
                                   tracking: tracking as MultiDayTripController,
                                   trip: trip,
+                                  showDiagnostics: _recordsDiagnostics,
                                 ),
                               ),
                             );
                           },
                     onContinue: _busy ? null : _continueTrip,
                     onExport: _busy ? null : _exportTrip,
-                    onExportDiagnostics: _busy ? null : _exportTripDiagnostics,
+                    onExportDiagnostics: _busy || !_recordsDiagnostics
+                        ? null
+                        : _exportTripDiagnostics,
+                    showDiagnostics: _recordsDiagnostics,
                     onExportCleaned:
                         _busy || tracking is! TrackingSummaryController
                         ? null
@@ -899,6 +915,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                                 builder: (_) => TrackMapPage(
                                   tracking: tracking,
                                   track: track,
+                                  showDiagnostics: _recordsDiagnostics,
                                 ),
                               ),
                             );

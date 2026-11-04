@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'route_recording_detail.dart';
 import 'tracking_configuration_epoch.dart';
 import 'tracking_continuity.dart';
 import 'tracking_error.dart';
@@ -1051,6 +1052,7 @@ final class TrackingConfiguration {
     this.uploadInitialBackoff = const Duration(seconds: 5),
     this.uploadMaximumBackoff = const Duration(minutes: 15),
     this.uploadRecoveryInterval = const Duration(seconds: 30),
+    this.recordingDetail = RouteRecordingDetail.automatic,
   })  : assert(maximumUploadBatchPointCount > 0),
         assert(maximumUploadBatchBytes > 0);
 
@@ -1069,6 +1071,18 @@ final class TrackingConfiguration {
   /// until an upload fails again.
   final Duration uploadRecoveryInterval;
 
+  /// Detail recorded beside the clean route; see [RouteRecordingDetail].
+  ///
+  /// The default, [RouteRecordingDetail.automatic], records everything in
+  /// debug builds and only the clean route, its stops and its segment
+  /// boundaries in profile and release builds. Diagnostics (health events,
+  /// native step-counter diagnostics, raw native error text, diagnostic
+  /// export properties) follow the same mode. Set
+  /// [RouteRecordingDetail.full] or [RouteRecordingDetail.clean] only to
+  /// force one, such as for a release field test; capture, accepted points,
+  /// distance, stops, steps and uploads are the same in every mode.
+  final RouteRecordingDetail recordingDetail;
+
   TrackingConfiguration copyWith({
     String? databaseName,
     String? exportDirectoryName,
@@ -1080,6 +1094,7 @@ final class TrackingConfiguration {
     Duration? uploadInitialBackoff,
     Duration? uploadMaximumBackoff,
     Duration? uploadRecoveryInterval,
+    RouteRecordingDetail? recordingDetail,
   }) =>
       TrackingConfiguration(
         databaseName: databaseName ?? this.databaseName,
@@ -1097,6 +1112,7 @@ final class TrackingConfiguration {
         uploadMaximumBackoff: uploadMaximumBackoff ?? this.uploadMaximumBackoff,
         uploadRecoveryInterval:
             uploadRecoveryInterval ?? this.uploadRecoveryInterval,
+        recordingDetail: recordingDetail ?? this.recordingDetail,
       );
 
   void validate({String context = 'TrackingConfiguration'}) {

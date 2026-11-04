@@ -598,6 +598,7 @@ internal object PendingLocationCoordinator {
         "opened" to false,
         "databaseName" to PendingLocationStore.databaseNameForDiagnostics,
         "errorType" to error.javaClass.simpleName,
-        "errorMessage" to (error.message ?: "Native journal initialization failed."),
+        "errorMessage" to
+            (error.message?.takeIf { DiagnosticsMode.full } ?: "Native journal initialization failed."),
     )
 }

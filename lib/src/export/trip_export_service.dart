@@ -4,6 +4,7 @@ import '../application/route_geometry_assembler.dart';
 import '../domain/derived_geometry.dart';
 import '../domain/export_models.dart';
 import '../domain/route_geometry.dart';
+import '../domain/route_recording_detail.dart';
 import '../domain/route_summary.dart';
 import '../domain/track.dart';
 import '../domain/track_point.dart';
@@ -73,6 +74,7 @@ final class TripExportService {
     final combinedStops = <TrackStop>[];
     final allGaps = <TrackingContinuityGap>[];
     Track? firstTrack;
+    var allLegsClean = true;
     var materializedPoints = 0;
 
     for (final leg in tripBundle.legs) {
@@ -84,6 +86,7 @@ final class TripExportService {
         );
       }
       firstTrack ??= track;
+      allLegsClean &= track.recordingDetail == RouteRecordingDetail.clean;
       final trackBundle = await repository.loadTrackBundle(track.id);
       combinedStops.addAll(trackBundle.stops);
       final legacyIds = repository is LegacyGapEvidenceRepository
@@ -155,6 +158,9 @@ final class TripExportService {
       nextSequence: trip.acceptedPointCount + trip.rejectedPointCount + 1,
       currentSegmentId: null,
       config: firstTrack.config,
+      // A Trip exports as clean only when every leg was recorded clean.
+      recordingDetail:
+          allLegsClean ? RouteRecordingDetail.clean : RouteRecordingDetail.full,
     );
     final totals = tripBundle.summary;
     final bundle = TrackBundle(

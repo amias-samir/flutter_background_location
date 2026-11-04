@@ -1572,6 +1572,64 @@ const TrackingConfiguration(
 Retention is selected when the client is created. Do not dispose and recreate
 the client while native tracking is active.
 
+### Release builds record a clean route
+
+Release and profile builds keep only the clean route: the accepted path, its
+stops, distance, duration and steps. Debug builds keep everything recorded
+for investigating a field test. You don't need to set anything:
+
+```dart
+const TrackingConfiguration(); // recordingDetail: RouteRecordingDetail.automatic
+```
+
+Every mode collects and decides the same fixes, so these are identical in
+every mode:
+
+- capture and sampling;
+- the accepted points and the held or rejected fixes kept as hidden evidence
+  on the device;
+- measured and corrected distance, stops and steps;
+- uploads.
+
+In clean detail (`RouteRecordingDetail.clean`) a route stores:
+
+- **Gaps:** only the gap rows that mark a segment boundary, none of them
+  visible. `RouteSummary.visibleGapCount` is 0 and the map draws no gap
+  markers.
+- **Quality runs:** none. `RouteSummary.qualityEventCount` and
+  `stopEvidenceRunCount` are 0.
+- **Motion evidence and diagnostic health events:** none. Events that prove a
+  lifecycle boundary, such as an interruption, are kept.
+- **Journaled activity readings:** cleared once the route is completed or
+  failed. Only a restart of a live route decides from them.
+
+Clean detail also changes what the package reports:
+
+- **Exports** of a clean route leave out `qualityEventCount`,
+  `visibleGapCount`, `gapCount`, `rejectedPointCount` and GPX `fbl:gap`
+  elements. Stops are still exported.
+- **Ignored export options:** a clean client ignores `includeRejectedPoints`
+  and `includeDiagnosticProperties`.
+- **Native diagnostics:** native code keeps no step-counter diagnostics, so
+  `stepCounterDiagnostics()` returns an empty list. Raw platform error text is
+  replaced by a fixed message.
+
+The setup doctor, health snapshots, battery checks and the native journal
+integrity check work in every mode.
+
+Each route keeps the detail it started with (`Track.recordingDetail`). A route
+recorded by a debug build stays full after you install a release build, and
+the reverse holds too. Routes recorded before this setting existed are full.
+To force a mode, for example to collect full diagnostics in a release field
+test, set it explicitly. Read the resolved mode with
+`TrackingClient.recordsDiagnostics`, or with
+`TrackingClient.resolveRecordingDetail(configuration.recordingDetail)`, to
+show debug views on the same switch.
+
+```dart
+const TrackingConfiguration(recordingDetail: RouteRecordingDetail.full);
+```
+
 ### Deleting a selected recorded route
 
 Delete an individual completed or failed route with:

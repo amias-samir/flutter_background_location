@@ -181,6 +181,7 @@ class LocationTrackingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticsMode.load(this)
         workerThread = HandlerThread("fbl-location-service").apply { start() }
         workerHandler = Handler(workerThread.looper)
         motionSensorFusion = MotionSensorFusion(this, workerHandler) { evidence ->
@@ -233,11 +234,11 @@ class LocationTrackingService : Service() {
             }
         } catch (error: SecurityException) {
             handleStartCommandFailure(
-                "Tracking permission is unavailable: ${error.message.orEmpty()}",
+                DiagnosticsMode.detail("Tracking permission is unavailable.", error),
             )
         } catch (error: IllegalStateException) {
             handleStartCommandFailure(
-                "Unable to start background tracking: ${error.message.orEmpty()}",
+                DiagnosticsMode.detail("Unable to start background tracking.", error),
             )
         }
 
@@ -755,11 +756,11 @@ class LocationTrackingService : Service() {
                 workerThread.looper,
             ).addOnFailureListener { error ->
                 if (captureStarted && generation == requestGeneration) {
-                    failCapture("Location updates failed: ${error.message.orEmpty()}")
+                    failCapture(DiagnosticsMode.detail("Location updates failed.", error))
                 }
             }
         } catch (error: SecurityException) {
-            failCapture("Location permission was revoked: ${error.message.orEmpty()}")
+            failCapture(DiagnosticsMode.detail("Location permission was revoked.", error))
         }
     }
 
@@ -1021,7 +1022,7 @@ class LocationTrackingService : Service() {
                 mainHandler.post {
                     if (captureStarted && stateStore.activeTrackId == trackId) {
                         failCapture(
-                            "A location fix could not be journaled safely: ${error.message.orEmpty()}",
+                            DiagnosticsMode.detail("A location fix could not be journaled safely.", error),
                         )
                     }
                 }
@@ -1412,7 +1413,7 @@ class LocationTrackingService : Service() {
                 if (captureStarted) {
                     stateStore.markStationaryExitFlushOutcome("failed")
                     stateStore.markLocationRequestFailure(
-                        "Stationary-exit flush failed: ${error.message.orEmpty()}",
+                        DiagnosticsMode.detail("Stationary-exit flush failed.", error),
                     )
                 }
             }
@@ -1564,13 +1565,13 @@ class LocationTrackingService : Service() {
                 }
             }.addOnFailureListener { error ->
                 stateStore.markLocationRequestFailure(
-                    "Stationary-exit probe failed: ${error.message.orEmpty()}",
+                    DiagnosticsMode.detail("Stationary-exit probe failed.", error),
                 )
                 completeStationaryExitProbe(token, "failed")
             }
         } catch (error: SecurityException) {
             stateStore.markLocationRequestFailure(
-                "Stationary-exit probe permission failure: ${error.message.orEmpty()}",
+                DiagnosticsMode.detail("Stationary-exit probe permission failure.", error),
             )
             completeStationaryExitProbe(token, "permission_unavailable")
         }

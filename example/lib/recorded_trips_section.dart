@@ -38,7 +38,13 @@ class RecordedTripsSection extends StatelessWidget {
     required this.onDelete,
     this.onExportDiagnostics,
     this.onExportCleaned,
+    this.showDiagnostics = true,
   });
+
+  /// Whether the cards show quality events and visible gaps and offer the
+  /// diagnostic export. Off in a clean build ([RouteRecordingDetail.clean]),
+  /// which records neither.
+  final bool showDiagnostics;
 
   final List<RecordedTripSummary> trips;
   final bool hasMore;
@@ -205,14 +211,16 @@ class RecordedTripsSection extends StatelessWidget {
                     icon: Icons.directions_walk_rounded,
                     label: steps,
                   ),
-                _TripDetail(
-                  icon: Icons.warning_amber_rounded,
-                  label: '${totals.qualityEventCount} quality event(s)',
-                ),
-                _TripDetail(
-                  icon: Icons.broken_image_outlined,
-                  label: '${totals.visibleGapCount} visible gap(s)',
-                ),
+                if (showDiagnostics) ...<Widget>[
+                  _TripDetail(
+                    icon: Icons.warning_amber_rounded,
+                    label: '${totals.qualityEventCount} quality event(s)',
+                  ),
+                  _TripDetail(
+                    icon: Icons.broken_image_outlined,
+                    label: '${totals.visibleGapCount} visible gap(s)',
+                  ),
+                ],
               ],
             ],
           ),
@@ -245,12 +253,13 @@ class RecordedTripsSection extends StatelessWidget {
               'Export cleaned GPX',
               canExport && onExportCleaned != null,
             ),
-            _item(
-              RecordedTripAction.exportDiagnostics,
-              Icons.troubleshoot_outlined,
-              'Export diagnostic GeoJSON',
-              canExport && onExportDiagnostics != null,
-            ),
+            if (showDiagnostics)
+              _item(
+                RecordedTripAction.exportDiagnostics,
+                Icons.troubleshoot_outlined,
+                'Export diagnostic GeoJSON',
+                canExport && onExportDiagnostics != null,
+              ),
             _item(
               RecordedTripAction.viewMap,
               Icons.map_outlined,

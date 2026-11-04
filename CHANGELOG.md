@@ -1,5 +1,29 @@
 ## Unreleased
 
+- Release and profile builds now record a clean, lightweight route; debug
+  builds keep everything (route database schema 19).
+  - New `TrackingConfiguration.recordingDetail`. The default,
+    `RouteRecordingDetail.automatic`, is `full` in debug builds and `clean`
+    otherwise; set `full` or `clean` to force one.
+  - Unchanged in every mode: capture, accepted points, the held and rejected
+    fixes kept as hidden evidence, distance, stops, steps and uploads.
+  - **What a clean route stores.** Only segment-boundary gap rows, none
+    visible. No quality runs, motion evidence or diagnostic health events.
+    Its journaled activity readings are cleared once it ends, in a
+    background pass after open and completion.
+  - **What a clean route reports.** Summaries have 0 quality events and 0
+    visible gaps. Exports leave out the quality, gap and rejected-point
+    counts and GPX `fbl:gap` elements.
+  - **What native code does in clean mode.** It keeps no step-counter
+    diagnostics and replaces raw platform error text with fixed messages.
+    The new `recording_detail_mode` capability is sent with `initialize`
+    and kept for starts before Dart runs.
+  - A route keeps the detail it started with (`Track.recordingDetail`).
+    Older routes are full.
+  - The example shows debug views (route views, continuity, gaps, uncertain
+    stretches, quality counts, capture diagnostics, diagnostic export) only
+    in debug builds.
+
 - Make the minimum recorded-stop duration configurable through
   `TrackingConfig.minimumStopDuration` (default: five minutes).
 - Default route and trip export filenames to the route identifier; callers can

@@ -433,8 +433,10 @@ final class TrackExportService {
                 nest: report.continuity.name,
               ),
             );
-            for (final MapEntry(:key, :value)
-                in routeSummaryFields(bundle.summary).entries) {
+            for (final MapEntry(:key, :value) in routeSummaryFields(
+              bundle.summary,
+              evidence: exportsEvidence(bundle.track),
+            ).entries) {
               builder.element(
                 'Data',
                 attributes: <String, String>{'name': key},
@@ -568,7 +570,10 @@ final class TrackExportService {
             nest: _formatTime(bundle.track.startedAt, options),
           );
           builder.element('desc', nest: report.continuity.name);
-          final summary = routeSummaryFields(bundle.summary);
+          final summary = routeSummaryFields(
+            bundle.summary,
+            evidence: exportsEvidence(bundle.track),
+          );
           if (summary.isNotEmpty) {
             builder.element('extensions', nest: () {
               for (final MapEntry(:key, :value) in summary.entries) {
@@ -611,7 +616,9 @@ final class TrackExportService {
                 'fbl:geometryContinuity',
                 nest: report.continuity.name,
               );
-              for (final connector in report.inferredConnectors) {
+              for (final connector in exportsEvidence(bundle.track)
+                  ? report.inferredConnectors
+                  : const <InferredRouteConnector>[]) {
                 builder.element('fbl:gap', attributes: <String, String>{
                   'cause': connector.cause.name,
                   'beforePointId': connector.beforePointId,
@@ -717,6 +724,7 @@ final class TrackExportService {
     RouteGeometryReport report,
   ) {
     final track = bundle.track;
+    final evidence = exportsEvidence(track);
     return <String, Object?>{
       'trackId': track.id,
       'routeId': track.routeId,
@@ -725,16 +733,16 @@ final class TrackExportService {
       'status': track.status.name,
       'segmentCount': track.segmentCount,
       'acceptedPointCount': track.acceptedPointCount,
-      'rejectedPointCount': track.rejectedPointCount,
+      if (evidence) 'rejectedPointCount': track.rejectedPointCount,
       'distanceMeters': _distanceMeters(bundle, options),
       'geometrySource': _geometrySource(options),
       'geometryContinuity': report.continuity.name,
       'sourceSegmentCount': report.sourceSegmentCount,
       'geometryPartCount': report.geometryPartCount,
-      'gapCount': report.gapCount,
+      if (evidence) 'gapCount': report.gapCount,
       'inferredConnectorCount': report.inferredConnectorCount,
       'hasInferredConnectors': report.hasInferredConnectors,
-      ...routeSummaryFields(bundle.summary),
+      ...routeSummaryFields(bundle.summary, evidence: evidence),
     };
   }
 

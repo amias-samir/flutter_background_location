@@ -47,6 +47,7 @@ export 'src/domain/native_tracking_protocol.dart';
 export 'src/domain/permission_state.dart';
 export 'src/domain/route_geometry.dart';
 export 'src/domain/route_geometry_processor.dart';
+export 'src/domain/route_recording_detail.dart';
 export 'src/domain/route_review.dart';
 export 'src/domain/route_summary.dart';
 export 'src/domain/step_coverage.dart';
