@@ -44,16 +44,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await _scrollHome(tester, 500);
-
-    final accuracySelector = find.byType(
-      DropdownButtonFormField<TrackingAccuracy>,
-    );
-    await tester.ensureVisible(accuracySelector);
+    await tester.tap(find.text('Accuracy'));
     await tester.pumpAndSettle();
-    await tester.tap(accuracySelector);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('precised').last);
+    expect(find.text('Accuracy profile'), findsOneWidget);
+    await tester.tap(find.text('Precised'));
     await tester.pumpAndSettle();
 
     expect(find.text('Precised tracking uses more battery'), findsOneWidget);
@@ -69,25 +63,55 @@ void main() {
       ),
       isTrue,
     );
-    await _scrollHome(tester, 700);
-    final batterySettings = find.widgetWithText(
-      OutlinedButton,
-      'Battery settings',
-    );
-    await tester.ensureVisible(batterySettings);
+    expect(find.text('Precised'), findsOneWidget, reason: 'the tile');
+    await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
-    expect(batterySettings, findsOne);
+    expect(find.text('Battery settings'), findsOne);
+  });
+
+  test('each capture intent describes how it really captures', () {
+    String detail(RouteCaptureIntent intent, TrackingAccuracy accuracy) =>
+        PreferenceLabels.intentDetail(intent, accuracy);
+
+    expect(
+      detail(RouteCaptureIntent.adaptive, TrackingAccuracy.high),
+      'Moving: a fix every 5 s or 5 m and at each turn. Still: slows to '
+      'every 20 s or 20 m. Records stops; keeps fixes within 20 m (35 m '
+      'while riding).',
+    );
+    expect(
+      detail(RouteCaptureIntent.walking, TrackingAccuracy.high),
+      'Always a fix every 3 s or 3 m and at each turn, never slowing when '
+      'still. Keeps fixes within 20 m; no stop records. Walking and cycling '
+      'capture alike.',
+    );
+    expect(
+      detail(RouteCaptureIntent.cycling, TrackingAccuracy.high),
+      detail(RouteCaptureIntent.walking, TrackingAccuracy.high),
+      reason: 'the package captures walking and cycling alike',
+    );
+    expect(
+      detail(RouteCaptureIntent.vehicle, TrackingAccuracy.high),
+      'Always a fix every 3 s or 3 m and at each turn, never slowing when '
+      'still. Keeps fixes within 35 m, wider for urban streets; no stop '
+      'records.',
+    );
+    expect(
+      detail(RouteCaptureIntent.vehicle, TrackingAccuracy.low),
+      isNot(contains('wider')),
+      reason: 'low keeps 100 m for every intent',
+    );
+    expect(
+      detail(RouteCaptureIntent.adaptive, TrackingAccuracy.low),
+      isNot(contains('while riding')),
+    );
   });
 
   testWidgets('start asks for a non-empty route identifier', (tester) async {
     await tester.pumpWidget(testApp());
     await tester.pumpAndSettle();
 
-    await _scrollHome(tester, 1000);
-
     final start = find.widgetWithText(FilledButton, 'Start').first;
-    await tester.ensureVisible(start);
-    await tester.pumpAndSettle();
     await tester.tap(start);
     await tester.pump(const Duration(milliseconds: 400));
 
@@ -117,8 +141,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await _scrollHome(tester, 1000);
-
+    expect(find.widgetWithText(FilledButton, 'Start'), findsNothing);
     expect(
       tester
           .widget<FilledButton>(find.widgetWithText(FilledButton, 'Resume'))
@@ -146,7 +169,6 @@ void main() {
           body: RecordedTracksSection(
             tracks: <Track>[track],
             hasMore: false,
-            onRefresh: () async {},
             onLoadMore: () async {},
             onViewMap: (_) async => calls.add('map'),
             onExport: (_, format) async => calls.add(format.name),
@@ -170,6 +192,159 @@ void main() {
       await tester.pumpAndSettle();
       expect(calls.last, entry.value, reason: entry.key);
     }
+  });
+
+  testWidgets('a tap on a route card opens its map', (tester) async {
+    final opened = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecordedTracksSection(
+            tracks: <Track>[_completedTrack()],
+            hasMore: false,
+            onLoadMore: null,
+            onViewMap: (track) async => opened.add(track.id),
+            onExport: null,
+            onDelete: null,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('route_1'));
+    await tester.pump();
+    expect(opened, <String>['track-1']);
+  });
+
+  testWidgets('the map sheet lists the stops and shows a tapped one', (
+    tester,
+  ) async {
+    final track = _completedTrack();
+    final source = _segment(track, 1, const <(double, double)>[
+      (0.5, 0.5),
+      (0.5, 0.501),
+    ]);
+    final stop = TrackStop(
+      id: 'stop-1',
+      trackId: track.id,
+      segmentId: source.segment.id,
+      kind: TrackStopKind.dwell,
+      latitude: 0.5,
+      longitude: 0.5005,
+      centreSigmaMeters: 2,
+      radiusMeters: 25,
+      startedAt: DateTime(2026, 10, 19, 10, 5),
+      lastSeenAt: DateTime(2026, 10, 19, 11, 17),
+      endedAt: DateTime(2026, 10, 19, 11, 17),
+      evidenceCount: 30,
+      qualityPolicyVersion: 5,
+    );
+    final route = RouteGeometry.fromReport(
+      const RouteGeometryAssembler().assemble(
+        sourceParts: <RouteGeometrySourcePart>[
+          RouteGeometrySourcePart(
+            legNumber: 1,
+            segment: source.segment,
+            points: source.points,
+          ),
+        ],
+      ),
+      stops: <TrackStop>[stop],
+    );
+    final shown = <RouteStopMarker>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RouteMapHeader(
+            content: RouteMapContent(route: route),
+            continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+            onContinuityChanged: (_) {},
+            onViewChanged: (_) {},
+            onStopSelected: shown.add,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Stops'), findsOneWidget);
+    expect(find.text('1 h 12 min'), findsOneWidget);
+    expect(find.text('10:05–11:17'), findsOneWidget);
+    await tester.tap(find.text('1 h 12 min'));
+    expect(shown.single.coordinate, const maplibre.LatLng(0.5, 0.5005));
+  });
+
+  testWidgets('only the stop list scrolls in the map panel', (tester) async {
+    final track = _completedTrack();
+    final source = _segment(track, 1, const <(double, double)>[
+      (0.5, 0.5),
+      (0.5, 0.501),
+    ]);
+    final start = DateTime(2026, 10, 19, 8);
+    final route = RouteGeometry.fromReport(
+      const RouteGeometryAssembler().assemble(
+        sourceParts: <RouteGeometrySourcePart>[
+          RouteGeometrySourcePart(
+            legNumber: 1,
+            segment: source.segment,
+            points: source.points,
+          ),
+        ],
+      ),
+      totals: const RouteTotals(
+        distanceMeters: 1490,
+        displayDistanceMeters: 1490,
+        segmentCount: 1,
+        moving: Duration(minutes: 40),
+        stopped: Duration(minutes: 20),
+        stopCount: 12,
+        qualityEventCount: 0,
+        visibleGapCount: 0,
+      ),
+      stops: <TrackStop>[
+        for (var index = 0; index < 12; index += 1)
+          TrackStop(
+            id: 'stop-$index',
+            trackId: track.id,
+            segmentId: source.segment.id,
+            kind: TrackStopKind.dwell,
+            latitude: 0.5,
+            longitude: 0.5,
+            centreSigmaMeters: 2,
+            radiusMeters: 25,
+            startedAt: start.add(Duration(minutes: index * 10)),
+            lastSeenAt: start.add(Duration(minutes: index * 10 + 3)),
+            endedAt: start.add(Duration(minutes: index * 10 + 3)),
+            evidenceCount: 30,
+            qualityPolicyVersion: 5,
+          ),
+      ],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: RouteMapHeader(
+              content: RouteMapContent(route: route),
+              continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+              onContinuityChanged: (_) {},
+              onViewChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final distance = tester.getTopLeft(find.text('1.49 km'));
+    final list = find.byType(Scrollable);
+    expect(list, findsOneWidget, reason: 'the stop list alone scrolls');
+    expect(
+      tester.state<ScrollableState>(list).position.maxScrollExtent,
+      greaterThan(0),
+    );
+    await tester.drag(list, const Offset(0, -200));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(find.text('1.49 km')), distance);
   });
 
   test('map geometry keeps paused route segments separate', () {
@@ -210,6 +385,37 @@ void main() {
     expect(geometry.hasDistinctEndpoints, isFalse);
   });
 
+  test('Complete Trip finds the Trip of a paused leg', () async {
+    const owner = TrackingOwner(
+      userId: 'example-user',
+      organizationId: 'example-organization',
+    );
+    // Pausing a leg suspends its Trip.
+    final tracking = _OpenTrips(<Trip>[
+      Trip(
+        id: 'trip-1',
+        organizationId: 'example-organization',
+        userId: 'example-user',
+        routeId: 'multi_day_route',
+        status: TripStatus.suspended,
+        startedAt: DateTime.utc(2026),
+        currentLegTrackId: 'track-1',
+        legCount: 1,
+        acceptedPointCount: 5,
+        rejectedPointCount: 0,
+        measuredDistanceMeters: 120,
+        lifecycleRevision: 2,
+        createdAt: DateTime.utc(2026),
+        updatedAt: DateTime.utc(2026),
+      ),
+    ]);
+
+    final trip = await findOpenTrip(tracking, owner, 'track-1');
+
+    expect(trip?.id, 'trip-1');
+    expect(await findOpenTrip(tracking, owner, 'track-2'), isNull);
+  });
+
   testWidgets('completed Trip menu exposes export, map, continue, and delete', (
     tester,
   ) async {
@@ -236,7 +442,6 @@ void main() {
           body: RecordedTripsSection(
             trips: <RecordedTripSummary>[RecordedTripSummary(trip: trip)],
             hasMore: false,
-            onRefresh: () async {},
             onLoadMore: () async {},
             onViewMap: (_) async => calls.add('map'),
             onContinue: (_) async => calls.add('continue'),
@@ -464,7 +669,7 @@ void main() {
       ),
     );
     expect(routeHeadline(route), '2 points • 0 stop(s) • 1 drawable part(s)');
-    expect(routeTotalsLines(null, cleaned: true), isEmpty);
+    expect(routeStats(null, cleaned: true), isEmpty);
 
     final totals = RouteTotals.ofRoute(
       RouteSummary(
@@ -487,11 +692,16 @@ void main() {
         updatedAt: track.startedAt,
       ),
     );
-    expect(routeTotalsLines(totals, cleaned: true), <String>[
-      'Distance 12.35 km • cleaned ≈ 12.01 km',
-      'Moving 1 h 35 min • stopped 17 min • 4321 steps',
+    expect(routeStats(totals, cleaned: true), const <RouteStat>[
+      RouteStat('12.35 km', 'Distance', note: 'cleaned ≈ 12.01 km'),
+      RouteStat('1 h 35 min', 'Moving'),
+      RouteStat('17 min', 'Stopped'),
+      RouteStat('4321', 'Steps'),
     ]);
-    expect(routeTotalsLines(totals, cleaned: false).first, 'Distance 12.35 km');
+    expect(
+      routeStats(totals, cleaned: false).first,
+      const RouteStat('12.35 km', 'Distance'),
+    );
     final withTotals = RouteGeometry.fromReport(
       const RouteGeometryAssembler().assemble(
         sourceParts: <RouteGeometrySourcePart>[
@@ -572,7 +782,6 @@ void main() {
               RecordedTripSummary(trip: trip('without_totals')),
             ],
             hasMore: false,
-            onRefresh: null,
             onLoadMore: null,
             onViewMap: null,
             onContinue: null,
@@ -582,12 +791,12 @@ void main() {
         ),
       ),
     );
-    expect(find.text('2 stop(s) • 17 min'), findsOneWidget);
-    expect(find.textContaining('stop(s)'), findsOneWidget);
-    expect(find.text('Moving 1 h 35 min'), findsOneWidget);
+    expect(find.text('2 stops'), findsOneWidget);
+    expect(find.text('17 min'), findsOneWidget);
+    expect(find.text('Moving'), findsOneWidget, reason: 'one card has totals');
+    expect(find.text('1 h 35 min'), findsOneWidget);
     expect(find.text('4321 steps'), findsOneWidget);
-    expect(find.text('3 quality event(s)'), findsOneWidget);
-    expect(find.text('1 visible gap(s)'), findsOneWidget);
+    expect(find.text('3 quality event(s) • 1 visible gap(s)'), findsOneWidget);
   });
 
   testWidgets('a clean build leaves quality events and gaps off Trip cards', (
@@ -629,7 +838,6 @@ void main() {
               ),
             ],
             hasMore: false,
-            onRefresh: null,
             onLoadMore: null,
             onViewMap: null,
             onContinue: null,
@@ -641,7 +849,7 @@ void main() {
         ),
       ),
     );
-    expect(find.text('2 stop(s) • 17 min'), findsOneWidget);
+    expect(find.text('2 stops'), findsOneWidget);
     expect(find.textContaining('quality event'), findsNothing);
     expect(find.textContaining('visible gap'), findsNothing);
 
@@ -661,17 +869,17 @@ void main() {
         ),
       ),
     );
-    expect(find.text('Activity: '), findsOneWidget);
-    expect(find.text('Location uncertainty: '), findsOneWidget);
+    expect(find.text('Activity'), findsOneWidget);
+    expect(find.text('Uncertainty'), findsOneWidget);
     for (final label in <String>[
-      'Activity confidence',
-      'Motion evidence',
-      'Capture profile',
+      'Confidence',
+      'Motion',
+      'Profile',
       'Fix',
       'Sequence',
-      'Mock signal',
+      'Mock',
     ]) {
-      expect(find.text('$label: '), findsNothing, reason: label);
+      expect(find.text(label), findsNothing, reason: label);
     }
   });
 
@@ -695,7 +903,6 @@ void main() {
               ),
             },
             hasMore: false,
-            onRefresh: null,
             onLoadMore: null,
             onViewMap: null,
             onExport: null,
@@ -704,8 +911,9 @@ void main() {
         ),
       ),
     );
-    expect(find.text('Moving 40 min'), findsOneWidget);
-    expect(find.text('1 stop(s) • 20 min'), findsOneWidget);
+    expect(find.text('40 min'), findsOneWidget);
+    expect(find.text('1 stop'), findsOneWidget);
+    expect(find.text('20 min'), findsOneWidget);
     expect(
       find.textContaining('steps'),
       findsNothing,
@@ -750,11 +958,6 @@ TrackSegmentWithPoints _timedSegment(
         ),
     ],
   );
-}
-
-Future<void> _scrollHome(WidgetTester tester, double distance) async {
-  await tester.drag(find.byType(ListView), Offset(0, -distance));
-  await tester.pumpAndSettle();
 }
 
 Track _completedTrack({int segmentCount = 1}) => Track(
@@ -812,4 +1015,20 @@ TrackSegmentWithPoints _segment(
         ),
     ],
   );
+}
+
+/// Lists Trips the way the route database does: only those whose status the
+/// query asks for.
+final class _OpenTrips implements MultiDayTripController {
+  _OpenTrips(this.trips);
+
+  final List<Trip> trips;
+
+  @override
+  Future<TripPage> listTripPage(TripQuery query) async => TripPage(
+    items: trips.where((trip) => query.statuses.contains(trip.status)),
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

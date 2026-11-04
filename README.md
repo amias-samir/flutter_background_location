@@ -1,774 +1,113 @@
 # flutter_background_location_tracker
 
-Durable, battery-aware route tracking for Android and iOS.
-
-The plugin combines native location and activity APIs with ordered SQLite
-storage, pause/resume lifecycle controls, mock-location evidence, adaptive
-sampling, multi-day trips, and offline GeoJSON, KML, and GPX export.
+Durable, battery-aware route tracking for Android and iOS. Record a route from
+**Start** to **Complete** in the foreground and background, keep it in SQLite,
+and get its stops, steps, distance and moving time without computing anything,
+then export it as GeoJSON, KML or GPX.
 
 > Background location is privacy-sensitive and controlled by the operating
 > system. Callback intervals and process lifetime are never guaranteed. Test
 > your exact configuration on real devices before releasing it.
 
-## Start here
+<table>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/home.png" width="200" alt="Home screen, idle, with tracking preferences and the Start button"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/tracking.png" width="200" alt="Recording a Trip, with Pause, End day and Complete Trip"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/paused.png" width="200" alt="Paused Trip, with Resume, End day and Complete Trip"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/complete.png" width="200" alt="Confirmation before completing the whole Trip"/></td>
+  </tr>
+  <tr>
+    <td align="center">Ready to start</td>
+    <td align="center">Recording</td>
+    <td align="center">Paused</td>
+    <td align="center">Complete Trip</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/preferences.png" width="200" alt="Accuracy picker"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/history.png" width="200" alt="Recorded Trips with distance, moving and stopped time, and steps"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/map.png" width="200" alt="Route map with start, stops and end"/></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/amias-samir/flutter_background_location/main/screenshots/map_stops.png" width="200" alt="Route sheet with figures, legend and stop list"/></td>
+  </tr>
+  <tr>
+    <td align="center">Tracking preferences</td>
+    <td align="center">Recorded Trips</td>
+    <td align="center">Route map</td>
+    <td align="center">Stops and figures</td>
+  </tr>
+</table>
 
-Use this package when your app needs a complete route from **Start** to
-**Complete**, including background capture, route history, export, and
-diagnostics.
-
-| Need | Use |
-|---|---|
-| Single-day route recording | `TrackingClient.open()` |
-| Multi-day journeys with End day / Continue trip | `TrackingClient.openWithTrips()` |
-| Lifecycle UI state | `TrackingSessionSnapshot.allowedActions` |
-| Permission setup | `checkReadiness()` then `requestNextPermission()` |
-| Accuracy and battery behavior | `TrackingConfig(accuracy: ..., captureIntent: ...)` |
-| Route display/export | `loadTrackBundle()`, `assembleTripRouteGeometry()`, `exportTrack()`, `exportTrip()` |
-
-The recommended integration shape is simple:
-
-```dart
-final tracking = await TrackingClient.openWithTrips(
-  owner: const TrackingOwner(
-    userId: 'signed-in-user',
-    organizationId: 'workspace-id',
-  ),
-  configuration: const TrackingConfiguration(
-    recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
-    defaultTrackingConfig: TrackingConfig(
-      accuracy: TrackingAccuracy.high,
-      captureIntent: RouteCaptureIntent.vehicle,
-      motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
-    ),
-  ),
-);
-
-final readiness = await tracking.checkReadiness();
-if (readiness.canStart) {
-  await tracking.startTrip(
-    const TripStartRequest(routeId: 'home_to_office'),
-  );
-}
-```
-
-From there, render Start, Pause, Resume, End day, Continue trip, and Complete
-from `tracking.sessionStream`. Do not guess button state from local widget
-variables.
+<sub>Screenshots from the bundled example app on Android (debug build; debug
+builds add diagnostic views such as gap markers and route views).</sub>
 
 ## Features
 
-### Capture
-
-- Foreground and background route recording on Android and iOS.
-- Android foreground service with a persistent tracking notification.
-- Pause, resume, complete, End day, and Continue trip lifecycle support.
-- Track history retention with `keepLatestOnly` or `keepAll`.
-
-### Accuracy and evidence
-
-- Activity classification for stationary, walking, running, bicycle, vehicle,
-  and unknown states.
-- Optional low-power step/significant-motion fusion and bounded
-  accelerometer/gyroscope ambiguity probes.
-- Mock/simulation evidence per location fix with allow, flag, or reject policy.
-- Typed gap evidence for rejected fixes, lifecycle boundaries, and background
-  callback interruptions.
-- Steps counted on every route from the phone's step counter, with the
-  activity permission the package already requests.
-
-### Routes and export
-
-- Single-day `Track` routes and additive multi-day `Trip` journeys.
-- Every route detail kept in the route database: stops, moving and stopped
-  time, steps, speeds, quality events, visible gaps and the cleaned distance.
-- Combined multi-day Trip map and GeoJSON/KML/GPX export.
-- Persisted route presentation modes: recorded parts, connected days, or
-  continuous presentation with labeled inferred connectors.
-- Optional immutable derived geometry with explicit raw/derived map and export
-  selection.
-- User-defined export names and collision-safe file creation.
-
-### Operations
-
-- Durable, ordered SQLite persistence with crash recovery.
-- Streams and plain Dart models with no state-management dependency.
-- Optional application-supplied uploader with durable retry state.
-- Coordinate-free diagnostics for setup, quality, and support reports.
+- **Capture:** foreground and background recording with Pause, Resume and
+  Complete, an Android foreground service, and a native journal that keeps
+  every fix until the route database has stored it.
+- **Clean routes:** adaptive sampling that saves battery while still, stop
+  detection that keeps indoor jitter out of the route and its distance, turn
+  capture at junctions, and the same decisions on every phone.
+- **Route details stored for you:** distance, moving, stopped and paused time,
+  stops with their place and times, steps, speeds, quality events and gaps.
+- **Multi-day Trips:** End day and Continue trip, shown and exported as one
+  journey.
+- **Export:** GeoJSON, KML and GPX with stops and summaries, offline
+  conversion between the three formats, and an optional cleaned view.
+- **Evidence, not guesses:** activity classification, mock-location evidence
+  per fix, and typed gaps. Nothing is interpolated into the recorded points.
+- **Release-ready:** release builds keep a clean, lightweight route; debug
+  builds keep everything for field testing.
+- **Lightweight:** no HTTP client, map SDK or state-management dependency. An
+  optional, host-supplied uploader gets durable, ordered, at-least-once
+  batches.
 
 ## Platform support
 
 | Platform | Minimum | Native implementation |
 |---|---:|---|
-| Flutter | 3.22 | Dart 3.4 or later |
+| Flutter | 3.22 (Dart 3.4) | |
 | Android | API 21 | Fused Location Provider, Activity Recognition, foreground service |
 | iOS | 13.0 | Core Location and Core Motion |
 
-The Android plugin targets Java 17 and compile SDK 35; the bundled MapLibre
-example CI uses JDK 21. iOS supports CocoaPods and Flutter's Swift Package
-Manager integration.
+The Android plugin targets Java 17 and compile SDK 35. iOS supports
+CocoaPods and Swift Package Manager.
 
 ## Installation
-
-Add the package to your application:
 
 ```yaml
 dependencies:
   flutter_background_location_tracker: ^1.0.0
 ```
 
-Then run:
-
-```shell
-flutter pub get
-```
-
-Import the public library:
-
 ```dart
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 ```
 
-## Minimal integration
-
-The host application needs five package-level steps:
-
-1. Add the Android manifest and iOS `Info.plist` configuration below.
-2. Open one application-scoped `TrackingClient` for the authenticated owner.
-3. Drive permission UI from `checkReadiness()` and request only its next action.
-4. Drive Start, Pause, Resume, and Complete from `session.allowedActions`.
-5. Export completed routes with `exportTrack()` and dispose at sign-out.
-
-Create exactly one application-scoped controller for the signed-in owner. The
-controller initializes storage/native state before it is returned, replays the
-current session to new listeners, and keeps normal reads owner-scoped.
-
-```dart
-late final TrackingController tracking;
-late final StreamSubscription<TrackingSessionSnapshot> sessionSubscription;
-
-Future<void> configureTracking() async {
-  const owner = TrackingOwner(
-    userId: 'signed-in-user',
-    organizationId: 'workspace-id',
-  );
-  tracking = await TrackingClient.open(owner: owner);
-  sessionSubscription = tracking.sessionStream.listen((session) {
-    // Drive every lifecycle button from session.allowedActions.
-    print('${session.status.lifecycle}: ${session.currentTrack?.routeId}');
-  });
-}
-
-Future<void> startRoute() async {
-  final readiness = await tracking.checkReadiness();
-  if (!readiness.canStart) {
-    // From this visible button gesture, present readiness.nextAction.
-    // Permission actions use requestNextPermission(); Settings actions use
-    // openSettings(...). Recheck readiness before calling Start again.
-    return;
-  }
-  await tracking.startNewTrack(
-    const TrackStartRequest(
-      owner: TrackingOwner(
-        userId: 'signed-in-user',
-        organizationId: 'workspace-id',
-      ),
-      routeId: 'Morning delivery route',
-      config: TrackingConfig(accuracy: TrackingAccuracy.high),
-    ),
-  );
-}
-
-Future<void> stopUsingTracking() async {
-  await sessionSubscription.cancel();
-  await tracking.dispose(); // Pause or Complete an active route first.
-}
-```
-
-The complete staged permission flow and platform declarations follow below.
-
-| Core API | Use |
-|---|---|
-| `TrackingClient.open()` | Initialize and restore one owner-scoped controller |
-| `TrackingClient.openWithTrips()` | Initialize Track controls plus multi-day Trip support |
-| `TrackingController` | Control lifecycle, history, export, and deletion |
-| `TrackingTripController` | Start, continue, complete, query, map, export, and delete Trips |
-| `TrackingSessionSnapshot` | Render status and enabled actions |
-| `TrackingReadiness` | Present the next permission or Settings step |
-| `TrackingConfig` | Configure accuracy, sampling, and mock policy |
-| `TrackQuery` / `TrackPage` | Load bounded route-history pages |
-| `TripQuery` / `TripPage` | Load bounded user-visible multi-day journey pages |
-
-## Multi-day Trip tracking
-
-Use `TrackingClient.openWithTrips()` when one user-visible journey can span
-several days. The returned `TrackingTripController` includes all normal Track
-controls plus the additive Trip lifecycle, history, geometry, export, and
-deletion APIs.
-
-### Data model
-
-| Model | Meaning |
-|---|---|
-| `Trip` | The single journey shown to the user across every day |
-| `TripLeg` | One independently completed daily `Track` inside the Trip |
-| `TrackSegment` | One uninterrupted capture interval inside a leg |
-| `TrackingContinuityGap` | Auditable evidence of missing or rejected geometry |
-
-The `Trip.id` and readable `routeId` stay stable. Each **End day** operation
-stops native capture and makes that day's Track immutable. **Continue trip**
-creates exactly one ordered next leg rather than reopening the completed Track.
-This preserves export and upload idempotency while the application displays one
-Trip instead of several unrelated routes.
-
-Use ordinary `pauseCurrentTrack()` and `resumeCurrentTrack()` for a temporary
-break during the same day. Use `endCurrentDay()` only when the current daily leg
-should be completed.
-
-### Open one owner-scoped Trip controller
-
-Keep one controller for the signed-in owner and dispose it during sign-out. Do
-not create a controller per screen or per day.
-
-```dart
-const trackingOwner = TrackingOwner(
-  userId: 'signed-in-user',
-  organizationId: 'workspace-id',
-);
-
-late final TrackingTripController tracking;
-
-Future<void> initializeTripTracking() async {
-  tracking = await TrackingClient.openWithTrips(
-    owner: trackingOwner,
-    configuration: const TrackingConfiguration(
-      defaultTrackingConfig: TrackingConfig(
-        accuracy: TrackingAccuracy.high,
-      ),
-      recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
-    ),
-  );
-
-  tracking.sessionStream.listen((session) {
-    // Drive Pause/Resume and native capture state from allowedActions.
-    print(session.status.lifecycle);
-  });
-}
-```
-
-`keepAll` is recommended for multi-day history. Trip-aware retention preserves
-every leg belonging to the retained Trip; it does not delete yesterday's leg
-while that Trip is still current.
-
-### Start, end a day, continue, and complete
-
-Call lifecycle methods only after the same readiness flow used for normal Track
-recording. Supply a stable `operationId` when your application may retry a
-command after a timeout or process restart.
-
-```dart
-Future<Trip> startJourney() async {
-  final readiness = await tracking.checkReadiness();
-  if (!readiness.canStart) {
-    throw StateError('Present readiness.nextAction before starting.');
-  }
-
-  final result = await tracking.startTrip(
-    const TripStartRequest(
-      routeId: 'Kathmandu field visit',
-      operationId: 'server-command-start-42',
-      dayLabel: 'Day 1',
-      routePresentation: MultiDayRoutePresentation.connectDailyLegs,
-      config: TrackingConfig(
-        accuracy: TrackingAccuracy.high,
-        captureIntent: RouteCaptureIntent.walking,
-        motionFusionMode: MotionFusionMode.lowPowerSensorFusion,
-      ),
-    ),
-  );
-  return result.trip;
-}
-
-Future<void> finishToday() async {
-  await tracking.endCurrentDay(
-    reason: 'overnight',
-    operationId: 'server-command-end-day-42-1',
-  );
-  // Native capture is now stopped and the Trip is suspended.
-}
-
-Future<void> startNextDay(String tripId) async {
-  final readiness = await tracking.checkReadiness();
-  if (!readiness.canStart) return;
-
-  final result = await tracking.continueTrip(
-    tripId,
-    operationId: 'server-command-continue-42-2',
-  );
-  print('Recording leg ${result.leg.legNumber}');
-}
-
-Future<void> finishWholeJourney(String tripId) async {
-  await tracking.completeTrip(
-    tripId,
-    reason: 'destination_reached',
-    operationId: 'server-command-complete-42',
-  );
-}
-```
-
-### Capture intent, motion evidence, and connected days
-
-These settings solve different problems:
-
-| Setting | Controls | Does not do |
-|---|---|---|
-| `accuracy` and individual sampling fields | Native request frequency, distance filter, and accepted uncertainty | Guarantee an OS callback interval |
-| `captureIntent` | Moving-profile fallback when activity evidence is unknown or stale | Force a platform activity label |
-| `motionFusionMode` | Which optional motion sensors may corroborate moving/stationary state | Derive latitude/longitude from compass, gyro, or acceleration |
-| `routePresentation` | Whether truthful daily/lifecycle parts are drawn separately or joined | Recover the path travelled while capture was stopped |
-
-`RouteCaptureIntent.walking`, `cycling`, and `vehicle` resolve unset moving
-sampling values to a 3-second interval and 3 m filter. These explicit travel
-intents remain in the moving profile even if a pocketed device is temporarily
-classified as stationary. `adaptive` remains the battery-aware intent that may
-enter stationary sampling. Explicit `movingInterval` and
-`movingDistanceFilterMeters` values still win.
-
-Adaptive capture records a clean route and the stops along it. Indoors, or in
-a pocket, a phone that isn't going anywhere still reports fixes that wander
-several metres while claiming good accuracy. From the first quiet fix of a
-stay, fixes near it are stored as rejected `stationary_hold` evidence. They
-add no distance, don't draw a scribble, and stay out of default exports and
-uploads.
-
-- **What starts a stay:** a quiet fix, with no moving reading in the last
-  30 s and no measured walking-pace Doppler speed. A moving fix ends a short
-  pause at once, so walking on keeps its distance.
-- **What makes it a stop:** at least `minimumStopDuration` (five minutes by
-  default) within the hold radius with no net progress, or still evidence.
-  Still evidence also lets
-  the native stationary profile engage. A stay the provider sent no fixes in
-  is a stop when the first fix afterwards is still at the place.
-- **What keeps it:** unknown, tilting or low-confidence readings, activity
-  silence, and walking about inside the place, such as between rooms.
-- **What ends it:** a fix outside the hold radius with a measured Doppler
-  speed, a second outside fix while moving evidence is current, or fixes that
-  keep moving away for a minute.
-- **What counts as distance:** the stop-to-departure chord. Movement within a
-  site smaller than the hold radius (at least 25 m) is not measured.
-- **Scope:** new routes with the adaptive intent only. Explicit travel intents
-  record every fix.
-
-Set the minimum stop duration in the route's `TrackingConfig`. It is persisted
-with the route and is distinct from the native stationary sampling interval:
-
-```dart
-const config = TrackingConfig(minimumStopDuration: Duration(minutes: 3));
-```
-
-The duration must be at least one millisecond. Existing recorded stops are not rewritten when
-the setting changes. Stop-aware derived geometry uses the route's stored value.
-
-Each stop is recorded with its place and its start and end times. The
-owner-scoped controllers implement `TrackingStopController`:
-
-```dart
-final stops = await (tracking as TrackingStopController).listTripStops(tripId);
-for (final stop in stops) {
-  print('${stop.startedAt}: stayed ${stop.duration.inMinutes} min');
-}
-```
-
-`TrackStop` carries the stop's centre, hold radius, `startedAt`, `endedAt`
-(null while the stop is current), `duration`, `kind` (`TrackStopKind.still`
-or `dwell`) and the number of fixes held. A stop ends at the departure fix,
-or at its last fix when the route pauses or completes during it.
-`TrackBundle.stops` carries a route's stops, and exports include them.
-
-A visit to one place is one stop, and the route database stores it as one
-row. A phone with precise fixes holds a stop within the 25 m minimum radius,
-so walking between the buildings of a place, such as a temple's shrines, ends
-one stay and starts the next. A stay that begins within three minutes of the
-previous stop's end, centred within 75 m of it, extends that stop's row
-instead of adding one; schema 17 consolidated the rows older versions stored
-per stay. What the API returns is what is stored.
-
-Routes recorded without live stop records (quality policies 1 and 2, or an
-explicit travel intent) get their stops once they complete: the package
-derives them from the stored points with the cleaned view's stay rule, stores
-them as closed `dwell` rows and marks the route
-(`RouteSummary.stopsSource`), in the background after the client opens and on
-first read. The points never change.
-
-Rejected fixes that arrive while the device is at a recorded stop are stop
-evidence, not visible gaps, and `TrackingQualitySummary.stopEvidenceRunCount`
-counts the rejected-fix runs made only of stop evidence, so
-`qualityRunCount - stopEvidenceRunCount` is the number worth a look.
-
-Where the phone is carried changes what it records. The body blocks satellite
-signals: on a two-phone motorbike test, a phone in the rider's jacket pocket
-reported a median accuracy of 10 m and lost GNSS-quality fixes for about
-15 minutes after a long stop in a valley, while a phone in the passenger's
-bag reported 2 m throughout. The pocketed phone's route was 2.5 % shorter and
-showed 17 visible gaps, all where its fixes were rejected. For riding, prefer
-a bag, top box, tank bag or handlebar mount to a jacket or trouser pocket.
-
-Vehicle capture also uses a bounded urban-visibility acceptance envelope:
-`high` accepts reported horizontal uncertainty up to 35 m and `precised` up to
-25 m. The provider still requests navigation-grade fixes. This avoids throwing
-away most tunnel, pocket, or urban-canyon callbacks solely because they exceed
-the walking-oriented 20/15 m limits. Pass an explicit
-`maximumAcceptedAccuracyMeters` to make the envelope stricter or looser.
-Adaptive capture applies the same envelope to a fix that is riding: its
-Doppler speed is at least 5 m/s, or at least 2 m/s with a fresh in-vehicle or
-on-bicycle reading (quality policy 4). Walking and standing keep the walking
-limit, and an explicit `maximumAcceptedAccuracyMeters` still wins.
-
-Quality policy 5, the default for new adaptive routes, decides the same way
-on every phone. The first fix after a silence that lands far from the route
-is accepted at once only when its Doppler speed is precise and consistent;
-otherwise it waits for a fix that agrees with it, so a wrong re-acquisition
-fix never pulls the route 100–300 m off. A fix the route could not have
-reached is kept as rejected `kinematic_outlier` evidence. Reported accuracy
-may widen a decision's tolerance but never narrows it, because phones report
-it differently. Each fix is decided only from the evidence stored with it,
-so a route received live, recovered after a restart or drained from the
-native journal later gets the same stops and distance.
-
-The High and Precised presets also capture turns (`turnCaptureDegrees`, 45°).
-At riding speed a fix every 5 seconds lies tens of metres from the last, so a
-junction or hairpin between them would be cut across. When a fix moving at
-least 3 m/s with a reliable course has turned 45° since the last recorded
-fix, it is recorded at once. The moving High and Precised profile reads an
-unfiltered fix every second, batched up to the moving interval where the
-device supports it, and records one fix per moving interval or a turn,
-whatever the distance moved, on Android and iOS alike (sampling policy 2,
-`TrackingConfig.samplingPolicyVersion`, preset definition 6), so walking,
-standing and driving record at the same cadence on every phone. Set
-`turnCaptureDegrees: 0` to turn turn capture off. Routes recording across an
-upgrade keep the sampling they started with.
-
-`MotionFusionMode.platformActivityOnly` is the compatibility default.
-`lowPowerSensorFusion` adds step/pedometer and significant-motion evidence.
-`enhancedSensorFusion` additionally permits short accelerometer/gyroscope
-windows when evidence conflicts. Probes obey duration, cooldown, and hourly
-duty-cycle limits. Compass and gyro are orientation/rotation evidence only;
-the package never performs inertial dead reckoning.
-
-Route presentation is persisted with the Trip:
-
-- `separateRecordedParts` preserves every daily and lifecycle boundary;
-- `connectDailyLegs` joins only boundaries between consecutive days;
-- `continuousPresentation` joins all chronological accepted parts.
-
-Connected modes add straight, typed `InferredRouteConnector` edges. Their
-length is excluded from `Trip.measuredDistanceMeters`, because no locations
-were captured along those edges. The stored default is used by the shared map
-assembler and GeoJSON/KML/GPX Trip export; pass an explicit override only for a
-temporary viewer/export choice.
-
-Edges between accepted anchors in the same recorded segment are measured even
-when rejected callbacks occurred between them—the exported line already uses
-those anchors. Database schema 14 repairs older totals that excluded these
-same-segment edges. It does not add inferred Pause, interruption, or overnight
-connector distance.
-
-Activity confidence is the platform's confidence in an activity label. It is
-not GPS accuracy. Use `ActivitySnapshot.evidenceState`/`age` for freshness,
-`TrackPoint.horizontalAccuracy` for location uncertainty in metres, and
-`MotionEvidenceSnapshot` for the sources supporting the current motion state.
-
-Feature-detect `TrackingQualityController` for coordinate-free accepted,
-rejected, quality-run, visible-gap, lifecycle-boundary, activity-freshness,
-and uncertainty-percentile diagnostics.
-
-The route identifier is created only when the Trip starts. Whitespace is
-normalized to underscores and a timestamp suffix prevents duplicates. Every
-later leg inherits the same Trip route identifier.
-
-Lifecycle summary:
-
-| Current state | Application action | Result |
-|---|---|---|
-| Active Trip | `pauseCurrentTrack()` | Pauses the current leg; resumable in place |
-| Paused leg | `resumeCurrentTrack()` | Resumes the same Track leg |
-| Active Trip | `endCurrentDay()` | Completes the leg, stops capture, suspends Trip |
-| Suspended Trip | `continueTrip(tripId)` | Starts the next daily leg |
-| Active Trip | `completeTrip(tripId)` | Completes the leg and terminal Trip |
-| Completed Trip | confirmed `continueTrip(...)` | Adds a new leg without changing old legs |
-
-### Restore Trip UI after an application restart
-
-`openWithTrips()` reconciles durable database and native state before it
-returns. Rebuild Trip history from owner-scoped pages instead of keeping the
-Trip only in widget memory or shared preferences.
-
-```dart
-Future<List<Trip>> loadRecentTrips() async {
-  final page = await tracking.listTripPage(
-    const TripQuery(owner: trackingOwner, limit: 20),
-  );
-  return page.items;
-}
-
-Future<Trip?> loadTripToContinue() async {
-  final page = await tracking.listTripPage(
-    const TripQuery(
-      owner: trackingOwner,
-      limit: 1,
-      statuses: <TripStatus>{TripStatus.suspended},
-    ),
-  );
-  return page.items.isEmpty ? null : page.items.first;
-}
-```
-
-Use `nextCursor` to page older Trips. `loadTripBundle(tripId)` returns ordered
-legs and typed gap evidence for a detail screen.
-
-### Deliberately continue a completed Trip
-
-Completed daily Tracks are never reopened. If a journey was completed at the
-end of day one by mistake, explicitly confirm continuation so the package can
-append a new leg:
-
-```dart
-await tracking.continueTrip(
-  completedTripId,
-  confirmCompletedTripContinuation: true,
-  operationId: 'server-command-reopen-42',
-);
-```
-
-Ask the user for confirmation before passing this flag. If final Trip upload
-has already been acknowledged under a non-reopenable remote contract, the
-operation throws `TrackingTripException` with code `trip_already_finalized`
-rather than silently changing uploaded history.
-
-Handle Trip failures by their stable code instead of parsing messages:
-
-```dart
-try {
-  await tracking.continueTrip(tripId);
-} on TrackingTripException catch (error) {
-  switch (error.code) {
-    case 'completed_trip_confirmation_required':
-      // Ask the user, then retry once with explicit confirmation.
-      break;
-    case 'active_trip_conflict':
-      // Another Trip currently owns native capture.
-      break;
-    default:
-      rethrow;
-  }
-}
-```
-
-### Display or export the complete journey
-
-The same assembler drives the example MapLibre route and GeoJSON, KML, and GPX
-exports, preventing map/export topology differences.
-
-```dart
-final geometry = await tracking.assembleTripRouteGeometry(
-  tripId,
-  continuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
-);
-
-final exported = await tracking.exportTrip(
-  tripId: tripId,
-  format: TrackExportFormat.gpx,
-  fileName: 'complete_field_visit',
-  options: const TrackExportOptions(
-    geometryContinuity:
-        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
-  ),
-);
-
-print('${geometry.parts.length} drawable parts');
-print(exported.path);
-```
-
-Trips must be completed before export by default. For an explicitly labeled
-work-in-progress snapshot, pass
-`TrackExportOptions(allowIncompleteTrackSnapshot: true)`. Combined Trip export
-has a 100,000-point safety ceiling; applications handling larger journeys
-should archive/page daily legs or provide a streaming backend export.
-
-Geometry modes:
-
-- `preserveEvidenceSegments` preserves every real lifecycle boundary;
-- `mergeAutomaticCallbackGaps` merges only typed automatic gaps whose durable
-  treatment retained the same canonical segment. This is the recommended map
-  and normal export mode;
-- `connectAllChronologicalPoints` creates one continuous presentation and
-  reports every straight connector as inferred.
-
-Inferred connectors are never inserted into raw `track_points` and their
-length is excluded from measured distance. No location package can reconstruct
-the road taken when the operating system supplied no usable fixes.
-
-### Delete a Trip
-
-Only terminal `completed` or `failed` Trips can be deleted. Deletion removes
-all owned legs, database artifacts, upload-outbox rows, package-managed export
-snapshots, and matching native journal entries.
-
-```dart
-await tracking.deleteTrip(completedTripId);
-```
-
-Require an application-level confirmation before this irreversible action.
-Active and suspended Trips must first be completed or otherwise resolved.
-
-### Integration rules
-
-- Use the same `TrackingOwner` for controller creation and every `TripQuery`.
-- Keep one application-scoped controller and serialize lifecycle button taps.
-- Drive capture controls from `session.allowedActions`; drive Trip history from
-  `listTripPage()`.
-- Reuse a stable `operationId` when retrying the same logical command. A new ID
-  represents a new command.
-- Do not reopen or modify completed daily Track rows directly.
-- Confirm completed-Trip continuation and terminal deletion in host UI.
-- Test overnight, locked-screen, battery-saver, permission-loss, and provider-
-  outage behavior on physical devices before release.
-
-## Platform configuration
+## Platform setup
 
 ### Android
 
-#### Manifest
+The plugin's manifest is merged into your app automatically. It declares fine,
+coarse and background location, the `location` foreground service,
+notifications, activity recognition, boot completion and `WAKE_LOCK` (held only
+while capture is active). Don't duplicate or remove them.
 
-The plugin manifest is merged into the host app automatically. It contributes
-the complete permission and component set shown below, so applications normally
-must not duplicate it. Verify these entries in the merged release manifest if
-your build customizes manifest merging:
+Start or resume capture only when all of these are true:
 
-```xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-feature
-        android:name="android.hardware.location.gps"
-        android:required="false" />
+- Location Services are on and **Precise** location is granted.
+- Background location is **Allow all the time**. On Android 11 and later the
+  user can only choose it in Settings.
+- Notifications are allowed (Android 13 and later).
+- The command comes from a visible screen after a user action.
 
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
-
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
-    <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
-
-    <application>
-        <service
-            android:name="com.samir.flutter_background_location.LocationTrackingService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="location"
-            android:stopWithTask="false" />
-
-        <receiver
-            android:name="com.samir.flutter_background_location.ActivityRecognitionReceiver"
-            android:enabled="true"
-            android:exported="false" />
-
-        <receiver
-            android:name="com.samir.flutter_background_location.TrackingBootReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
-    </application>
-</manifest>
-```
-
-Do not remove `ACCESS_BACKGROUND_LOCATION` or the `location` foreground-service
-type. The package intentionally keeps the native
-`com.samir.flutter_background_location` namespace for upgrade compatibility.
-
-#### Required runtime state
-
-`startTrack()` and `resumeTrack()` refuse to start native background capture
-until all required conditions are true:
-
-- Location Services are enabled.
-- **Precise** foreground location is granted.
-- Background location is reported as **Allow all the time**.
-- Notification permission is granted on Android 13 and later.
-- The command is initiated while an Activity is visible.
-
-Activity Recognition permission is requested on Android 10 and later. If it is
-denied, route capture can continue, but activity classification becomes unknown,
-the battery-saving stationary transition remains conservative, and steps are
-not counted.
-
-#### Permission sequence by Android version
-
-1. Start the flow only after the user taps a visible Start/Enable Tracking
-   control. The plugin requests `ACCESS_COARSE_LOCATION` and
-   `ACCESS_FINE_LOCATION` together. On Android 12 and later the user must select
-   **Precise**, not Approximate.
-2. On Android 9 and earlier, the older permission model grants background
-   capability with the foreground location grant.
-3. On Android 10, the plugin makes the separate background permission request;
-   the system dialog can offer **Allow all the time**.
-4. On Android 11 and later, the runtime dialog cannot grant **Allow all the
-   time**. When `requiresSettings` is true, show an educational screen, call
-   `openAppSettings()`, and ask the user to choose Location → **Allow all the
-   time** and keep **Use precise location** enabled.
-5. On Android 13 and later, the user must also allow notifications so the
-   foreground-service notification remains visible.
-6. After the app resumes from Settings, read permissions again. Enable Start
-   only when `state.canTrackInBackground` is true.
-
-Android 11 and later ignore a combined foreground/background runtime request,
-which is why permission elevation must be incremental. Android 12 and later
-also restrict foreground-service starts from the background. On Android 14 and
-later, the system validates location access when the location foreground
-service starts. Always call `startTrack()` from a visible screen after a clear
-user action.
-
-Android does not let an app grant **Allow all the time** on the user's behalf.
-The plugin can request or open the correct Settings page, but the user must make
-the final permission choice.
-
-See Android's official guides for [runtime location
-permission](https://developer.android.com/develop/sensors-and-location/location/permissions/runtime),
-[background location](https://developer.android.com/develop/sensors-and-location/location/permissions/background),
-and [foreground-service startup](https://developer.android.com/develop/background-work/services/fgs/launch).
-
-Google Play applies additional policy requirements to background location and
-foreground services. The host application is responsible for its prominent
-disclosure, privacy policy, Data safety answers, permission flow, Play Console
-declaration, and demonstrating that background access is core functionality.
+Activity Recognition is optional. Without it, the route still records, but
+activity is unknown, battery-saving stays conservative, and steps are not
+counted.
 
 ### iOS
 
-#### Background capability
-
-In Xcode, enable:
-
-**Runner target → Signing & Capabilities → Background Modes → Location
-updates**
-
-This adds `location` to `UIBackgroundModes`. The plugin validates the background
-mode before starting.
-
-#### `Info.plist`
-
-Add all of these keys to the host application's `Info.plist`. Replace the sample
-strings with clear, product-specific explanations of what is recorded, when it
-continues in the background, and how the user stops it:
+Enable **Runner → Signing & Capabilities → Background Modes → Location
+updates**, and add these keys to `Info.plist` with product-specific text:
 
 ```xml
 <key>NSLocationWhenInUseUsageDescription</key>
@@ -783,1234 +122,260 @@ continues in the background, and how the user stops it:
 </array>
 ```
 
-`NSLocationWhenInUseUsageDescription` is required for the first authorization
-stage. `NSLocationAlwaysAndWhenInUseUsageDescription` is required before the
-plugin can request Always access. `NSMotionUsageDescription` is required for
-`CMMotionActivityManager` and the step count; without motion access, tracking
-remains on the conservative moving profile and steps are not counted. Mention
-step counting in the string when your app shows steps.
+Tracking needs **Always** and **Precise Location**. The user grants When In
+Use first, then **Change to Always Allow**. Without Motion & Fitness access
+the route stays on the moving profile and steps are not counted.
 
-The deprecated `NSLocationAlwaysUsageDescription` key is not used because this
-package supports iOS 13 and later and checks the modern
-`NSLocationAlwaysAndWhenInUseUsageDescription` key.
+Neither platform lets an app grant background access itself. Drive the flow
+with `checkReadiness()` and `requestNextPermission()`, one step per user tap.
+The full manifest, the permission sequence per Android version, Play and App
+Store notes, and iOS termination recovery are in
+[Platform setup](https://github.com/amias-samir/flutter_background_location/blob/main/doc/platform_setup.md).
 
-#### Required runtime state and permission sequence
+## Quick start
 
-The plugin requires Location Services, **Precise Location**, and **Always**
-authorization before starting background tracking:
-
-1. After an explicit user action, call `permissions(request: true)`. When the
-   status is not determined, iOS presents the When In Use prompt using
-   `NSLocationWhenInUseUsageDescription`.
-2. The user must first choose **Allow While Using App**. **Allow Once** is not
-   enough for elevation because iOS can ignore the immediate Always request
-   after a temporary grant.
-3. Explain why the active route must continue with the screen locked or app in
-   the background. When `canRequestBackground` is true, call
-   `permissions(request: true)` again. The plugin calls
-   `requestAlwaysAuthorization()`.
-4. The user must choose **Change to Always Allow** when iOS presents the
-   elevation prompt. The timing and wording of system prompts are controlled by
-   iOS.
-5. If the user keeps When In Use, denies access, or disables Precise Location,
-   direct them to Settings and recheck when the app becomes active.
-6. Start or resume only when `state.canTrackInBackground` is true.
-
-Do not loop permission requests or present an Always prompt without your own
-educational UI. Users can change authorization or Precise Location at any time,
-so recheck before every start/resume and handle later revocation.
-
-iOS does not let an app grant Always authorization itself. The plugin requests
-the elevation, but only the user can approve **Change to Always Allow** or select
-Always in Settings.
-
-See Apple's official documentation for [requesting location
-authorization](https://developer.apple.com/documentation/corelocation/requesting-authorization-to-use-location-services),
-[`requestAlwaysAuthorization()`](https://developer.apple.com/documentation/corelocation/cllocationmanager/requestalwaysauthorization()),
-[background location updates](https://developer.apple.com/documentation/corelocation/handling-location-updates-in-the-background),
-and [`NSMotionUsageDescription`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsmotionusagedescription).
-
-#### Active, paused, and terminated behavior
-
-The native location service runs only while a route is active:
-
-| Route state | Android | iOS |
-|---|---|---|
-| Active | Foreground service and location/activity requests run | `CLLocationManager` runs; iOS 17+ also holds a `CLBackgroundActivitySession` |
-| Paused | Requests, notification, and service stop; the route remains resumable | Location, motion, and background-activity sessions stop; the route remains resumable |
-| Resumed | A foreground service and native requests start again | Location, motion, and a new background-activity session start again |
-| Completed | Native capture and the service stop, and native active-session state is cleared | All native updates/sessions stop, and native active-session state is cleared |
-
-Putting an active app in the background or locking the screen is not a pause.
-With Always + Precise authorization and `UIBackgroundModes/location`, the
-active iOS manager continues collecting and journals fixes even if Flutter is
-temporarily suspended. The native manager is process-scoped, so rebuilding a
-Flutter engine or scene does not label the route interrupted.
-
-On Android, active tracking holds a short-scoped partial wake lock for the
-duration of native capture and releases it on Pause, End day, Complete, service
-failure, interruption, or service destruction. Motion fusion prefers wake-up
-step, significant-motion, accelerometer, gyro, and rotation-vector sensors when
-the device provides them, which helps screen-off and pocketed routes keep fresh
-motion evidence. The wake lock does not improve satellite visibility; users may
-still need to disable aggressive OEM battery restrictions for long precise
-routes.
-
-User force-quit is different from minimizing. iOS stops standard continuous
-location updates when the user swipes the app away, and an application cannot
-override that decision. After a later launch, the plugin reports the route as
-interrupted and requires an explicit resume; it never silently marks that route
-complete. See Apple's [`startUpdatingLocation()`
-documentation](https://developer.apple.com/documentation/corelocation/cllocationmanager/startupdatinglocation())
-and [`CLBackgroundActivitySession`](https://developer.apple.com/documentation/corelocation/clbackgroundactivitysession-3mzv3).
-
-For applications that accept reduced, OS-controlled sampling in exchange for
-best-effort process relaunch, opt into the distinct significant-change mode:
+Open **one** application-scoped controller for the signed-in owner. Render
+every lifecycle button from `sessionStream`, never from local widget flags.
 
 ```dart
-const config = TrackingConfig(
-  iosTerminationRecoveryMode:
-      IosTerminationRecoveryMode.significantChange,
+const owner = TrackingOwner(
+  userId: 'signed-in-user',
+  organizationId: 'workspace-id',
 );
-```
 
-This mode is not equivalent to continuous GPS. On a relaunch it preserves the
-same track identity, reports `recoveredFromTermination`, and labels the
-possible missing interval instead of inventing points. The default
-`IosTerminationRecoveryMode.interrupted` keeps continuous tracking semantics
-and requires manual Resume after termination. User force-quit remains
-non-recoverable in both modes until the user opens the app. A host that creates
-its Flutter engine lazily can call
-`FlutterBackgroundLocationPlugin.prepareTerminationRecovery()` from its iOS
-Core Location launch path before attaching UI; recovered capture also restarts
-motion fusion so activity evidence does not remain stale after relaunch.
-Physical qualification is still required for every supported device/OS bucket
-before making a recovery claim.
-
-## Detailed integration guide
-
-Prefer one awaited, owner-bound `TrackingController` for the application
-lifetime. The legacy constructor remains available for existing integrations.
-
-```dart
-import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
-
-late final TrackingController tracking;
-
-Future<void> initializeTracking() async {
-  tracking = await TrackingClient.open(
-    owner: const TrackingOwner(
-      userId: 'user-42',
-      organizationId: 'organization-7',
+final tracking = await TrackingClient.openWithTrips(
+  owner: owner,
+  configuration: const TrackingConfiguration(
+    defaultTrackingConfig: TrackingConfig(
+      accuracy: TrackingAccuracy.high,
+      captureIntent: RouteCaptureIntent.adaptive,
     ),
-  );
-
-  tracking.statusStream.listen((status) {
-    print('state=${status.lifecycle.name} track=${status.trackId}');
-  });
-
-  tracking.activityStream.listen((activity) {
-    print(
-      'activity=${activity.type.value} confidence=${activity.confidence}',
-    );
-  });
-
-  tracking.pointStream.listen((point) {
-    print(
-      'point=${point.sequence} accepted=${point.accepted} '
-      'mock=${point.mockAssessment.name}',
-    );
-  });
-}
-```
-
-Use the replaying session snapshot to drive lifecycle buttons:
-
-```dart
-final sessionSubscription = tracking.sessionStream.listen((session) {
-  startButton.enabled = session.allowedActions.canStartNew;
-  pauseButton.enabled = session.allowedActions.canPause;
-  resumeButton.enabled = session.allowedActions.canResume;
-  completeButton.enabled = session.allowedActions.canComplete;
-});
-```
-
-Check readiness without prompting, then request only the next permission step
-from a user-initiated action. Return without starting until the normalized state
-confirms Always/background access:
-
-```dart
-Future<bool> preparePermissions() async {
-  final readiness = await tracking.checkReadiness();
-  if (readiness.canStart) return true;
-
-  switch (readiness.nextAction) {
-    case TrackingReadinessAction.requestForegroundLocation:
-    case TrackingReadinessAction.requestBackgroundLocation:
-    case TrackingReadinessAction.requestNotification:
-    case TrackingReadinessAction.requestActivityRecognition:
-      await tracking.requestNextPermission();
-      return false;
-    case TrackingReadinessAction.explainBackgroundLocation:
-      // Show your explanation first. On the user's next affirmative gesture:
-      await tracking.acknowledgeReadinessEducation(
-        'background_location_explanation_required',
-      );
-      return false;
-    case TrackingReadinessAction.openAppSettings:
-    case TrackingReadinessAction.enableLocationServices:
-    case TrackingReadinessAction.enablePreciseLocation:
-      await tracking.openSettings(TrackingSettingsDestination.application);
-      return false;
-    case TrackingReadinessAction.none:
-      return true;
-    case TrackingReadinessAction.unsupported:
-    case TrackingReadinessAction.unknown:
-      throw StateError('Background tracking is unavailable on this device.');
-  }
-}
-```
-
-The older `permissions(request: true)` helper remains available for existing
-apps, but new integrations should prefer `checkReadiness()` plus
-`requestNextPermission()` so permission prompts stay staged and user-driven.
-
-For device setup screens and diagnostics:
-
-```dart
-final diagnostics = tracking as TrackingDiagnosticsController;
-final battery = await diagnostics.batteryOptimizationState();
-if (battery.supported && !battery.isIgnoringBatteryOptimizations) {
-  await tracking.openSettings(
-    TrackingSettingsDestination.batteryOptimization,
-  );
-}
-
-final health = diagnostics.currentHealth; // no coordinates included
-final doctor = await diagnostics.runSetupDoctor();
-final supportReport = await diagnostics.createSupportReport();
-// supportReport.toRedactedMap() excludes coordinates, route/owner IDs,
-// filenames, command tokens, and raw native exception payloads.
-```
-
-If a readiness action needs the host to show its own explanation, do not open
-Settings or request another permission automatically. Let the user tap the next
-button.
-
-Read recorded-route summaries without loading every point:
-
-```dart
-final firstPage = await tracking.listTrackPage(
-  TrackQuery(
-    statuses: const <TrackStatus>{TrackStatus.completed},
-    limit: 25,
   ),
 );
 
-for (final route in firstPage.items) {
-  print('${route.routeId ?? route.id}: ${route.acceptedPointCount} points');
-}
-```
-
-If a previous signed-in owner left a live native capture, the owner-bound
-session exposes `owner_scope_conflict` and an opaque one-use recovery token,
-never the foreign route or owner identity. After an explicit warning/confirmation
-gesture, preserve that capture as paused before allowing the new owner to start:
-
-```dart
-final blocked = tracking.currentSession;
-final token = blocked.blockerRecoveryToken;
-if (blocked.blockerCode == 'owner_scope_conflict' && token != null) {
-  final hostPersistedOperationId =
-      'owner-conflict-${DateTime.now().microsecondsSinceEpoch}';
-  // Persist this ID until the confirmation attempt reaches a terminal result.
-  await tracking.resolveOwnerConflict(
-    OwnerConflictResolutionRequest(
-      conflictToken: token,
-      operationId: hostPersistedOperationId,
-      confirmed: true,
-    ),
-  );
-}
-```
-
-`hostPersistedOperationId` must be a stable idempotency key generated and kept
-by the host for that confirmation attempt.
-
-Start, pause, resume, and complete a track:
-
-```dart
-String? activeTrackId;
-
-Future<void> startTrip() async {
-  if (!await preparePermissions()) return;
-
-  try {
-    final result = await tracking.startOrRecoverTrack(
-      const TrackStartRequest(
-        owner: TrackingOwner(
-          userId: 'user-42',
-          organizationId: 'organization-7',
-        ),
-        routeId: 'Morning delivery route',
-        config: TrackingConfig(
-          accuracy: TrackingAccuracy.high,
-          movingInterval: Duration(seconds: 15),
-          movingDistanceFilterMeters: 15,
-          stationaryInterval: Duration(minutes: 2),
-          stationaryDistanceFilterMeters: 75,
-          mockLocationPolicy: MockLocationPolicy.flag,
-          androidNotificationTitle: 'Trip recording is active',
-          androidNotificationText: 'Tap to return to the app',
-        ),
-      ),
-    );
-    activeTrackId = result.trackId;
-  } on TrackingNotReadyException {
-    // Re-run preparePermissions() from the next user gesture.
-    rethrow;
-  } on TrackingConflictException {
-    // A same-owner route is already active/resumable. Show Resume/Complete.
-    rethrow;
-  } on TrackingOwnershipException {
-    // Another account/owner has unresolved local tracking state.
-    rethrow;
-  }
-}
-
-Future<void> pauseTrip() async {
-  final id = activeTrackId;
-  if (id == null) return;
-  await tracking.pauseTrack(
-    trackId: id,
-    reason: 'user_paused',
-  );
-}
-
-Future<void> resumeTrip() async {
-  final id = activeTrackId;
-  if (id == null) return;
-  await tracking.resumeTrack(id);
-}
-
-Future<String?> completeTrip() async {
-  final id = activeTrackId;
-  if (id == null) return null;
-  await tracking.completeTrack(
-    trackId: id,
-    reason: 'user_completed',
-  );
-  activeTrackId = null;
-  return id;
-}
-```
-
-`routeId` is optional application metadata. When supplied, the client trims
-the value, replaces every whitespace run with `_`, and appends a UTC timestamp
-with microsecond precision. For example, `Morning delivery route` becomes a
-value such as `Morning_delivery_route_20260819_091530_123456`. The stored value
-is available as `Track.routeId`, appears in route exports, and is used in the
-default export filename. The database's internal `Track.id` remains an
-independent lifecycle key.
-
-Commands are serialized and scoped to a track ID. For a command that may be
-retried, supply one stable, unique `operationId` for that logical pause or
-completion. Do not reuse it for a later, separate pause. A completed track
-cannot be resumed.
-
-Use `startOrRecoverTrack()` when a Start button should safely recover the same
-owner's active, paused, or interrupted route. Use `startNewTrack()` when the
-user explicitly wants a fresh route; it throws `active_track_conflict` if
-anything resumable already exists. The legacy `startTrack()` wrapper remains
-available for older apps and keeps its start-or-recover behavior.
-
-## Recommended UI state
-
-Drive controls from `TrackerStatus.lifecycle` rather than maintaining a second
-independent native-state flag.
-
-| Lifecycle | Enable |
-|---|---|
-| `idle` | Start |
-| `starting` | No repeated command |
-| `tracking` | Pause, Complete |
-| `paused` | Resume, Complete |
-| `interrupted` or `failed` | Resume, Complete |
-| `stopping` | No repeated command |
-
-`watchCurrentTrack()` emits the stored active, paused, or interrupted track and
-is useful for restoring UI state after an app restart:
-
-```dart
-final currentTrackSubscription = tracking.watchCurrentTrack().listen((track) {
-  activeTrackId = track?.id;
+tracking.sessionStream.listen((session) {
+  final actions = session.allowedActions;
+  // Show Start / Pause / Resume / Complete from
+  // actions.canStartNew, canPause, canResume, canComplete.
 });
+
+// From the Start button:
+Future<String?> start() async {
+  final readiness = await tracking.checkReadiness();
+  if (!readiness.canStart) {
+    // Explain readiness.nextAction, then on the user's next tap:
+    await tracking.requestNextPermission(); // or openSettings(...)
+    return null;
+  }
+  final result = await tracking.startTrip(
+    const TripStartRequest(routeId: 'Field visit'),
+  );
+  return result.trip.id;
+}
+
+// Pause and resume within a day:
+await tracking.pauseCurrentTrack();
+await tracking.resumeCurrentTrack();
+
+// End the day (stops capture), continue tomorrow, or finish the journey:
+await tracking.endCurrentDay();
+await tracking.continueTrip(tripId);
+await tracking.completeTrip(tripId);
+
+// At sign-out, after Pause or Complete:
+await tracking.dispose();
 ```
 
-## Reading tracks and route geometry
+Use `TrackingClient.open()` instead when routes are single-day only. It gives
+the same Track controls without Trips: `startNewTrack`, `pauseTrack`,
+`resumeTrack` and `completeTrack`.
 
-The package stores points because timestamps, accuracy, activity, mock
-evidence, validation results, and upload state are point-level facts. It exposes
-segments so the application can render the stored route as line geometry.
+| API | Use |
+|---|---|
+| `TrackingClient.open()` / `openWithTrips()` | Initialize and restore one owner-scoped controller |
+| `TrackingSessionSnapshot.allowedActions` | Which lifecycle buttons to enable |
+| `checkReadiness()` / `requestNextPermission()` / `openSettings()` | Staged, user-driven permission setup |
+| `TrackingConfig` | Accuracy preset, capture intent, sampling and stop settings |
+| `listTrackPage()` / `listTripPage()` | Paged, owner-scoped route history |
+| `loadTrackBundle()` / `loadTripBundle()` | Points, segments, stops, gaps and summary of one route |
+| `assembleTripRouteGeometry()` | Map-ready parts, the same topology the exports use |
+| `exportTrack()` / `exportTrip()` | GeoJSON, KML and GPX files |
+| `deleteTrack()` / `deleteTrip()` | Remove completed routes |
+
+Pass a stable `operationId` to lifecycle commands you may retry; the package
+makes them idempotent and recovers them after a restart. Step-by-step
+guidance: [Integration guide](https://github.com/amias-samir/flutter_background_location/blob/main/doc/integration_guide.md) ·
+[Multi-day Trips](https://github.com/amias-samir/flutter_background_location/blob/main/doc/multi_day_trips.md).
+
+## Route details
+
+Each route's figures are kept up to date in the database as it records, so a
+host shows them directly:
 
 ```dart
-final page = await tracking.listTrackPage(TrackQuery(limit: 25));
-final bundle = await tracking.loadTrackBundle(page.items.first.id);
-
-final routeSegments = bundle.segments
-    .map(
-      (segment) => segment.points
-          .where((point) => point.accepted)
-          .map((point) => (point.latitude, point.longitude))
-          .toList(growable: false),
-    )
-    .where((coordinates) => coordinates.isNotEmpty)
-    .toList(growable: false);
+final summary =
+    await (tracking as TrackingSummaryController).routeSummary(trackId);
+print('${summary.displayDistanceMeters} m · moving ${summary.moving} · '
+    '${summary.stopCount} stops (${summary.stopped}) · '
+    '${summary.stepCount ?? '–'} steps');
 ```
-
-You can draw each item in `routeSegments` as a separate polyline. This avoids
-connecting the location before a pause to the location after a resume.
-
-Map rendering is deliberately not a package dependency. The example app shows
-how to display recorded tracks with `maplibre_gl` and the OpenFreeMap Liberty
-street style; applications can use MapLibre, Google Maps, Apple MapKit, or any
-other renderer.
-
-### Route details
-
-The route database keeps each route's details up to date in the transaction
-that changes them, so a host shows or uploads them without computing
-anything. The owner-scoped controllers implement `TrackingSummaryController`:
-
-```dart
-final details = tracking as TrackingSummaryController;
-final summary = await details.routeSummary(trackId);
-print('${summary.displayDistanceMeters} m, moving ${summary.moving}, '
-    'stopped ${summary.stopped} at ${summary.stopCount} stops, '
-    '${summary.stepCount ?? 'no'} steps');
-final trip = await details.tripSummary(tripId);
-```
-
-`RouteSummary` carries the measured distance, accepted and rejected point
-counts, segments, first and newest fix times, and these values:
 
 | Value | Meaning |
 |---|---|
-| `recording` | Time inside the route's segments, pauses excluded; while recording, up to the newest fix |
-| `stopped`, `stopCount` | Time at the stored stops, and their number |
-| `moving` | `recording` less `stopped` |
-| `paused`, `elapsed` | Time paused, and start to end with pauses |
-| `maxSpeedMetersPerSecond` | Fastest Doppler speed of an accepted fix with speed accuracy of 2 m/s or better, or unreported |
-| `averageMovingSpeedMetersPerSecond` | Distance over moving time |
-| `stepCount` | Steps counted while the route recorded; null when not counted |
-| `stepCountStoppedAt` | When the step counter stopped counting while the person walked: the count is incomplete from then, never estimated; null when complete |
-| `correctedDistanceMeters` | The distance under the current rules, for a route recorded under older ones and reviewed (see below); null otherwise |
-| `displayDistanceMeters` | The distance to show: `correctedDistanceMeters` when present, otherwise `distanceMeters` |
-| `qualityEventCount` | Rejected-fix runs that left a visible hole in the route; runs made only of stop evidence are counted in `stopEvidenceRunCount` |
-| `visibleGapCount` | Holes in the route: lifecycle breaks, or gaps of at least 60 s or 150 m between accepted fixes |
-| `cleanedDistanceMeters` | Length of the current cleaned view, once one was derived |
+| `displayDistanceMeters` | The distance to show (corrected for routes recorded under older rules) |
+| `moving`, `stopped`, `paused`, `elapsed` | Time split; pauses are excluded from `recording` |
+| `stopCount` | Stops: stays of at least `minimumStopDuration` (5 minutes by default) at one place |
+| `stepCount`, `stepCountStoppedAt` | Steps counted on the route; never estimated, and marked when the counter stopped |
+| `maxSpeedMetersPerSecond`, `averageMovingSpeedMetersPerSecond` | Doppler maximum and moving average |
+| `qualityEventCount`, `visibleGapCount` | Holes in the route worth a look (full-detail routes) |
 
-A gap across a stop or pause is never a visible gap: the device stayed where
-it was. Each stored gap keeps this decision, and
-`TrackingContinuityGap.isVisible` applies the same rule, so a map that marks
-`isVisible` gaps agrees with the count. `TripSummary` holds the same totals
-over a Trip's legs. `TrackBundle.summary` and `TripBundle.summary` carry them
-too.
+- **Stops** are stored with their place, radius and times (`TrackStop`), shown
+  in `TrackBundle.stops` and exported by default. Fixes that wander at a stop
+  are kept as rejected evidence, so they add no distance and draw no scribble.
+- **Steps** come from the phone's step counter (Android) or pedometer (iOS) on
+  every route, using the activity permission the package already requests. It
+  never prompts for them. Steps are fitness data: they stay out of upload
+  batches' `toMap()`.
+- **Distance** counts only measured edges. Connectors drawn across a pause or
+  overnight are labeled inferred and never count.
 
-**Routes recorded by an older version.** Two phones recording the same
-route should report the same stops, distance, quality events and visible
-gaps; the rules behind quality policy 5 and continuity policy 4 make them do
-so. A completed route recorded under older rules is decided again under the
-current ones, in the background after the client opens and when it is first
-read, and the review is stored beside what the route recorded: its stops,
-gaps, quality runs and step decisions come from the review, and
-`correctedDistanceMeters` reports its distance. The route's points, their
-acceptance, `distanceMeters` (the measured distance) and its uploads never
-change. `listDerivedGeometry` lists the reviewed route as a run with the
-algorithm `DerivedGeometryAlgorithm.routeQualityReview`; loading it shows
-exactly the fixes the review keeps, and deleting it restores the recorded
-stops, gaps and totals.
+How stops, quality decisions, turn capture, steps and reviewed routes work:
+[Route details](https://github.com/amias-samir/flutter_background_location/blob/main/doc/route_details.md).
 
-`currentCleanedGeometry(trackId)` returns the route's current stop-aware
-cleaned view: the newest run when it covers the route's newest point under the
-current cleaning version, otherwise a new one. It deletes older runs and
-stores the cleaned distance in the summary.
-
-#### Steps
-
-While a route records, Android counts steps with the phone's step counter and
-iOS with the motion coprocessor's pedometer, in every motion fusion mode.
-Steps need the activity permission the package already requests:
-`ACTIVITY_RECOGNITION` on Android 10 and later, and Motion & Fitness on iOS.
-The package never prompts for steps on its own; without the permission, or
-on a phone without a step counter, `stepCount` stays null. A permission
-granted while a route records starts the count within a minute. Each location
-fix carries the count since its capture session started (`stepCount`), each
-point keeps it, and the route counts each session once, at its highest count,
-so a restart or recovery never counts steps twice. Steps taken after the
-newest fix count when the route pauses or completes: the native side reads a
-final count on every way capture stops. The native capability `step_count`
-reports a step counter.
-
-Some phones stop delivering step counts while the person walks. Android
-prefers the wake-up step counter and repairs a counter that falls silent
-while other evidence shows walking (it flushes, re-registers and switches to
-the other counter); iOS reads the pedometer before pausing and stopping.
-`stepCoverage` on fixes and status reports the counter's state (capability
-`step_count_coverage`). A count that stopped and was not recovered keeps the
-steps counted so far and sets `stepCountStoppedAt`, so a UI can show
-"≥ 1,234 steps · counter stopped at 09:22"; nothing is estimated. Changes of
-the counter's state are recorded as count-free health events, and
-`StepCounterDiagnosticsController.stepCounterDiagnostics()` returns the
-counter's count-free event history for support (capability
-`step_counter_diagnostics`).
-
-Steps are fitness data. They are kept in the route database and its exports.
-Upload batches leave them out of `TrackUploadBatch.toMap()`, but the batch's
-`TrackPoint`s carry `stepCount`. A host that sends steps to a server must
-declare fitness data in its own privacy disclosures, such as its App Store
-privacy details and Google Play data safety form.
-
-### Optional derived geometry
-
-Raw point coordinates are immutable. To create a separately versioned,
-post-capture smoothed route, use the additive geometry capability:
+## Export
 
 ```dart
-final geometry = tracking as TrackingGeometryController;
-final run = await geometry.deriveGeometry(
-  completedTrackId,
-  request: const DerivedGeometryRequest(
-    name: 'display_smoothing',
-    algorithmVersion: '1',
-    smoothingFactor: 0.35,
-  ),
-);
-
-final mapBundle = await geometry.loadTrackGeometry(
-  completedTrackId,
-  geometry: TrackGeometrySelection.derived(run.id),
+final result = await tracking.exportTrip(
+  tripId: tripId,
+  format: TrackExportFormat.gpx, // or geoJson, kml
+  fileName: 'field visit', // optional; defaults to the route identifier
 );
 ```
 
-For a cleaned map, use the stop-aware algorithm. Each stay of the configured
-minimum stop duration or
-more collapses to one point, and spikes elsewhere are projected away. It reads
-held fixes as stop evidence and also cleans routes recorded before the stop
-hold existed. Runs record the version they applied; derive again when
-`run.algorithmVersion` differs from
-`DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion`. Pass
-`TrackGeometrySelection.derived(run.id)` as `TrackExportOptions.geometry` to
-export a track's cleaned view:
-
-```dart
-final cleaned = await geometry.deriveGeometry(
-  trackId,
-  request: const DerivedGeometryRequest(
-    name: 'cleaned',
-    algorithm: DerivedGeometryAlgorithm.stopAwareRouteCleaning,
-  ),
-);
-final gpx = await tracking.exportTrack(
-  trackId: trackId,
-  format: TrackExportFormat.gpx,
-  options: TrackExportOptions(
-    geometry: TrackGeometrySelection.derived(cleaned.id),
-  ),
-);
-```
-
-Each run stores its algorithm, version, configuration, source snapshot,
-optional map-data provenance, and derivation time. Smoothing restarts at every
-pause/resume segment. Deleting a run deletes only derived rows; loading raw
-geometry after deletion returns the original route unchanged. Hosts can add a
-separate map-matching integration by implementing the repository capability;
-no proprietary map service is required by this package.
-
-## Exporting a completed route
-
-For long or densely sampled routes, prefer the bounded V2 exporter. Reuse the
-same initialized repository supplied to `TrackingClient`; do not open a second
-database owner solely for export.
-
-```dart
-final exporter = TrackExportServiceV2(
-  repository: repository,
-  owner: const TrackingOwner(
-    userId: 'signed-in-user',
-    organizationId: 'organization',
-  ),
-);
-final operation = await exporter.exportTrackV2(
-  TrackExportRequest(
-    trackId: completedTrackId,
-    format: TrackExportFormat.gpx,
-    fileName: 'warehouse inspection',
-  ),
-);
-final progress = operation.progress.listen((value) {
-  print('${value.pointsWritten} points, ${value.bytesWritten} bytes');
-});
-try {
-  final exported = await operation.result;
-  print(exported.destination.contentUri ??
-      exported.destination.localFilePath);
-
-  final shareFile = await exporter.prepareExportForSharing(exported);
-  try {
-    // Pass shareFile.path to the host application's sharing package.
-  } finally {
-    await shareFile.delete();
-  }
-} finally {
-  await progress.cancel();
-}
-```
-
-To export a completed derived run, set
-`TrackExportOptions(geometry: TrackGeometrySelection.derived(run.id))`. The V2
-GeoJSON/KML/GPX output labels its source as `derived:<run-id>`. Raw remains the
-default and is labeled `raw`. The controllers' `exportTrack` accepts the same
-option. Derived exports intentionally reject `includeRejectedPoints`, because
-rejected points have no derived coordinates.
-
-On Android 10+, `contentUri` is the reopenable MediaStore handle and
-`displayPath` is informational only. On iOS and pre-scoped-storage Android,
-`localFilePath` is present instead. Exactly one of those two access handles is
-set. The package adds no sharing dependency.
-
-The compatibility exporter below materializes a complete route and returns its
-legacy required `path`. Keep it for existing integrations and bounded routes.
-
-Without a filename, track and trip exports use their route identifier. An
-explicit `fileName` overrides it; the correct extension is added or repaired
-automatically, and destinations may add a suffix to avoid collisions.
-
-```dart
-Future<TrackExportResult> exportCompletedTrip({
-  required String trackId,
-  required String userEnteredName,
-  required TrackExportFormat format,
-}) {
-  return tracking.exportTrack(
-    trackId: trackId,
-    format: format,
-    fileName: userEnteredName,
-  );
-}
-
-final completedTrackId = await completeTrip();
-if (completedTrackId == null) return;
-
-final result = await exportCompletedTrip(
-  trackId: completedTrackId,
-  userEnteredName: 'warehouse-inspection-route',
-  format: TrackExportFormat.geoJson,
-);
-
-print(result.path);
-print('${result.pointCount} points in ${result.segmentCount} segments');
-```
-
-The default destination is:
-
-- Android: `Download/flutter_background_location`;
-- iOS: the app's `Documents/flutter_background_location` directory, or the
-  platform-provided downloads directory when available.
-
-Android 10 and later use MediaStore and do not need broad storage permission.
-For Android 9 and earlier, public Downloads access follows legacy Android
-storage rules. The plugin manifest declares `WRITE_EXTERNAL_STORAGE` only up to
-API 28, and the default writer returns `export_storage_permission_required`
-unless the host has already requested that permission from the user's explicit
-Export action. If you do not want to request legacy storage permission, inject a
-custom `ExportFileWriter` for those releases.
-
-If a file already exists, the package adds `_1`, `_2`, and so on. Export files
-are plaintext and may reveal sensitive routes. Delete temporary exports after
-sharing:
-
-```dart
-await tracking.deleteExport(result);
-```
-
-Completed tracks export by default. An explicit point-in-time snapshot of an
-active or paused track requires opt-in:
-
-```dart
-const options = TrackExportOptions(
-  allowIncompleteTrackSnapshot: true,
-  includeGeoJsonPointFeatures: true,
-);
-```
-
-### Export geometry
-
-- `TrackExportOptions.geometryContinuity` selects raw evidence, proven
-  automatic-gap merging, or explicit connect-all presentation.
-- GeoJSON uses a `LineString` for one presentation part and a
-  `MultiLineString` for multiple parts.
-- GeoJSON segments with fewer than two accepted coordinates are omitted from
-  line geometry. Optional point features can preserve them for diagnostics.
-- KML writes a line per multi-point segment and a point for a one-fix segment.
-  Heights are written as recorded, with 0 for unknown and no `altitudeMode`,
-  so KML clients clamp the route to the ground. Android heights are above the
-  WGS 84 ellipsoid and iOS heights above mean sea level.
-- GPX writes one `<trkseg>` per stored segment, including one-fix segments.
-- Rejected points can be included as diagnostics but never enter route
-  geometry when their coordinates are invalid or non-finite.
-- Recorded stops are exported by default: a GeoJSON Point feature with
-  `featureType: stop`, `startedAt`, `endedAt`, `durationSeconds`, `kind`,
-  `evidenceCount` and `radiusMeters`; a GPX `<wpt>` of type `stop`, before the
-  track, with those values as `fbl:` extensions; and a KML Placemark with a
-  `TimeSpan`. Set `TrackExportOptions.includeStops` to false to leave them
-  out. Routes without stop records export as before.
-- The route's summary is exported with it: GeoJSON route properties, GPX
-  `fbl:` metadata extensions and KML `ExtendedData` carry `recordingSeconds`,
-  `movingSeconds`, `stoppedSeconds`, `pausedSeconds`, `stopCount`,
-  `qualityEventCount` and `visibleGapCount`, plus `maxSpeedMetersPerSecond`,
-  `averageMovingSpeedMetersPerSecond`, `stepCount` and
-  `cleanedDistanceMeters` when known.
-- A derived-geometry export reports the derived line's distance and
-  `geometrySource: derived:<run id>`.
-- `TrackExportOptions.includeDiagnosticProperties` adds coordinate-free
-  per-fix evidence to GeoJSON point features and GPX `fbl:` extensions:
-  vertical accuracy, Doppler speed and heading with their accuracies,
-  provider, native sampling profile, activity source, raw type, evidence state
-  and age, receipt delay, and quality policy version. It is off by default.
-
-### Converting route file formats
-
-`RouteFormatConverter` converts existing route content directly between
-GeoJSON, GPX, and KML. It works in memory, so the host application remains in
-control of file selection and storage.
-
-```dart
-const converter = RouteFormatConverter();
-
-final gpx = converter.geoJsonToGpx(geoJsonContents);
-final kml = converter.gpxToKml(gpxContents);
-final geoJson = converter.kmlToGeoJson(kmlContents);
-```
-
-For a format chosen at runtime, use `convert`:
-
-```dart
-final converted = converter.convert(
-  contents: sourceContents,
-  sourceFormat: TrackExportFormat.gpx,
-  targetFormat: TrackExportFormat.geoJson,
-);
-```
-
-All six directions are supported. The converter preserves route parts,
-elevation, route names, and coordinate timestamps when those values are
-available. Format-specific metadata that has no equivalent in the destination
-may not be retained. Invalid input or input without usable coordinates throws a
-`FormatException`.
-
-### Abort, delete, and erase are different operations
-
-`Complete` retains a successful route. The additive `TrackingPrivacyService`
-keeps destructive/exceptional actions explicit and owner-scoped:
-
-| Action | Route record | Native journal | Upload outbox | Managed exports |
-|---|---|---|---|---|
-| Abort | Retained as cancelled audit route | Selected track cleared | Removed | Retained |
-| Delete | Terminal route removed | Selected track cleared | Removed | Explicit choice |
-| Erase | Selected route removed | Selected track cleared | Removed | Removed when managed |
-
-Construct it with the same initialized repository, tracker adapter, owner, and
-V2 export service used by the application-scoped tracking owner:
-
-```dart
-final privacy = TrackingPrivacyService(
-  repository: repository,
-  tracker: trackerAdapter,
-  owner: currentOwner,
-  managedExports: exporter,
-);
-
-await privacy.abortCurrentTrack(
-  const AbortTrackRequest(reason: 'operator_cancelled'),
-);
-
-await privacy.deleteRecordedTrack(
-  DeleteTrackRequest(
-    trackId: selectedTrack.id,
-    deleteManagedExports: true,
-    confirmed: true, // Set only after explicit host UI confirmation.
-  ),
-);
-```
-
-Retry a command with the same optional `operationId` for idempotent recovery.
-Erase is logical deletion across package-managed storage; SQLite and flash
-hardware do not provide a physical secure-erasure guarantee, and the package
-cannot remove a route file copied by another application or user.
-
-## Retaining track history
-
-The default `keepAll` policy retains every recorded route so it remains
-available in track history:
-
-```dart
-const TrackingConfiguration(
-  recordRetentionPolicy: TrackRecordRetentionPolicy.keepAll,
-);
-```
-
-Choose `keepLatestOnly` when the product should discard older routes as soon as
-a new route starts:
-
-```dart
-const TrackingConfiguration(
-  recordRetentionPolicy: TrackRecordRetentionPolicy.keepLatestOnly,
-);
-```
-
-Retention is selected when the client is created. Do not dispose and recreate
-the client while native tracking is active.
-
-### Release builds record a clean route
-
-Release and profile builds keep only the clean route: the accepted path, its
-stops, distance, duration and steps. Debug builds keep everything recorded
-for investigating a field test. You don't need to set anything:
-
-```dart
-const TrackingConfiguration(); // recordingDetail: RouteRecordingDetail.automatic
-```
-
-Every mode collects and decides the same fixes, so these are identical in
-every mode:
-
-- capture and sampling;
-- the accepted points and the held or rejected fixes kept as hidden evidence
-  on the device;
-- measured and corrected distance, stops and steps;
-- uploads.
-
-In clean detail (`RouteRecordingDetail.clean`) a route stores:
-
-- **Gaps:** only the gap rows that mark a segment boundary, none of them
-  visible. `RouteSummary.visibleGapCount` is 0 and the map draws no gap
-  markers.
-- **Quality runs:** none. `RouteSummary.qualityEventCount` and
-  `stopEvidenceRunCount` are 0.
-- **Motion evidence and diagnostic health events:** none. Events that prove a
-  lifecycle boundary, such as an interruption, are kept.
-- **Journaled activity readings:** cleared once the route is completed or
-  failed. Only a restart of a live route decides from them.
-
-Clean detail also changes what the package reports:
-
-- **Exports** of a clean route leave out `qualityEventCount`,
-  `visibleGapCount`, `gapCount`, `rejectedPointCount` and GPX `fbl:gap`
-  elements. Stops are still exported.
-- **Ignored export options:** a clean client ignores `includeRejectedPoints`
-  and `includeDiagnosticProperties`.
-- **Native diagnostics:** native code keeps no step-counter diagnostics, so
-  `stepCounterDiagnostics()` returns an empty list. Raw platform error text is
-  replaced by a fixed message.
-
-The setup doctor, health snapshots, battery checks and the native journal
-integrity check work in every mode.
-
-Each route keeps the detail it started with (`Track.recordingDetail`). A route
-recorded by a debug build stays full after you install a release build, and
-the reverse holds too. Routes recorded before this setting existed are full.
-To force a mode, for example to collect full diagnostics in a release field
-test, set it explicitly. Read the resolved mode with
-`TrackingClient.recordsDiagnostics`, or with
-`TrackingClient.resolveRecordingDetail(configuration.recordingDetail)`, to
-show debug views on the same switch.
-
-```dart
-const TrackingConfiguration(recordingDetail: RouteRecordingDetail.full);
-```
-
-### Deleting a selected recorded route
-
-Delete an individual completed or failed route with:
-
-```dart
-await tracking.deleteTrack(trackId);
-```
-
-The SQLite foreign-key relationships cascade the deletion to the route's
-segments, points, health events, lifecycle operations, pending commands, and
-upload-outbox rows. Active, paused, interrupted, starting, and stopping tracks
-are rejected because they may still be running or resumable. This operation is
-permanent, so export or upload the route first when another copy is required.
-
-## Tracking configuration
-
-Use the `accuracy` preset for a complete battery/precision profile. `high` is
-the default and now favors dense, navigation-grade route capture:
-
-```dart
-const balanced = TrackingConfig(accuracy: TrackingAccuracy.medium);
-
-const customized = TrackingConfig(
-  accuracy: TrackingAccuracy.low,
-  locationAccuracy: TrackingAccuracy.high,
-  movingInterval: Duration(seconds: 20),
-  movingDistanceFilterMeters: 10,
-);
-```
-
-Individual values take precedence over the preset. In `customized`, the native
-provider uses high accuracy and the moving interval/filter use the supplied
-values, while stationary values still come from the low profile.
-
-| Preset | Moving interval | Moving filter | Native request | Stationary interval | Stationary filter | Accepted accuracy |
-|---|---:|---:|---|---:|---:|---:|
-| `low` | 20 seconds | 20 m | Balanced / nearest 10 m | 2 minutes | 75 m | 100 m |
-| `medium` | 10 seconds | 10 m | High / best | 1 minute | 50 m | 60 m |
-| `high` (default) | 5 seconds | 5 m | High / navigation | 20 seconds | 20 m | 20 m |
-| `precised` | 3 seconds | 3 m | High / navigation | 15 seconds | 10 m | 15 m |
-
-Android and iOS translate the native request to the closest platform accuracy;
-the table shows Android/iOS terminology. Presets are starting points, not
-callback guarantees or universal recommendations. The accepted-accuracy column
-is the preset's `maximumAcceptedAccuracyMeters`; it is available directly as,
-for example, `TrackingAccuracy.high.maximumAcceptedAccuracyMeters`.
-
-| Option | Default | Purpose |
-|---|---:|---|
-| `accuracy` | `high` | Supplies all preset sampling and accepted-accuracy values |
-| `locationAccuracy` | `precised` for the default `high` preset | Overrides only Android/iOS native request accuracy |
-| `movingInterval` | 5 seconds | Requested interval while moving |
-| `movingDistanceFilterMeters` | 5 m | Minimum moving displacement |
-| `stationaryInterval` | 20 seconds | Requested interval while stationary |
-| `stationaryDistanceFilterMeters` | 20 m | Minimum stationary displacement |
-| `maximumAcceptedAccuracyMeters` | 20 m | Reject fixes with poorer reported accuracy |
-| `turnCaptureDegrees` | 45° (High, Precised), off (Medium, Low) | Record a fix between the regular ones when a moving route turns this far |
-| `maximumPlausibleSpeedMetersPerSecond` | 70 m/s | Flag implausible point-to-point speed |
-| `stationaryConfirmationDuration` | 90 seconds | Still evidence required before low-power mode |
-| `stationaryProbeDisplacementMeters` | 30 m | GPS displacement check for stationary entry/exit |
-| `stationaryConfidenceThreshold` | 75 | Minimum still confidence |
-| `movingConfidenceThreshold` | 60 | Minimum movement confidence |
-| `movingConfirmationCount` | 1 | Movement events required to exit stationary mode |
-| `activityRecognitionInterval` | 5 seconds | Requested native activity update interval |
-| `activityFreshnessThreshold` | 30 seconds | Expire stale activity labels and use the moving fallback |
-| `motionEvidenceFreshness` | 30 seconds | Expire stale fused-motion evidence |
-| `maximumProviderFixAge` | 5 minutes | Reject genuinely stale provider fixes while retaining delayed background batches |
-| `mockLocationPolicy` | `flag` | Allow, flag, or reject detected mock fixes |
-| `largeGapThreshold` | 5 minutes | Flag long gaps between accepted fixes |
-| `batchPointCount` | 25 | Point threshold for an optional uploader |
-| `batchMaxAge` | 2 minutes | Time threshold for an optional uploader |
-| `iosTerminationRecoveryMode` | `interrupted` | Standard/manual recovery or opt-in significant-change relaunch semantics |
-
-Operating systems may batch, delay, coalesce, or skip callbacks. Shortening an
-interval does not guarantee that frequency. `high` and especially `precised`
-can materially increase battery use and should be enabled only when dense route
-geometry is necessary. On Android, the host may offer a user-initiated shortcut
-to battery-optimization settings, but must not imply that exemption is required
-or automatically granted.
-
-## Activity and battery behavior
-
-Native motion APIs report the best available activity class. They do not prove
-that the device owner is a driver, passenger, or rider. Cycling is the closest
-standard two-wheeler signal; a motorcycle or scooter commonly appears as
-`inVehicle`, not `onBicycle`.
-
-The plugin enters the stationary profile only after sustained, confident still
-activity plus low GPS displacement. It returns to moving mode after movement
-evidence or sufficient displacement. If activity permission or reliable motion
-evidence is unavailable, it remains on the moving profile.
-
-Battery results depend on the device, OS version, OEM policy, satellite and
-network conditions, route, screen use, and configuration. Measure route
-fidelity and battery drain together on the same devices your users carry.
-
-### Bounded adaptive policy
-
-Adaptive changes are disabled unless the host constructs a versioned policy.
-The default policy mode is `shadow`: it reports a proposed profile without
-changing native capture. Fidelity bounds cap every interval/filter and the
-engine always preserves the static configuration's
-`maximumAcceptedAccuracyMeters` and `mockLocationPolicy`.
-
-```dart
-final engine = AdaptiveBatteryPolicyEngine(
-  staticConfig: const TrackingConfig(accuracy: TrackingAccuracy.high),
-  policy: const AdaptiveBatteryPolicy(
-    version: 1,
-    mode: AdaptiveBatteryMode.shadow,
-    bounds: AdaptiveFidelityBounds(
-      leastAccurateProfile: TrackingAccuracy.medium,
-      maximumMovingInterval: Duration(seconds: 30),
-      maximumMovingDistanceFilterMeters: 25,
-      maximumStationaryInterval: Duration(minutes: 3),
-      maximumStationaryDistanceFilterMeters: 100,
-    ),
-  ),
-);
-final coordinator = AdaptiveTrackingCoordinator(
-  controller: tracking as TrackingConfigurationController,
-  engine: engine,
-);
-final decision = await coordinator.observe(
-  AdaptiveBatteryObservation(
-    observedAt: DateTime.now(),
-    batteryPercent: batteryPercent,
-    charging: charging,
-    lowPowerMode: lowPowerMode,
-  ),
-);
-print(decision.toRedactedMap());
-```
-
-Move to `AdaptiveBatteryMode.apply` only after shadow traces and physical
-battery/route benchmarks justify it. Applied transitions use immutable runtime
-configuration epochs, minimum residence time, and a maximum transition rate.
-`disableAndRestore()` returns to the static policy through the same atomic
-epoch path.
-
-## Mock-location interpretation
-
-Every point exposes `mockAssessment`:
-
-- `detected`: the operating system marked this exact fix as mocked or
-  simulated;
-- `notDetected`: the signal was available and clear for this fix;
-- `unavailable`: the signal was unavailable for this fix.
-
-Android uses `Location.isMock` or the legacy mock-provider flag. On iOS 15 and
-later, the plugin reads `CLLocation.sourceInformation.isSimulatedBySoftware`.
-
-`notDetected` is evidence, not proof that a coordinate is genuine. Rooted or
-jailbroken devices, external accessories, GNSS/RF spoofing, and other methods
-may evade platform signals. Do not use this value as the sole fraud or safety
-decision.
-
-## Optional upload integration
-
-The plugin does not choose an HTTP client or backend protocol. Supply a
-`TrackUploader` when you want durable ordered batches:
-
-```dart
-final tracking = await TrackingClient.open(
-  owner: TrackingOwner(userId: userId, organizationId: organizationId),
-  uploader: MyTrackUploader(),
-);
-
-class MyTrackUploader implements IdempotentTrackCompletionUploader {
-  @override
-  Future<TrackUploadAcknowledgement> uploadPoints(
-    TrackUploadBatch batch,
-  ) async {
-    // POST batch.toMap() using your authenticated API client.
-    // Make batch.idempotencyKey unique on the server.
-    return TrackUploadAcknowledgement(
-      acceptedThroughSequence: batch.lastSequence,
-    );
-  }
-
-  @override
-  Future<void> completeTrack(Track track) async {
-    await completeTrackIdempotently(
-      track: track,
-      idempotencyKey: track.id,
-    );
-  }
-
-  @override
-  Future<void> completeTrackIdempotently({
-    required Track track,
-    required String idempotencyKey,
-  }) async {
-    // Send an idempotent completion request to your backend.
-  }
-}
-```
-
-Accepted points remain in a SQLite outbox until acknowledged. Retries use
-persisted leases, bounded batches, exponential backoff, jitter, and stable
-idempotency keys. Discovery and draining stay inside the bound owner scope.
-Your server must still enforce idempotency and sequence semantics.
-
-## Runtime configuration updates
-
-An active owner-bound controller also implements
-`TrackingConfigurationController`. Updates are validated, native producers are
-fenced, pending journal events are drained, and a new immutable epoch is
-activated before capture resumes:
-
-```dart
-final configurable = tracking as TrackingConfigurationController;
-final result = await configurable.updateTrackingConfig(
-  const TrackingConfig(accuracy: TrackingAccuracy.medium),
-);
-print('active configuration epoch: ${result.epoch.epochNumber}');
-```
-
-Individual `TrackingConfig` values continue to override only their matching
-preset values. Existing points remain associated with their original epoch.
-
-## Host application tests
-
-Testing utilities are deliberately kept out of the normal runtime import:
-
-```dart
-import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
-import 'package:flutter_background_location_tracker/flutter_background_location_tracker_testing.dart';
-
-final fake = FakeTrackingController(
-  owner: const TrackingOwner(userId: 'test-user', organizationId: 'test-org'),
-);
-```
-
-The testing library also provides `DeterministicTrackingClock`, synthetic
-walking/stationary routes, common permission fixtures,
-`TemporaryTrackRepositoryFixture`, a faultable `FakeTrackerAdapter`, a
-filesystem-free `FakeExportFileWriter`, and interrupted-session seeding. The
-fake supports deterministic ready → Start → point → Pause → Resume → Complete
-widget flows and records calls so tests can prove a readiness check did not
-prompt or start native capture. See `example/test/widget_test.dart`.
-
-### Provider, Riverpod, and Bloc
-
-Keep the controller application-scoped regardless of state framework. The
-package adds no dependency on any of them:
-
-```dart
-// Provider: create once above MaterialApp; do not auto-dispose while active.
-Provider<TrackingController>.value(value: tracking, child: const App());
-
-// Riverpod: expose the already-open owner-bound instance.
-final trackingProvider = Provider<TrackingController>((ref) => tracking);
-
-// Bloc: subscribe once, then translate package snapshots into app state.
-subscription = tracking.sessionStream.listen(
-  (session) => add(TrackingSessionChanged(session)),
-);
-```
-
-Widgets should render `session.allowedActions`; framework state must not invent
-a second lifecycle machine. Cancel UI subscriptions when widgets/blocs are
-disposed, but dispose the application controller only after Pause or Complete.
+- Completed routes export by default; a snapshot of an active route needs
+  `TrackExportOptions(allowIncompleteTrackSnapshot: true)`.
+- Files go to `Download/flutter_background_location` on Android (MediaStore,
+  no storage permission on Android 10+) and to the app's
+  `Documents/flutter_background_location` on iOS. Name collisions get `_1`,
+  `_2` suffixes.
+- Exports keep segment boundaries, leave rejected points out, and include stops
+  and the route summary. KML heights are written as recorded (0 when unknown,
+  no `altitudeMode`); Android heights are above the WGS 84 ellipsoid and iOS
+  heights above mean sea level.
+- `RouteFormatConverter` converts GeoJSON, GPX and KML in memory, in all six
+  directions.
+
+Export files are plaintext; delete them after sharing (`deleteExport()` removes
+a Track export).
+The bounded V2 exporter, derived (cleaned) geometry, abort, delete and erase
+are covered in [Export](https://github.com/amias-samir/flutter_background_location/blob/main/doc/export.md).
+
+## Configuration
+
+Pick an accuracy preset; any individual `TrackingConfig` value you set
+overrides only its own preset value.
+
+| Preset | Moving interval / filter | Stationary interval / filter | Accepted accuracy |
+|---|---:|---:|---:|
+| `low` | 20 s / 20 m | 2 min / 75 m | 100 m |
+| `medium` | 10 s / 10 m | 1 min / 50 m | 60 m |
+| `high` (default) | 5 s / 5 m | 20 s / 20 m | 20 m |
+| `precised` | 3 s / 3 m | 15 s / 10 m | 15 m |
+
+- `captureIntent`: `adaptive` (default) saves battery while still and records
+  stops; `walking`, `cycling` and `vehicle` stay on the moving profile.
+- `motionFusionMode`: `platformActivityOnly` (default), or low-power or
+  enhanced sensor fusion for better pocket and background motion evidence.
+- `minimumStopDuration`, `turnCaptureDegrees` (45° for High and Precised) and
+  `mockLocationPolicy` (`allow`, `flag` or `reject`).
+- `TrackingConfiguration.recordRetentionPolicy`: `keepAll` (default) or
+  `keepLatestOnly`.
+
+**Release builds record a clean route.** By default
+(`RouteRecordingDetail.automatic`) profile and release builds store the
+accepted path, stops, distance and steps without diagnostic quality runs,
+visible gaps or motion evidence; debug builds keep everything. Capture,
+distance, stops, steps and uploads are identical in both. Each route keeps the
+mode it started with. Set `recordingDetail` to force one.
+
+Operating systems may batch, delay or skip callbacks, and `high` and
+`precised` use more battery. Every option, adaptive battery policies and
+mock-location interpretation:
+[Configuration](https://github.com/amias-samir/flutter_background_location/blob/main/doc/configuration.md).
 
 ## Lifecycle limits
 
 | Scenario | Android | iOS |
 |---|---|---|
-| Normal background or screen lock while active | Continues in the foreground service with an active-capture partial wake lock; motion fusion prefers wake-up sensors when available | Continues with Core Location background mode; iOS 17+ background-activity session is held |
-| Route paused | Service and native requests are stopped | Location, motion, and background-activity sessions are stopped |
-| Route resumed | Service and requests are recreated | Location, motion, and background-activity sessions are recreated |
-| Route completed | Service, notification, and native requests are stopped | All native updates and sessions are invalidated |
+| Background or screen lock while active | Continues in the foreground service with an active-capture partial wake lock | Continues with Core Location background mode (iOS 17+ background-activity session) |
+| Paused, completed | Service, notification and requests stop | Location, motion and background sessions stop |
 | Removed from recent apps | Usually continues; OEM-dependent | Swiping away is a user force-quit and stops tracking |
-| OS process termination | Best-effort service/session recovery | Route is retained as interrupted and can be explicitly resumed after launch |
+| OS process termination | Best-effort service recovery | Route is kept as interrupted and resumed explicitly after launch |
 | Android Force stop | Cannot be bypassed | Not applicable |
-| Reboot | Best-effort restoration; OEM-dependent | The app must be launched to restart this tracker |
+| Reboot | Best-effort restoration; OEM-dependent | The app must be launched again |
 
-Test backgrounding, screen lock, recent-task removal, OS process death,
-force-stop/force-quit, permission changes, and reboot as separate scenarios.
+A route is never silently marked complete after an interruption.
 
 ## Storage, security, and privacy
 
-SQLite is the route source of truth. A native acknowledgement-based journal
-also protects fixes captured before Dart commits them. Native rows are removed
-only after the Dart database write succeeds.
+- SQLite is the source of truth. Native fixes are removed from the journal only
+  after Dart has committed them.
+- The default database is not encrypted. Inject your own `TrackRepository` if
+  your threat model needs encryption.
+- Diagnostics and support reports never contain coordinates, route or owner
+  IDs, file names or command tokens.
+- `notDetected` mock evidence is a signal, not proof that a fix is genuine.
 
-The default SQLite stores are not SQLCipher-encrypted. iOS file protection does
-not replace application-level database encryption. Inject an approved
-`TrackRepository` if your threat model requires encrypted route storage and
-validate its key lifecycle independently.
+Your app is responsible for:
 
-Host applications should:
-
-- show an explicit in-app tracking indicator;
-- explain why background and motion access are needed, including step
-  counting when the app shows steps;
-- avoid logging coordinates or export contents;
-- apply a documented retention policy;
-- protect uploader authentication and transport;
-- delete plaintext exports after use;
-- provide a clear way to pause and complete tracking.
-
-Entries named `sqlite_autoindex_*` are SQLite's internal indexes for primary
-key and unique constraints. They are not extra schemas and are not created once
-per tracking session.
-
-## Disposing the client
-
-Cancel your stream subscriptions and dispose the client only after the active
-track has been paused or completed:
-
-```dart
-await statusSubscription.cancel();
-await pointSubscription.cancel();
-await activitySubscription.cancel();
-await tracking.dispose();
-```
-
-`dispose()` deliberately throws while native tracking is active so the host
-does not silently detach from a live session.
-
-## Common issues
-
-### `TrackingPermissionException`
-
-Inspect `exception.state`. Check location services, precise location,
-notification permission, `requiresSettings`, and `canRequestBackground`.
-
-### `tracking_already_active` or `already_tracking`
-
-Use one application-scoped controller and drive the UI from `sessionStream`.
-Do not call native Start directly. Prefer `startOrRecoverTrack(...)` to reuse or
-resume the same owner's route; use `resolveOwnerConflict(...)` only after an
-explicit confirmation when the redacted blocker belongs to a previous owner.
-
-### Export says only completed tracks are allowed
-
-Complete the track before exporting, or explicitly set
-`allowIncompleteTrackSnapshot: true` when a snapshot is intentional.
-
-### No activity classification
-
-Activity permission is separate from location permission. The route can still
-record, but adaptive stationary detection stays conservative when motion data
-is unavailable.
-
-### Export is missing a pause-to-resume connection
-
-This is expected in `preserveEvidenceSegments` and
-`mergeAutomaticCallbackGaps`: a user pause, interruption, permission loss, or
-overnight boundary is real evidence, not an automatic callback gap. Select
-`connectAllChronologicalPoints` only when the UI clearly labels inferred
-connectors and does not present their length as measured distance.
-
-## Example application
-
-See the
-[`example/lib/main.dart`](https://github.com/amias-samir/flutter_background_location/blob/main/example/lib/main.dart)
-sample for a complete Material example with:
-
-- staged permission recovery;
-- Start, Pause, Resume, End day, and Complete Trip button states;
-- configurable retention policy;
-- live status, activity, and point data;
-- one recorded-Trip history item with daily leg/segment/gap summaries;
-- GeoJSON, KML, and GPX naming/export;
-- MapLibre whole-Trip display with a street-map style, gap markers, and an
-  explicit connect-all toggle.
+- a clear in-app tracking indicator and a way to pause and complete;
+- explaining background, motion and step access;
+- its Play Console declaration, Data safety and App Store privacy answers,
+  including fitness data if you upload steps;
+- a retention policy, and deleting plaintext exports.
 
 ## Production checklist
 
 - Use product-specific permission and notification text.
-- Review App Store and Google Play background-location requirements.
 - Test on physical Android and iOS devices; simulators are insufficient.
-- Measure multi-hour route fidelity and battery drain.
+- Measure multi-hour route fidelity and battery drain together.
+- Test denied, revoked and reduced-accuracy permissions, disabled location
+  services, and OEM battery restrictions.
+- Test backgrounding, screen lock, recent-task removal, process death,
+  force-stop or force-quit, and reboot separately.
 - Test offline capture and later upload recovery.
-- Test denied, revoked, reduced-accuracy, and disabled-service states.
-- Test OEM battery restrictions and Android reboot restoration.
-- Test iOS backgrounding and user force-quit separately.
-- Validate every export in an independent GeoJSON/XML reader.
-- Perform a privacy and security review before collecting real user routes.
+- Validate exports in an independent GeoJSON or XML reader.
+
+## Example app
+
+The [example](https://github.com/amias-samir/flutter_background_location/tree/main/example)
+is a complete Material app built on `openWithTrips()`:
+
+- A single home screen shows the current session and the tracking preferences
+  (pickers). Its bottom bar offers only the actions the lifecycle allows now:
+  Start, Pause, Resume, End day and Complete Trip.
+- Staged permission recovery, a setup doctor and owner-conflict recovery.
+- A History screen with a card per Trip (distance, moving and stopped time,
+  steps). Tap a card for its map; GeoJSON, KML and GPX export are in the card
+  menu.
+- A full-screen MapLibre map with a draggable sheet: figures, legend and the
+  stop list (tap a stop to fly to it), plus a fit-route button. Debug builds
+  add gap markers, route views and a continuity toggle.
+
+```shell
+cd example && flutter run
+```
+
+## Guides
+
+| Guide | Covers |
+|---|---|
+| [Platform setup](https://github.com/amias-samir/flutter_background_location/blob/main/doc/platform_setup.md) | Manifest, `Info.plist`, permission sequences, background and termination behavior |
+| [Integration guide](https://github.com/amias-samir/flutter_background_location/blob/main/doc/integration_guide.md) | Single-day controller, permissions, diagnostics, owner conflicts, uploads, tests, troubleshooting |
+| [Multi-day Trips](https://github.com/amias-samir/flutter_background_location/blob/main/doc/multi_day_trips.md) | End day, Continue trip, restore after restart, presentation, Trip export and deletion |
+| [Route details](https://github.com/amias-samir/flutter_background_location/blob/main/doc/route_details.md) | Stops, quality decisions, turn capture, summaries, steps, derived geometry, clean recording |
+| [Export](https://github.com/amias-samir/flutter_background_location/blob/main/doc/export.md) | Export options and formats, V2 exporter, format conversion, abort/delete/erase |
+| [Configuration](https://github.com/amias-samir/flutter_background_location/blob/main/doc/configuration.md) | Every `TrackingConfig` option, retention, battery behavior, mock locations |
 
 ---
 

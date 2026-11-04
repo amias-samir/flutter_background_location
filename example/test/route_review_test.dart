@@ -31,7 +31,6 @@ void main() {
               ),
             },
             hasMore: false,
-            onRefresh: null,
             onLoadMore: null,
             onViewMap: null,
             onExport: null,
@@ -76,7 +75,6 @@ void main() {
               ),
             ],
             hasMore: false,
-            onRefresh: null,
             onLoadMore: null,
             onViewMap: null,
             onContinue: null,
@@ -117,7 +115,6 @@ void main() {
                   ),
                 },
                 hasMore: false,
-                onRefresh: null,
                 onLoadMore: null,
                 onViewMap: null,
                 onExport: null,
@@ -137,7 +134,6 @@ void main() {
                   ),
                 ],
                 hasMore: false,
-                onRefresh: null,
                 onLoadMore: null,
                 onViewMap: null,
                 onContinue: null,
@@ -239,15 +235,12 @@ void main() {
         findsOneWidget,
         reason: 'the point count and the stored stop count',
       );
-      expect(find.text('Distance 1.49 km'), findsOneWidget);
+      expect(find.text('1.49 km'), findsOneWidget);
       expect(find.text('recorded 1.78 km'), findsOneWidget);
-      expect(
-        find.text(
-          'Moving 40 min • stopped 20 min • '
-          '≥ 167 steps · counter stopped at 08:51',
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('40 min'), findsOneWidget);
+      expect(find.text('20 min'), findsOneWidget);
+      expect(find.text('≥ 167'), findsOneWidget, reason: 'a lower bound');
+      expect(find.text('counter stopped at 08:51'), findsOneWidget);
       final selector = tester.widget<SegmentedButton<RouteView>>(
         find.byType(SegmentedButton<RouteView>),
       );
@@ -297,30 +290,31 @@ void main() {
         find.byType(PopupMenuButton<RouteGeometryContinuity>),
         findsNothing,
       );
-      expect(find.text('Distance 1.49 km'), findsOneWidget);
+      expect(find.text('1.49 km'), findsOneWidget);
     });
 
     test('the recorded distance shows only when it differs as shown', () {
-      List<String> lines({double? corrected}) => routeTotalsLines(
+      RouteStat distance({double? corrected}) => routeStats(
         RouteTotals.ofRoute(
           _summary(distanceMeters: 1777, correctedDistanceMeters: corrected),
         ),
         cleaned: false,
-      );
+      ).first;
 
-      expect(lines(corrected: 1490), <String>[
-        'Distance 1.49 km',
-        'recorded 1.78 km',
-        'Moving 40 min • stopped 20 min',
-      ]);
-      expect(lines(), <String>[
-        'Distance 1.78 km',
-        'Moving 40 min • stopped 20 min',
-      ], reason: 'not reviewed');
-      expect(lines(corrected: 1776.8), <String>[
-        'Distance 1.78 km',
-        'Moving 40 min • stopped 20 min',
-      ], reason: 'reviewed, with the same distance as shown');
+      expect(
+        distance(corrected: 1490),
+        const RouteStat('1.49 km', 'Distance', note: 'recorded 1.78 km'),
+      );
+      expect(
+        distance(),
+        const RouteStat('1.78 km', 'Distance'),
+        reason: 'not reviewed',
+      );
+      expect(
+        distance(corrected: 1776.8),
+        const RouteStat('1.78 km', 'Distance'),
+        reason: 'reviewed, with the same distance as shown',
+      );
     });
   });
 
@@ -405,11 +399,11 @@ void main() {
           '1 visible gap(s)',
         );
         expect(
-          routeTotalsLines(reviewed.route.totals, cleaned: false),
-          <String>[
-            'Distance 1.49 km',
-            'recorded 1.78 km',
-            'Moving 40 min • stopped 20 min',
+          routeStats(reviewed.route.totals, cleaned: false),
+          const <RouteStat>[
+            RouteStat('1.49 km', 'Distance', note: 'recorded 1.78 km'),
+            RouteStat('40 min', 'Moving'),
+            RouteStat('20 min', 'Stopped'),
           ],
         );
 
@@ -440,6 +434,49 @@ void main() {
         expect(cleaned.route.pointCount, 4);
       },
     );
+
+    testWidgets('the map sheet opens on the stats and drags open', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(390 * 3, 844 * 3)
+        ..devicePixelRatio = 3;
+      addTearDown(tester.view.reset);
+      final track = _track('track-1', distanceMeters: 1777);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TrackMapPage(
+            tracking: _ReviewedRouteTracking.example(),
+            track: track,
+            mapBuilder: (key, route, showDiagnostics, fitPadding) =>
+                const ColoredBox(color: Color(0xFFE0E0E0)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('track-1'), findsOneWidget, reason: 'the app bar');
+      expect(find.text('1.49 km').hitTestable(), findsOneWidget);
+      expect(
+        find.text('Start').hitTestable(),
+        findsNothing,
+        reason: 'only the stats show at first',
+      );
+      expect(find.byTooltip('Fit route'), findsOneWidget);
+      final fabBefore = tester.getTopLeft(find.byTooltip('Fit route'));
+
+      await tester.drag(find.text('1.49 km'), const Offset(0, -500));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Start').hitTestable(), findsOneWidget);
+      expect(find.text('Stops').hitTestable(), findsOneWidget);
+      expect(find.text('1.49 km').hitTestable(), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byTooltip('Fit route')).dy,
+        lessThan(fabBefore.dy),
+        reason: 'the buttons ride on the sheet',
+      );
+    });
 
     test('a route without a review opens in its cleaned view', () async {
       final tracking = _ReviewedRouteTracking.example(withReview: false);
@@ -474,8 +511,8 @@ void main() {
         expect(reviewed.route.geometryPartCount, 2);
         expect(reviewed.route.stopMarkers, hasLength(1));
         expect(
-          routeTotalsLines(reviewed.route.totals, cleaned: false).take(2),
-          <String>['Distance 2.49 km', 'recorded 2.78 km'],
+          routeStats(reviewed.route.totals, cleaned: false).first,
+          const RouteStat('2.49 km', 'Distance', note: 'recorded 2.78 km'),
         );
 
         final recorded = await loadTripMap(

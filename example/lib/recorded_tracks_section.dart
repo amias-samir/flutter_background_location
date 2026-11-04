@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
 import 'route_totals.dart';
+import 'ui_kit.dart';
 
 enum RecordedTrackAction {
   exportGeoJson,
@@ -18,108 +19,50 @@ class RecordedTracksSection extends StatelessWidget {
     super.key,
     required this.tracks,
     required this.hasMore,
-    required this.onRefresh,
     required this.onLoadMore,
     required this.onViewMap,
     required this.onExport,
     required this.onDelete,
     this.totals = const <String, RouteTotals>{},
+    this.showDiagnostics = true,
   });
 
   final List<Track> tracks;
 
   /// Stored totals by track ID; a track without an entry shows none.
   final Map<String, RouteTotals> totals;
+
+  /// Whether the cards show quality events and visible gaps.
+  final bool showDiagnostics;
   final bool hasMore;
-  final Future<void> Function()? onRefresh;
   final Future<void> Function()? onLoadMore;
+
+  /// Opens the route's map; a tap on its card does the same.
   final Future<void> Function(Track track)? onViewMap;
   final Future<void> Function(String trackId, TrackExportFormat format)?
   onExport;
   final Future<void> Function(Track track)? onDelete;
 
   @override
-  Widget build(BuildContext context) => Card(
-    elevation: 0,
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(left: 8),
-            child: Row(
-              children: <Widget>[
-                Icon(
-                  Icons.history_rounded,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        'Recorded routes',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                      Text(
-                        '${tracks.length} route${tracks.length == 1 ? '' : 's'} loaded',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Refresh routes',
-                  onPressed: onRefresh,
-                  icon: const Icon(Icons.refresh_rounded),
-                ),
-              ],
-            ),
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: <Widget>[
+      if (tracks.isEmpty)
+        const EmptyHistory(
+          title: 'No routes recorded yet',
+          message: 'Start tracking to create your first route.',
+        )
+      else
+        ...tracks.map((track) => _routeCard(context, track)),
+      if (hasMore)
+        Center(
+          child: TextButton.icon(
+            onPressed: onLoadMore,
+            icon: const Icon(Icons.expand_more),
+            label: const Text('Load more'),
           ),
-          const SizedBox(height: 8),
-          if (tracks.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
-              decoration: BoxDecoration(
-                color: Theme.of(
-                  context,
-                ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                children: <Widget>[
-                  Icon(
-                    Icons.route_outlined,
-                    size: 36,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text('No routes recorded yet'),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Start tracking to create your first route.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            )
-          else
-            ...tracks.map((track) => _routeCard(context, track)),
-          if (hasMore)
-            Center(
-              child: TextButton.icon(
-                onPressed: onLoadMore,
-                icon: const Icon(Icons.expand_more),
-                label: const Text('Load more'),
-              ),
-            ),
-        ],
-      ),
-    ),
+        ),
+    ],
   );
 
   Widget _routeCard(BuildContext context, Track track) {
@@ -132,117 +75,73 @@ class RecordedTracksSection extends StatelessWidget {
       TrackStatus.interrupted || TrackStatus.failed => colors.error,
       _ => colors.secondary,
     };
-    return Card.outlined(
-      margin: const EdgeInsets.symmetric(vertical: 5),
-      child: ListTile(
-        contentPadding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
-        leading: CircleAvatar(
-          backgroundColor: statusColor.withValues(alpha: 0.14),
-          foregroundColor: statusColor,
-          child: Icon(_statusIcon(track.status)),
-        ),
-        title: Text(
-          track.routeId ?? track.id,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: <Widget>[
-              _RouteDetail(
-                icon: Icons.circle,
-                label: track.status.name,
-                color: statusColor,
-              ),
-              // The corrected distance once the route was reviewed. The
-              // point count is a sampling statistic and stays on the map.
-              _RouteDetail(
-                icon: Icons.straighten_rounded,
-                label: kilometres(
-                  totals[track.id]?.displayDistanceMeters ??
-                      track.totalDistanceMeters,
-                ),
-              ),
-              _RouteDetail(
-                icon: Icons.polyline_outlined,
-                label:
-                    '${track.segmentCount} segment${track.segmentCount == 1 ? '' : 's'}',
-              ),
-              if (totals[track.id] case final totals?) ...<Widget>[
-                _RouteDetail(
-                  icon: Icons.timer_outlined,
-                  label: 'Moving ${hoursMinutes(totals.moving)}',
-                ),
-                if (totals.stopCount > 0)
-                  _RouteDetail(
-                    icon: Icons.local_parking_rounded,
-                    label:
-                        '${totals.stopCount} stop(s) • '
-                        '${hoursMinutes(totals.stopped)}',
-                  ),
-                if (totals.stepsText case final steps?)
-                  _RouteDetail(
-                    icon: Icons.directions_walk_rounded,
-                    label: steps,
-                  ),
-              ],
-            ],
+    final canView = actions.canView && onViewMap != null;
+    final stored = totals[track.id];
+    return RouteHistoryCard(
+      title: track.routeId ?? track.id,
+      statusLabel: _statusLabel(track.status),
+      statusColor: statusColor,
+      when: recordedPeriod(track.startedAt, track.endedAt),
+      // The corrected distance once the route was reviewed. The point count
+      // is a sampling statistic and stays on the map.
+      stats: routeHistoryStats(
+        stored?.displayDistanceMeters ?? track.totalDistanceMeters,
+        stored,
+      ),
+      details: routeHistoryDetails(stored, showDiagnostics: showDiagnostics),
+      onTap: canView
+          ? () => _perform(RecordedTrackAction.viewMap, track)
+          : null,
+      menu: PopupMenuButton<RecordedTrackAction>(
+        tooltip: 'Route actions',
+        onSelected: (action) => _perform(action, track),
+        itemBuilder: (context) => <PopupMenuEntry<RecordedTrackAction>>[
+          historyMenuItem(
+            RecordedTrackAction.viewMap,
+            Icons.map_outlined,
+            'View on map',
+            canView,
           ),
-        ),
-        trailing: PopupMenuButton<RecordedTrackAction>(
-          tooltip: 'Route actions',
-          onSelected: (action) => _perform(action, track),
-          itemBuilder: (context) => <PopupMenuEntry<RecordedTrackAction>>[
-            _item(
-              RecordedTrackAction.exportGeoJson,
-              Icons.data_object,
-              'Export GeoJSON',
-              actions.canExport && onExport != null,
-            ),
-            _item(
-              RecordedTrackAction.exportKml,
-              Icons.language,
-              'Export KML',
-              actions.canExport && onExport != null,
-            ),
-            _item(
-              RecordedTrackAction.exportGpx,
-              Icons.route,
-              'Export GPX',
-              actions.canExport && onExport != null,
-            ),
-            _item(
-              RecordedTrackAction.viewMap,
-              Icons.map_outlined,
-              'View on map',
-              actions.canView && onViewMap != null,
-            ),
-            const PopupMenuDivider(),
-            _item(
-              RecordedTrackAction.delete,
-              Icons.delete_outline,
-              'Delete',
-              actions.canDelete && onDelete != null,
-              destructive: true,
-            ),
-          ],
-        ),
+          const PopupMenuDivider(),
+          historyMenuItem(
+            RecordedTrackAction.exportGeoJson,
+            Icons.data_object,
+            'Export GeoJSON',
+            actions.canExport && onExport != null,
+          ),
+          historyMenuItem(
+            RecordedTrackAction.exportKml,
+            Icons.language,
+            'Export KML',
+            actions.canExport && onExport != null,
+          ),
+          historyMenuItem(
+            RecordedTrackAction.exportGpx,
+            Icons.route,
+            'Export GPX',
+            actions.canExport && onExport != null,
+          ),
+          const PopupMenuDivider(),
+          historyMenuItem(
+            RecordedTrackAction.delete,
+            Icons.delete_outline,
+            'Delete',
+            actions.canDelete && onDelete != null,
+            destructive: true,
+          ),
+        ],
       ),
     );
   }
 
-  static IconData _statusIcon(TrackStatus status) => switch (status) {
-    TrackStatus.active => Icons.navigation_rounded,
-    TrackStatus.paused => Icons.pause_rounded,
-    TrackStatus.completed => Icons.check_rounded,
-    TrackStatus.interrupted => Icons.portable_wifi_off_rounded,
-    TrackStatus.failed => Icons.error_outline,
-    TrackStatus.starting => Icons.hourglass_top_rounded,
-    TrackStatus.stopping => Icons.hourglass_bottom_rounded,
+  static String _statusLabel(TrackStatus status) => switch (status) {
+    TrackStatus.active => 'Active',
+    TrackStatus.paused => 'Paused',
+    TrackStatus.completed => 'Completed',
+    TrackStatus.interrupted => 'Interrupted',
+    TrackStatus.failed => 'Failed',
+    TrackStatus.starting => 'Starting',
+    TrackStatus.stopping => 'Stopping',
   };
 
   void _perform(RecordedTrackAction action, Track track) {
@@ -258,54 +157,5 @@ class RecordedTracksSection extends StatelessWidget {
       case RecordedTrackAction.delete:
         unawaited(onDelete?.call(track));
     }
-  }
-
-  static PopupMenuItem<RecordedTrackAction> _item(
-    RecordedTrackAction action,
-    IconData icon,
-    String label,
-    bool enabled, {
-    bool destructive = false,
-  }) => PopupMenuItem<RecordedTrackAction>(
-    value: action,
-    enabled: enabled,
-    child: Row(
-      children: <Widget>[
-        Icon(icon, color: destructive ? Colors.red : null),
-        const SizedBox(width: 12),
-        Text(
-          label,
-          style: destructive ? const TextStyle(color: Colors.red) : null,
-        ),
-      ],
-    ),
-  );
-}
-
-class _RouteDetail extends StatelessWidget {
-  const _RouteDetail({required this.icon, required this.label, this.color});
-
-  final IconData icon;
-  final String label;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) {
-    final foreground = color ?? Theme.of(context).colorScheme.onSurfaceVariant;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-      decoration: BoxDecoration(
-        color: foreground.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Icon(icon, size: 11, color: foreground),
-          const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 11, color: foreground)),
-        ],
-      ),
-    );
   }
 }

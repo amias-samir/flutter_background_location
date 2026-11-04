@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
+import 'history_page.dart';
 import 'recorded_tracks_section.dart';
 import 'recorded_trips_section.dart';
 import 'route_map_page.dart';
@@ -16,6 +19,27 @@ typedef ExampleTrackingControllerFactory =
       TrackRecordRetentionPolicy retention,
     );
 
+/// The Trip whose current leg is [trackId]. A Trip is active while its leg
+/// records and suspended while the leg is paused or interrupted, so Complete
+/// Trip looks in both.
+Future<Trip?> findOpenTrip(
+  MultiDayTripController tracking,
+  TrackingOwner owner,
+  String trackId,
+) async {
+  final open = await tracking.listTripPage(
+    TripQuery(
+      owner: owner,
+      limit: 10,
+      statuses: const <TripStatus>{TripStatus.active, TripStatus.suspended},
+    ),
+  );
+  for (final trip in open.items) {
+    if (trip.currentLegTrackId == trackId) return trip;
+  }
+  return null;
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const TrackingExampleApp());
@@ -28,21 +52,65 @@ class TrackingExampleApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = ColorScheme.fromSeed(
-      seedColor: const Color(0xFF00796B),
-      brightness: Brightness.light,
+    // Soft ink on a soft grey background: dark slate text and mid-grey
+    // labels, white cards with a hairline border, no shadows.
+    final colors =
+        ColorScheme.fromSeed(
+          seedColor: const Color(0xFF00796B),
+          brightness: Brightness.light,
+        ).copyWith(
+          onSurface: const Color(0xFF3C4347),
+          onSurfaceVariant: const Color(0xFF737A7F),
+          surfaceContainerLow: Colors.white,
+          surfaceContainerLowest: const Color(0xFFF4F6F5),
+        );
+    final base = Typography.material2021().black.apply(
+      bodyColor: colors.onSurface,
+      displayColor: colors.onSurface,
+    );
+    final textTheme = base.copyWith(
+      titleLarge: base.titleLarge?.copyWith(fontWeight: FontWeight.w500),
+      titleMedium: base.titleMedium?.copyWith(fontWeight: FontWeight.w500),
+      titleSmall: base.titleSmall?.copyWith(fontWeight: FontWeight.w500),
     );
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Background location tracker',
       theme: ThemeData(
         colorScheme: colors,
+        textTheme: textTheme,
         scaffoldBackgroundColor: colors.surfaceContainerLowest,
         appBarTheme: AppBarTheme(
           backgroundColor: colors.surfaceContainerLowest,
           foregroundColor: colors.onSurface,
           elevation: 0,
           scrolledUnderElevation: 1,
+          titleTextStyle: textTheme.titleLarge?.copyWith(
+            color: colors.onSurface,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          color: colors.surfaceContainerLow,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(
+              color: colors.outlineVariant.withValues(alpha: 0.5),
+            ),
+          ),
+        ),
+        filledButtonTheme: const FilledButtonThemeData(
+          style: ButtonStyle(minimumSize: WidgetStatePropertyAll(Size(0, 52))),
+        ),
+        outlinedButtonTheme: const OutlinedButtonThemeData(
+          style: ButtonStyle(minimumSize: WidgetStatePropertyAll(Size(0, 52))),
+        ),
+        snackBarTheme: const SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+        ),
+        bottomSheetTheme: BottomSheetThemeData(
+          backgroundColor: colors.surfaceContainerLow,
         ),
         useMaterial3: true,
       ),
@@ -85,13 +153,18 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
   MotionFusionMode _motionFusionMode = MotionFusionMode.platformActivityOnly;
   MultiDayRoutePresentation _routePresentation =
       MultiDayRoutePresentation.separateRecordedParts;
-  List<Track> _tracks = const <Track>[];
-  Map<String, RouteTotals> _trackTotals = const <String, RouteTotals>{};
-  List<RecordedTripSummary> _trips = const <RecordedTripSummary>[];
+
+  /// The loaded history and whether a command runs; the history page
+  /// listens to it.
+  final ValueNotifier<RecordedHistory> _history =
+      ValueNotifier<RecordedHistory>(const RecordedHistory(busy: true));
   String? _historyCursor;
-  bool _historyHasMore = false;
-  bool _busy = true;
-  String? _message;
+
+  List<Track> get _tracks => _history.value.tracks;
+  List<RecordedTripSummary> get _trips => _history.value.trips;
+  bool get _busy => _history.value.busy;
+  set _busy(bool value) =>
+      _history.value = _history.value.copyWith(busy: value);
 
   @override
   void initState() {
@@ -113,6 +186,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
                 ),
               ));
       _tracking = controller;
+      _history.value = RecordedHistory(
+        tripMode: controller is MultiDayTripController,
+        busy: true,
+      );
       _subscriptions
         ..add(
           controller.sessionStream.listen((session) {
@@ -141,10 +218,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
 
   Future<void> _run(Future<void> Function() command) async {
     if (_busy) return;
-    setState(() {
-      _busy = true;
-      _message = null;
-    });
+    setState(() => _busy = true);
     try {
       await command();
     } on TrackingException catch (error) {
@@ -162,10 +236,35 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
 
   void _showError(Object error) {
     if (!mounted) return;
-    setState(() {
-      _busy = false;
-      _message = error.toString();
-    });
+    setState(() => _busy = false);
+    _showMessage(error.toString(), error: true);
+  }
+
+  /// Shows [message] in a snack bar; [copyable] text, such as an export
+  /// path, gets a Copy action.
+  void _showMessage(String message, {bool error = false, String? copyable}) {
+    if (!mounted) return;
+    final colors = Theme.of(context).colorScheme;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            message,
+            style: error ? TextStyle(color: colors.onErrorContainer) : null,
+          ),
+          backgroundColor: error ? colors.errorContainer : null,
+          duration: Duration(seconds: copyable == null ? 4 : 8),
+          action: copyable == null
+              ? null
+              : SnackBarAction(
+                  label: 'Copy',
+                  onPressed: () => unawaited(
+                    Clipboard.setData(ClipboardData(text: copyable)),
+                  ),
+                ),
+        ),
+      );
   }
 
   Future<void> _refreshTracks({bool append = false}) async {
@@ -185,14 +284,18 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     };
     if (!mounted) return;
     setState(() {
-      _tracks = append
-          ? List<Track>.unmodifiable(<Track>[..._tracks, ...page.items])
-          : page.items;
-      _trackTotals = Map<String, RouteTotals>.unmodifiable(
-        <String, RouteTotals>{if (append) ..._trackTotals, ...totals},
+      _history.value = _history.value.copyWith(
+        tripMode: false,
+        tracks: append
+            ? List<Track>.unmodifiable(<Track>[..._tracks, ...page.items])
+            : page.items,
+        totals: Map<String, RouteTotals>.unmodifiable(<String, RouteTotals>{
+          if (append) ..._history.value.totals,
+          ...totals,
+        }),
+        hasMore: page.hasMore,
       );
       _historyCursor = page.nextCursor;
-      _historyHasMore = page.hasMore;
     });
   }
 
@@ -224,14 +327,17 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     );
     if (!mounted) return;
     setState(() {
-      _trips = append
-          ? List<RecordedTripSummary>.unmodifiable(<RecordedTripSummary>[
-              ..._trips,
-              ...summaries,
-            ])
-          : summaries;
+      _history.value = _history.value.copyWith(
+        tripMode: true,
+        trips: append
+            ? List<RecordedTripSummary>.unmodifiable(<RecordedTripSummary>[
+                ..._trips,
+                ...summaries,
+              ])
+            : summaries,
+        hasMore: page.nextCursor != null,
+      );
       _historyCursor = page.nextCursor;
-      _historyHasMore = page.nextCursor != null;
     });
   }
 
@@ -273,9 +379,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
           await tracking.acknowledgeReadinessEducation(
             readiness.issues.first.code,
           );
-          setState(
-            () => _message = 'Tap Start again to request Always access.',
-          );
+          _showMessage('Tap Start again to request Always access.');
         }
         return false;
       case TrackingReadinessAction.requestForegroundLocation:
@@ -349,18 +453,7 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final tracking = _tracking;
     final trackId = _session?.currentTrack?.id;
     if (tracking is! MultiDayTripController || trackId == null) return null;
-    final tripTracking = tracking as MultiDayTripController;
-    final active = await tripTracking.listTripPage(
-      const TripQuery(
-        owner: _owner,
-        limit: 10,
-        statuses: <TripStatus>{TripStatus.active},
-      ),
-    );
-    for (final trip in active.items) {
-      if (trip.currentLegTrackId == trackId) return trip;
-    }
-    return null;
+    return findOpenTrip(tracking as MultiDayTripController, _owner, trackId);
   }
 
   Future<void> _endDay() => _run(() async {
@@ -474,12 +567,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         format: format,
         fileName: name,
       );
-      if (mounted) {
-        setState(
-          () => _message =
-              'Exported ${result.pointCount} points to ${result.path}',
-        );
-      }
+      _showMessage(
+        'Exported ${result.pointCount} points to ${result.path}',
+        copyable: result.path,
+      );
     });
   }
 
@@ -528,12 +619,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         format: format,
         fileName: name,
       );
-      if (mounted) {
-        setState(
-          () => _message =
-              'Exported ${result.pointCount} Trip points to ${result.path}',
-        );
-      }
+      _showMessage(
+        'Exported ${result.pointCount} Trip points to ${result.path}',
+        copyable: result.path,
+      );
     });
   }
 
@@ -561,12 +650,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
           includeDiagnosticProperties: true,
         ),
       );
-      if (mounted) {
-        setState(
-          () => _message =
-              'Exported ${result.pointCount} diagnostic points to ${result.path}',
-        );
-      }
+      _showMessage(
+        'Exported ${result.pointCount} diagnostic points to ${result.path}',
+        copyable: result.path,
+      );
     });
   }
 
@@ -606,12 +693,10 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         points += result.pointCount;
         exported.add(result.path);
       }
-      if (mounted) {
-        setState(
-          () => _message =
-              'Exported $points cleaned points to ${exported.join(', ')}',
-        );
-      }
+      _showMessage(
+        'Exported $points cleaned points to ${exported.join(', ')}',
+        copyable: exported.join('\n'),
+      );
     });
   }
 
@@ -701,13 +786,12 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
         .where((finding) => finding.applicable && !finding.passed)
         .map((finding) => finding.code)
         .join(', ');
-    if (mounted) {
-      setState(
-        () => _message = doctor.passed
-            ? 'Setup doctor: all applicable checks passed.'
-            : 'Setup doctor findings: $failures',
-      );
-    }
+    _showMessage(
+      doctor.passed
+          ? 'Setup doctor: all applicable checks passed.'
+          : 'Setup doctor findings: $failures',
+      error: !doctor.passed,
+    );
   });
 
   Future<void> _changeRetention(TrackRecordRetentionPolicy value) async {
@@ -756,23 +840,90 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final result = await _tracking!.openSettings(
       TrackingSettingsDestination.batteryOptimization,
     );
-    if (!mounted) return;
-    setState(() {
-      _message = result.opened
+    _showMessage(
+      result.opened
           ? 'In Android battery settings, allow this app to ignore battery '
                 'optimization or select Unrestricted/No restrictions.'
           : result.supported
           ? 'Battery optimization settings could not be opened.'
-          : 'Battery optimization settings are not available on this platform.';
-    });
+          : 'Battery optimization settings are not available on this platform.',
+    );
   });
 
   @override
   void dispose() {
     unawaited(_cancelSubscriptions());
+    _history.dispose();
     final tracking = _tracking;
     if (tracking != null) unawaited(tracking.dispose().catchError((_) {}));
     super.dispose();
+  }
+
+  Future<void> _openHistory() => Navigator.push<void>(
+    context,
+    MaterialPageRoute<void>(
+      builder: (_) => RecordedHistoryPage(
+        history: _history,
+        onRefresh: _refreshHistory,
+        listBuilder: _historyList,
+      ),
+    ),
+  );
+
+  Future<void> _openTrackMap(Track track) => Navigator.push<void>(
+    context,
+    MaterialPageRoute<void>(
+      builder: (_) => TrackMapPage(
+        tracking: _tracking!,
+        track: track,
+        showDiagnostics: _recordsDiagnostics,
+      ),
+    ),
+  );
+
+  Future<void> _openTripMap(Trip trip) => Navigator.push<void>(
+    context,
+    MaterialPageRoute<void>(
+      builder: (_) => TripMapPage(
+        tracking: _tracking! as MultiDayTripController,
+        trip: trip,
+        showDiagnostics: _recordsDiagnostics,
+      ),
+    ),
+  );
+
+  /// The history page's list, from the home page's current [history].
+  Widget _historyList(BuildContext context, RecordedHistory history) {
+    final busy = history.busy;
+    final tracking = _tracking;
+    if (history.tripMode) {
+      return RecordedTripsSection(
+        trips: history.trips,
+        hasMore: history.hasMore,
+        showDiagnostics: _recordsDiagnostics,
+        onLoadMore: busy ? null : () => _refreshTrips(append: true),
+        onViewMap: busy ? null : _openTripMap,
+        onContinue: busy ? null : _continueTrip,
+        onExport: busy ? null : _exportTrip,
+        onExportDiagnostics: busy || !_recordsDiagnostics
+            ? null
+            : _exportTripDiagnostics,
+        onExportCleaned: busy || tracking is! TrackingSummaryController
+            ? null
+            : _exportTripCleaned,
+        onDelete: busy ? null : _deleteTrip,
+      );
+    }
+    return RecordedTracksSection(
+      tracks: history.tracks,
+      totals: history.totals,
+      hasMore: history.hasMore,
+      showDiagnostics: _recordsDiagnostics,
+      onLoadMore: busy ? null : () => _refreshTracks(append: true),
+      onViewMap: busy || tracking == null ? null : _openTrackMap,
+      onExport: busy ? null : _exportTrack,
+      onDelete: busy ? null : _deleteTrack,
+    );
   }
 
   @override
@@ -782,181 +933,139 @@ class _TrackingExamplePageState extends State<TrackingExamplePage> {
     final actions = _session?.allowedActions;
     final canConfigure = !_busy && _session?.currentTrack == null;
     final hasOwnerConflict = _session?.blockerCode == 'owner_scope_conflict';
+    final settingsEnabled = !_busy && tracking != null;
     return Scaffold(
       appBar: AppBar(
-        title: const Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('Location tracker'),
-            Text(
-              'Background route example',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w400),
-            ),
-          ],
-        ),
+        title: const Text('Location tracker'),
         actions: <Widget>[
           IconButton(
             tooltip: 'Setup doctor',
-            onPressed: _busy || tracking == null ? null : _showDiagnostics,
+            onPressed: settingsEnabled ? _showDiagnostics : null,
             icon: const Icon(Icons.health_and_safety_outlined),
           ),
-          const SizedBox(width: 8),
+          PopupMenuButton<TrackingSettingsDestination>(
+            tooltip: 'Settings',
+            enabled: settingsEnabled,
+            onSelected: (destination) =>
+                destination == TrackingSettingsDestination.batteryOptimization
+                ? _openBatteryOptimizationSettings()
+                : tracking!.openSettings(destination),
+            itemBuilder: (_) => <PopupMenuEntry<TrackingSettingsDestination>>[
+              const PopupMenuItem(
+                value: TrackingSettingsDestination.application,
+                child: ListTile(
+                  leading: Icon(Icons.settings_outlined),
+                  title: Text('App settings'),
+                ),
+              ),
+              if (_accuracy == TrackingAccuracy.precised)
+                const PopupMenuItem(
+                  value: TrackingSettingsDestination.batteryOptimization,
+                  child: ListTile(
+                    leading: Icon(Icons.battery_saver_outlined),
+                    title: Text('Battery settings'),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(width: 4),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: _busy
+              ? const LinearProgressIndicator(minHeight: 2)
+              : const SizedBox(height: 2),
+        ),
       ),
+      // Everything fits on one screen; it scrolls only when it cannot, on
+      // a very small screen or with large text.
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 900),
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-              children: <Widget>[
-                TrackingStatusCard(
-                  session: _session,
-                  showDiagnostics: _recordsDiagnostics,
-                ),
-                if (_message != null) ...<Widget>[
-                  const SizedBox(height: 12),
-                  _MessageCard(message: _message!),
-                ],
-                if (hasOwnerConflict) ...<Widget>[
-                  const SizedBox(height: 12),
-                  OwnerConflictCard(
-                    onResolve: _busy ? null : _resolveOwnerConflict,
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: math.max(0, constraints.maxHeight - 24),
                   ),
-                ],
-                const SizedBox(height: 12),
-                TrackingConfigurationControls(
-                  retention: _retention,
-                  accuracy: _accuracy,
-                  captureIntent: _captureIntent,
-                  routePresentation: _routePresentation,
-                  motionFusionMode: _motionFusionMode,
-                  enabled: canConfigure,
-                  onRetentionChanged: _changeRetention,
-                  onAccuracyChanged: _changeAccuracy,
-                  onCaptureIntentChanged: (value) =>
-                      setState(() => _captureIntent = value),
-                  onRoutePresentationChanged: (value) =>
-                      setState(() => _routePresentation = value),
-                  onMotionFusionModeChanged: (value) =>
-                      setState(() => _motionFusionMode = value),
-                ),
-                const SizedBox(height: 12),
-                TrackingActionPanel(
-                  canStart: !_busy && actions?.canStartNew == true,
-                  canPause: !_busy && actions?.canPause == true,
-                  canResume: !_busy && actions?.canResume == true,
-                  canComplete: !_busy && actions?.canComplete == true,
-                  canEndDay: tripMode && !_busy && actions?.canComplete == true,
-                  tripMode: tripMode,
-                  settingsEnabled: !_busy && tracking != null,
-                  showBatterySettings: _accuracy == TrackingAccuracy.precised,
-                  onStart: _start,
-                  onPause: _pause,
-                  onResume: _resume,
-                  onComplete: _complete,
-                  onEndDay: _endDay,
-                  onAppSettings: () => tracking!.openSettings(
-                    TrackingSettingsDestination.application,
+                  // A min-size column takes at least the screen's height
+                  // and spreads its free space between the groups.
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: <Widget>[
+                          TrackingStatusCard(
+                            session: _session,
+                            showDiagnostics: _recordsDiagnostics,
+                          ),
+                          if (hasOwnerConflict) ...<Widget>[
+                            const SizedBox(height: 8),
+                            OwnerConflictCard(
+                              onResolve: _busy ? null : _resolveOwnerConflict,
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          TrackingConfigurationControls(
+                            retention: _retention,
+                            accuracy: _accuracy,
+                            captureIntent: _captureIntent,
+                            routePresentation: _routePresentation,
+                            motionFusionMode: _motionFusionMode,
+                            enabled: canConfigure,
+                            onRetentionChanged: _changeRetention,
+                            onAccuracyChanged: _changeAccuracy,
+                            onCaptureIntentChanged: (value) =>
+                                setState(() => _captureIntent = value),
+                            onRoutePresentationChanged: (value) =>
+                                setState(() => _routePresentation = value),
+                            onMotionFusionModeChanged: (value) =>
+                                setState(() => _motionFusionMode = value),
+                          ),
+                          const SizedBox(height: 24),
+                        ],
+                      ),
+                      RecordedHistoryTile(
+                        history: _history.value,
+                        onTap: tracking == null ? null : _openHistory,
+                      ),
+                    ],
                   ),
-                  onBatterySettings: _openBatteryOptimizationSettings,
                 ),
-
-                const SizedBox(height: 12),
-                if (tripMode)
-                  RecordedTripsSection(
-                    trips: _trips,
-                    hasMore: _historyHasMore,
-                    onRefresh: _busy ? null : _refreshTrips,
-                    onLoadMore: _busy
-                        ? null
-                        : () => _refreshTrips(append: true),
-                    onViewMap: _busy
-                        ? null
-                        : (trip) async {
-                            await Navigator.push<void>(
-                              context,
-                              MaterialPageRoute<void>(
-                                builder: (_) => TripMapPage(
-                                  tracking: tracking as MultiDayTripController,
-                                  trip: trip,
-                                  showDiagnostics: _recordsDiagnostics,
-                                ),
-                              ),
-                            );
-                          },
-                    onContinue: _busy ? null : _continueTrip,
-                    onExport: _busy ? null : _exportTrip,
-                    onExportDiagnostics: _busy || !_recordsDiagnostics
-                        ? null
-                        : _exportTripDiagnostics,
-                    showDiagnostics: _recordsDiagnostics,
-                    onExportCleaned:
-                        _busy || tracking is! TrackingSummaryController
-                        ? null
-                        : _exportTripCleaned,
-                    onDelete: _busy ? null : _deleteTrip,
-                  )
-                else
-                  RecordedTracksSection(
-                    tracks: _tracks,
-                    totals: _trackTotals,
-                    hasMore: _historyHasMore,
-                    onRefresh: _busy ? null : _refreshTracks,
-                    onLoadMore: _busy
-                        ? null
-                        : () => _refreshTracks(append: true),
-                    onViewMap: _busy || tracking == null
-                        ? null
-                        : (track) async {
-                            await Navigator.push<void>(
-                              context,
-                              MaterialPageRoute<void>(
-                                builder: (_) => TrackMapPage(
-                                  tracking: tracking,
-                                  track: track,
-                                  showDiagnostics: _recordsDiagnostics,
-                                ),
-                              ),
-                            );
-                          },
-                    onExport: _busy ? null : _exportTrack,
-                    onDelete: _busy ? null : _deleteTrack,
-                  ),
-                if (_busy) ...<Widget>[
-                  const SizedBox(height: 16),
-                  const LinearProgressIndicator(),
-                ],
-              ],
+              ),
             ),
           ),
         ),
       ),
-    );
-  }
-}
-
-class _MessageCard extends StatelessWidget {
-  const _MessageCard({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: colors.secondaryContainer.withValues(alpha: 0.65),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Icon(Icons.info_outline_rounded, color: colors.onSecondaryContainer),
-          const SizedBox(width: 10),
-          Expanded(child: SelectableText(message)),
-        ],
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Center(
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 900),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+              child: TrackingActionPanel(
+                canStart: !_busy && actions?.canStartNew == true,
+                canPause: !_busy && actions?.canPause == true,
+                canResume: !_busy && actions?.canResume == true,
+                canComplete: !_busy && actions?.canComplete == true,
+                canEndDay: tripMode && !_busy && actions?.canComplete == true,
+                tripMode: tripMode,
+                onStart: _start,
+                onPause: _pause,
+                onResume: _resume,
+                onComplete: _complete,
+                onEndDay: _endDay,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
