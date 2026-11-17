@@ -5940,16 +5940,35 @@ final class SqliteTrackRepository
     String trackId,
     Iterable<int> sequences,
   ) async {
-    final values = sequences.toList(growable: false);
+    final values = sequences.toSet().toList(growable: false);
     if (values.isEmpty) return;
-    final placeholders = List<String>.filled(values.length, '?').join(',');
-    await _db.rawUpdate(
-      '''
-      UPDATE track_points SET sync_state = 'synced', last_sync_error = NULL
-      WHERE track_id = ? AND sequence IN ($placeholders)
-      ''',
-      <Object?>[trackId, ...values],
-    );
+    await _db.transaction((transaction) async {
+      for (final chunk in _boundIdChunks(values)) {
+        final placeholders = List<String>.filled(chunk.length, '?').join(',');
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_points SET sync_state = 'synced', last_sync_error = NULL
+          WHERE track_id = ? AND sequence IN ($placeholders)
+          ''',
+          <Object?>[trackId, ...chunk],
+        );
+      }
+    });
+  }
+
+  /// Ids bound in one `IN (…)` list. Android's framework SQLite allows at
+  /// most 999 bound variables per statement, so caller-sized lists are split.
+  static const int _maxBoundIdsPerStatement = 500;
+
+  static Iterable<List<T>> _boundIdChunks<T>(List<T> values) sync* {
+    for (var start = 0;
+        start < values.length;
+        start += _maxBoundIdsPerStatement) {
+      yield values.sublist(
+        start,
+        math.min(start + _maxBoundIdsPerStatement, values.length),
+      );
+    }
   }
 
   @override
@@ -6169,16 +6188,15 @@ final class SqliteTrackRepository
           <Object?>[entry.trackId, first, acceptedThrough],
         );
       }
-      if (rejected.isNotEmpty) {
-        final placeholders =
-            List<String>.filled(rejected.length, '?').join(',');
+      for (final chunk in _boundIdChunks(rejected)) {
+        final placeholders = List<String>.filled(chunk.length, '?').join(',');
         await transaction.rawUpdate(
           '''
           UPDATE track_points
           SET sync_state = 'rejected', last_sync_error = 'server_rejected'
           WHERE track_id = ? AND sequence IN ($placeholders)
           ''',
-          <Object?>[entry.trackId, ...rejected],
+          <Object?>[entry.trackId, ...chunk],
         );
       }
       await transaction.delete(
@@ -7486,12 +7504,15 @@ final class SqliteTrackRepository
         message: 'The selected derived geometry is not complete.',
       );
     }
-    final placeholders = List<String>.filled(ids.length, '?').join(',');
-    final rows = await _db.query(
-      'derived_geometry_points',
-      where: 'run_id = ? AND source_point_id IN ($placeholders)',
-      whereArgs: <Object?>[runId, ...ids],
-    );
+    final rows = <Map<String, Object?>>[];
+    for (final chunk in _boundIdChunks(ids)) {
+      final placeholders = List<String>.filled(chunk.length, '?').join(',');
+      rows.addAll(await _db.query(
+        'derived_geometry_points',
+        where: 'run_id = ? AND source_point_id IN ($placeholders)',
+        whereArgs: <Object?>[runId, ...chunk],
+      ));
+    }
     final result = <String, DerivedGeometryPoint>{};
     for (final row in rows) {
       final point = DerivedGeometryPoint(

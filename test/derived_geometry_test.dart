@@ -1,5 +1,7 @@
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite_common/sqflite_logger.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'test_support.dart';
 
@@ -93,5 +95,99 @@ void main() {
       ),
       hasLength(2),
     );
+  });
+
+  group('long routes', () {
+    // Android's framework SQLite allows at most 999 bound variables per
+    // statement; desktop FFI SQLite allows far more, so record every
+    // statement's argument count instead of relying on an error.
+    const androidMaxVariables = 999;
+    const pointCount = 2500;
+    late RepositoryHarness longHarness;
+    var maxBoundArguments = 0;
+
+    setUp(() async {
+      maxBoundArguments = 0;
+      sqfliteFfiInit();
+      longHarness = RepositoryHarness(
+        // Test-only statement recorder; the API is marked experimental.
+        // ignore: experimental_member_use
+        databaseFactory: SqfliteDatabaseFactoryLogger(
+          databaseFactoryFfi,
+          options: SqfliteLoggerOptions(
+            type: SqfliteDatabaseFactoryLoggerType.all,
+            log: (event) {
+              final arguments = switch (event) {
+                SqfliteLoggerSqlEvent(:final arguments) => arguments,
+                _ => null,
+              };
+              if (arguments is List && arguments.length > maxBoundArguments) {
+                maxBoundArguments = arguments.length;
+              }
+            },
+          ),
+        ),
+      );
+      await longHarness.initialize();
+    });
+
+    tearDown(() => longHarness.repository.close());
+
+    Future<String> recordLongRoute() async {
+      final trackId = await longHarness.createActiveTrack(trackId: 'long');
+      final start = longHarness.now;
+      for (var i = 0; i < pointCount; i++) {
+        await longHarness.append(
+          trackId: trackId,
+          latitude: 27 + i * 0.0001,
+          longitude: 85,
+          capturedAt: start.add(Duration(seconds: 5 * i)),
+        );
+      }
+      await longHarness.repository.completeTrack(trackId, reason: 'done');
+      return trackId;
+    }
+
+    test('a derived view of more than 999 points loads in bounded statements',
+        () async {
+      final trackId = await recordLongRoute();
+      const owner = TrackingOwner(userId: 'user-1', organizationId: 'org-1');
+      final service = DerivedGeometryService(longHarness.repository);
+      final run = await service.derive(owner: owner, trackId: trackId);
+      expect(run.status, DerivedGeometryRunStatus.completed);
+      expect(run.pointCount, pointCount);
+
+      maxBoundArguments = 0;
+      final derived = await service.loadForMap(
+        owner: owner,
+        trackId: trackId,
+        geometry: TrackGeometrySelection.derived(run.id),
+      );
+      final points = derived.segments.expand((segment) => segment.points);
+      expect(points, hasLength(pointCount));
+      expect(points.where((point) => point.accepted), hasLength(pointCount));
+      expect(maxBoundArguments, greaterThan(0));
+      expect(maxBoundArguments, lessThanOrEqualTo(androidMaxVariables));
+    });
+
+    test('marking more than 999 points synced uses bounded statements',
+        () async {
+      final trackId = await recordLongRoute();
+      final pending = await longHarness.repository
+          .pendingAcceptedPoints(trackId, limit: pointCount);
+      expect(pending, hasLength(pointCount));
+
+      maxBoundArguments = 0;
+      await longHarness.repository.markPointsSynced(
+        trackId,
+        pending.map((point) => point.sequence),
+      );
+      expect(maxBoundArguments, lessThanOrEqualTo(androidMaxVariables));
+      expect(
+        await longHarness.repository
+            .pendingAcceptedPoints(trackId, limit: pointCount),
+        isEmpty,
+      );
+    });
   });
 }

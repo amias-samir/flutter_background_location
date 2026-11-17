@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Fixed: on Android, the cleaned map view of a route with more than about
+  1,000 accepted points failed with `too many SQL variables`. Derived-coordinate
+  lookups and point sync updates now bind at most 500 ids per statement.
 - Shorter README with example-app screenshots. The detail moved into guides in
   `doc/`: platform setup, integration, multi-day Trips, route details, export
   and configuration. The Android manifest listing now shows `WAKE_LOCK`.
