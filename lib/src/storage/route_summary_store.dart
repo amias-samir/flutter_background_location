@@ -601,6 +601,51 @@ abstract final class RouteSummaryStore {
     String tripId, {
     required DateTime now,
   }) async {
+    final summary = await computeTrip(database, tripId, now: now);
+    if (summary == null) return null;
+    final tripSummaryColumns = await _columnNames(database, 'trip_summaries');
+    final firstFix = summary.firstFixAt;
+    final lastFix = summary.lastFixAt;
+    final stepsStoppedAt = summary.stepCountStoppedAt;
+    await database.insert(
+      'trip_summaries',
+      <String, Object?>{
+        'trip_id': tripId,
+        'summary_version': summaryVersion,
+        'leg_count': summary.legCount,
+        'segment_count': summary.segmentCount,
+        'first_fix_at': firstFix == null ? null : _timestamp(firstFix),
+        'last_fix_at': lastFix == null ? null : _timestamp(lastFix),
+        'recording_ms': summary.recording.inMilliseconds,
+        'moving_ms': summary.moving.inMilliseconds,
+        'stopped_ms': summary.stopped.inMilliseconds,
+        'stop_count': summary.stopCount,
+        'max_speed_mps': summary.maxSpeedMetersPerSecond,
+        'quality_event_count': summary.qualityEventCount,
+        'visible_gap_count': summary.visibleGapCount,
+        'stop_evidence_run_count': summary.stopEvidenceRunCount,
+        'step_count': summary.stepCount,
+        'cleaned_distance_m': summary.cleanedDistanceMeters,
+        if (tripSummaryColumns.contains('corrected_distance_m'))
+          'corrected_distance_m': summary.correctedDistanceMeters,
+        if (tripSummaryColumns.contains('step_count_stopped_at'))
+          'step_count_stopped_at':
+              stepsStoppedAt == null ? null : _timestamp(stepsStoppedAt),
+        'updated_at': _timestamp(now),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    return summary;
+  }
+
+  /// Totals of [tripId]'s legs, computed from the stored leg rows without
+  /// writing: the value [refreshTrip] stores. Reads use it, so reading a
+  /// Trip never takes the database write lock.
+  static Future<TripSummary?> computeTrip(
+    DatabaseExecutor database,
+    String tripId, {
+    required DateTime now,
+  }) async {
     final trips = await database.query(
       'trips',
       columns: <String>[
@@ -693,7 +738,6 @@ abstract final class RouteSummaryStore {
       }
     }
     final trip = trips.single;
-    final tripSummaryColumns = await _columnNames(database, 'trip_summaries');
     final summary = TripSummary(
       tripId: tripId,
       startedAt: DateTime.parse(trip['started_at']! as String).toUtc(),
@@ -718,34 +762,6 @@ abstract final class RouteSummaryStore {
       correctedDistanceMeters: anyReviewed ? corrected : null,
       stepCountStoppedAt: stepsStoppedAt,
       updatedAt: now,
-    );
-    await database.insert(
-      'trip_summaries',
-      <String, Object?>{
-        'trip_id': tripId,
-        'summary_version': summaryVersion,
-        'leg_count': summary.legCount,
-        'segment_count': summary.segmentCount,
-        'first_fix_at': firstFix == null ? null : _timestamp(firstFix),
-        'last_fix_at': lastFix == null ? null : _timestamp(lastFix),
-        'recording_ms': summary.recording.inMilliseconds,
-        'moving_ms': summary.moving.inMilliseconds,
-        'stopped_ms': summary.stopped.inMilliseconds,
-        'stop_count': summary.stopCount,
-        'max_speed_mps': fastest,
-        'quality_event_count': summary.qualityEventCount,
-        'visible_gap_count': summary.visibleGapCount,
-        'stop_evidence_run_count': summary.stopEvidenceRunCount,
-        'step_count': steps,
-        'cleaned_distance_m': summary.cleanedDistanceMeters,
-        if (tripSummaryColumns.contains('corrected_distance_m'))
-          'corrected_distance_m': summary.correctedDistanceMeters,
-        if (tripSummaryColumns.contains('step_count_stopped_at'))
-          'step_count_stopped_at':
-              stepsStoppedAt == null ? null : _timestamp(stepsStoppedAt),
-        'updated_at': _timestamp(now),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
     );
     return summary;
   }

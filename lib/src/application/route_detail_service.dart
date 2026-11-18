@@ -14,6 +14,7 @@ import '../domain/tracking_configuration_epoch.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
 import '../storage/track_repository.dart';
+import '../storage/route_map_repository.dart';
 import 'derived_geometry_service.dart';
 import 'route_reviewer.dart';
 import 'stop_episode_detector.dart';
@@ -263,6 +264,19 @@ final class RouteDetailService {
               algorithm: DerivedGeometryAlgorithm.stopAwareRouteCleaning,
             ),
           );
+    if (store is RouteSummaryRepository) {
+      final summaries = store as RouteSummaryRepository;
+      final summary = await summaries.routeSummary(trackId);
+      if (summary?.cleanedRunId != current.id) {
+        await summaries.recordCleanedGeometry(
+          trackId,
+          runId: current.id,
+          distanceMeters: await _cleanedPathMeters(owner, trackId, current),
+        );
+      }
+    }
+    // Superseded runs go only once the summary names the current one, so a
+    // reader never meets a summary that names a deleted run.
     for (final stale in runs.where((run) => run.id != current.id)) {
       await derived.deleteDerivedGeometryRun(
         owner: owner,
@@ -270,23 +284,26 @@ final class RouteDetailService {
         runId: stale.id,
       );
     }
-    if (store is RouteSummaryRepository) {
-      final summaries = store as RouteSummaryRepository;
-      final summary = await summaries.routeSummary(trackId);
-      if (summary?.cleanedRunId != current.id) {
-        final bundle = await service.loadForMap(
-          owner: owner,
-          trackId: trackId,
-          geometry: TrackGeometrySelection.derived(current.id),
-        );
-        await summaries.recordCleanedGeometry(
-          trackId,
-          runId: current.id,
-          distanceMeters: _acceptedPathMeters(bundle),
-        );
-      }
-    }
     return current;
+  }
+
+  /// Length of [run]'s cleaned path, segment by segment: read from its
+  /// stored coordinates when the repository can, else from its map view.
+  Future<double> _cleanedPathMeters(
+    TrackingOwner owner,
+    String trackId,
+    DerivedGeometryRun run,
+  ) async {
+    final store = repository;
+    if (store is DerivedPathRepository) {
+      return (store as DerivedPathRepository).derivedPathMeters(run.id);
+    }
+    final bundle = await DerivedGeometryService(repository).loadForMap(
+      owner: owner,
+      trackId: trackId,
+      geometry: TrackGeometrySelection.derived(run.id),
+    );
+    return _acceptedPathMeters(bundle);
   }
 
   /// Length of [bundle]'s accepted points, segment by segment.

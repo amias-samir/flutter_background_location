@@ -59,6 +59,42 @@ abstract final class RouteCompactionStore {
     return rows.map((row) => row['id']! as String).toList(growable: false);
   }
 
+  /// Fixes per transaction when [clearReadingsChunk] runs ahead of
+  /// [compact], so no single compaction transaction holds the database for
+  /// long.
+  static const int readingsChunkSize = 1000;
+
+  /// Clears the activity readings of [trackId]'s fixes with sequences in
+  /// (`after`, `through`] while it is an ended, uncompacted clean route.
+  /// Idempotent: [compact] clears whatever is left and claims the route.
+  static Future<int> clearReadingsChunk(
+    Transaction transaction,
+    String trackId, {
+    required int after,
+    required int through,
+  }) =>
+      transaction.rawUpdate(
+        '''
+        UPDATE track_points SET activity_readings_json = NULL
+        WHERE track_id = ? AND sequence > ? AND sequence <= ?
+          AND activity_readings_json IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM tracks
+            WHERE id = ? AND recording_detail = ? AND compacted_at IS NULL
+              AND status IN (?, ?)
+          )
+        ''',
+        <Object?>[
+          trackId,
+          after,
+          through,
+          trackId,
+          RouteRecordingDetail.clean.name,
+          TrackStatus.completed.name,
+          TrackStatus.failed.name,
+        ],
+      );
+
   /// Removes what a clean route [trackId] no longer needs once it has ended:
   /// the activity readings journaled with its fixes (only a restart of a live
   /// route decides from them), its motion evidence and its diagnostic health

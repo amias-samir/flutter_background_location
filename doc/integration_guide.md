@@ -286,6 +286,25 @@ final currentTrackSubscription = tracking.watchCurrentTrack().listen((track) {
 });
 ```
 
+## Show a route on a map
+
+The owner-bound controller implements `TrackingMapController`.
+`loadTrackMap(trackId)` and `loadTripMap(tripId)` return the route ready to
+draw. They never write to the route database, they read long routes in
+bounded pages, and they can be cancelled when the screen closes:
+
+```dart
+var closed = false; // set to true in dispose()
+final map = await (tracking as TrackingMapController).loadTripMap(
+  tripId,
+  isCancelled: () => closed,
+);
+```
+
+While `map.preparing` is true, the package is preparing details such as the
+cleaned view in the background. Reload when `trackHistoryEvents` reports an
+update. See [Route details](route_details.md#loading-a-route-for-a-map).
+
 ## Optional upload integration
 
 The plugin does not choose an HTTP client or backend protocol. Supply a

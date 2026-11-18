@@ -1,3 +1,5 @@
+import 'dart:isolate';
+
 import '../domain/derived_geometry.dart';
 import '../domain/route_geometry.dart';
 import '../domain/route_geometry_processor.dart';
@@ -229,30 +231,10 @@ final class DerivedGeometryService {
       }
       cursor = page.nextCursor;
     } while (cursor != null);
-    final smoothed = const UncertaintyWeightedRouteSmoother().smooth(raw);
-    if (stops != null) {
-      // Each stop collapses to its robust centre; a point too far from it
-      // keeps its raw position. The 1:1 mapping to source points is kept.
-      for (final stop in stops.detect(raw, heldEvidence: held)) {
-        for (var index = stop.firstIndex; index <= stop.lastIndex; index += 1) {
-          final point = raw[index];
-          final distance = TrackGeodesy.sphericalHaversineMeters(
-            stop.latitude,
-            stop.longitude,
-            point.latitude,
-            point.longitude,
-          );
-          if (distance > StopEpisodeDetector.maximumCollapseDistanceMeters) {
-            smoothed[index] = point;
-            continue;
-          }
-          smoothed[index] = point.withCoordinates(
-            latitude: stop.latitude,
-            longitude: stop.longitude,
-          );
-        }
-      }
-    }
+    // A long segment is cleaned off the calling (often UI) isolate.
+    final smoothed = raw.length < _inlineCleaningPointLimit
+        ? _cleanSegment(raw, held, stops)
+        : await _cleanSegmentInIsolate(raw, held, stops);
     for (var offset = 0; offset < smoothed.length; offset += pageSize) {
       final end = (offset + pageSize).clamp(0, smoothed.length);
       await store.appendDerivedGeometryPoints(
@@ -270,6 +252,49 @@ final class DerivedGeometryService {
         ],
       );
     }
+  }
+
+  /// Segments shorter than this are cleaned inline: an isolate would cost
+  /// more than the work.
+  static const int _inlineCleaningPointLimit = 1000;
+
+  static Future<List<TrackPoint>> _cleanSegmentInIsolate(
+    List<TrackPoint> raw,
+    List<TrackPoint> held,
+    StopEpisodeDetector? stops,
+  ) =>
+      Isolate.run(() => _cleanSegment(raw, held, stops));
+
+  /// [raw] smoothed, with each stop [stops] detects collapsed to its robust
+  /// centre; a point too far from it keeps its raw position. The 1:1 mapping
+  /// to source points is kept.
+  static List<TrackPoint> _cleanSegment(
+    List<TrackPoint> raw,
+    List<TrackPoint> held,
+    StopEpisodeDetector? stops,
+  ) {
+    final smoothed = const UncertaintyWeightedRouteSmoother().smooth(raw);
+    if (stops == null) return smoothed;
+    for (final stop in stops.detect(raw, heldEvidence: held)) {
+      for (var index = stop.firstIndex; index <= stop.lastIndex; index += 1) {
+        final point = raw[index];
+        final distance = TrackGeodesy.sphericalHaversineMeters(
+          stop.latitude,
+          stop.longitude,
+          point.latitude,
+          point.longitude,
+        );
+        if (distance > StopEpisodeDetector.maximumCollapseDistanceMeters) {
+          smoothed[index] = point;
+          continue;
+        }
+        smoothed[index] = point.withCoordinates(
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+        );
+      }
+    }
+    return smoothed;
   }
 
   /// Runs an opt-in host map matcher in bounded overlapping pages.

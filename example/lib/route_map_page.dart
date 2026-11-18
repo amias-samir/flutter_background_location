@@ -1,7 +1,8 @@
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as maplibre;
 
@@ -22,8 +23,22 @@ enum RouteView {
 
   const RouteView(this.label, this.description);
 
+  /// The page's view of the package's [view].
+  static RouteView of(RouteGeometryView view) => switch (view) {
+    RouteGeometryView.reviewed => RouteView.reviewed,
+    RouteGeometryView.cleaned => RouteView.cleaned,
+    RouteGeometryView.raw => RouteView.raw,
+  };
+
   final String label;
   final String description;
+
+  /// The package's view for this one.
+  RouteGeometryView get geometryView => switch (this) {
+    RouteView.reviewed => RouteGeometryView.reviewed,
+    RouteView.cleaned => RouteGeometryView.cleaned,
+    RouteView.raw => RouteGeometryView.raw,
+  };
 }
 
 /// A route as the map page draws it: [route] in [view], one of the [views]
@@ -33,14 +48,19 @@ final class RouteMapContent {
     required this.route,
     this.view = RouteView.raw,
     this.views = const <RouteView>[RouteView.raw],
+    this.preparing = false,
   });
 
   final RouteGeometry route;
   final RouteView view;
   final List<RouteView> views;
+
+  /// Whether the package is still preparing details of the route in the
+  /// background, such as its cleaned view ([RouteMap.preparing]).
+  final bool preparing;
 }
 
-class TrackMapPage extends StatefulWidget {
+class TrackMapPage extends StatelessWidget {
   const TrackMapPage({
     super.key,
     required this.tracking,
@@ -56,34 +76,302 @@ class TrackMapPage extends StatefulWidget {
   final RouteMapBuilder mapBuilder;
 
   /// Whether the page offers the route's views and continuity and draws
-  /// gaps and uncertain stretches; a clean build shows the clean route and
+  /// gaps and uncertain stretches; without it the map shows the route and
   /// its stops only.
   final bool showDiagnostics;
 
   @override
-  State<TrackMapPage> createState() => _TrackMapPageState();
+  Widget build(BuildContext context) => RouteMapPage(
+    title: track.routeId ?? 'Recorded route',
+    showDiagnostics: showDiagnostics,
+    mapBuilder: mapBuilder,
+    initialContinuity: RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    // Only the package's map capability prepares details to wait for.
+    updates: tracking is TrackingMapController && tracking is TrackingController
+        ? (tracking as TrackingController).trackHistoryEvents
+        : null,
+    loader: (request, isCancelled) => tracking is TrackingMapController
+        ? loadRouteMapContent(
+            tracking as TrackingMapController,
+            trackId: track.id,
+            request: request,
+            isCancelled: isCancelled,
+            showDiagnostics: showDiagnostics,
+          )
+        : loadTrackMap(
+            tracking,
+            track.id,
+            continuity: request.continuity,
+            view: request.view,
+          ),
+  );
 }
 
-class _TrackMapPageState extends State<TrackMapPage> {
-  var _continuity = RouteGeometryContinuity.mergeAutomaticCallbackGaps;
+class TripMapPage extends StatelessWidget {
+  const TripMapPage({
+    super.key,
+    required this.tracking,
+    required this.trip,
+    this.showDiagnostics = true,
+    @visibleForTesting this.mapBuilder = _mapLibreMap,
+  });
+
+  final MultiDayTripController tracking;
+  final Trip trip;
+
+  /// As [TrackMapPage.showDiagnostics].
+  final bool showDiagnostics;
+
+  /// Draws the map; tests replace the MapLibre platform view.
+  final RouteMapBuilder mapBuilder;
+
+  @override
+  Widget build(BuildContext context) => RouteMapPage(
+    title: trip.routeId ?? 'Multi-day Trip',
+    showDiagnostics: showDiagnostics,
+    mapBuilder: mapBuilder,
+    initialContinuity: trip.routePresentation.geometryContinuity,
+    // Only the package's map capability prepares details to wait for.
+    updates: tracking is TrackingMapController && tracking is TrackingController
+        ? (tracking as TrackingController).trackHistoryEvents
+        : null,
+    loader: (request, isCancelled) => tracking is TrackingMapController
+        ? loadRouteMapContent(
+            tracking as TrackingMapController,
+            tripId: trip.id,
+            request: request,
+            isCancelled: isCancelled,
+            showDiagnostics: showDiagnostics,
+          )
+        : loadTripMap(
+            tracking,
+            trip.id,
+            continuity: request.continuity,
+            view: request.view,
+          ),
+  );
+}
+
+/// What the map page asks for: a [view], or the route's default, drawn
+/// with [continuity].
+@immutable
+final class RouteMapRequest {
+  const RouteMapRequest({required this.continuity, this.view});
+
+  final RouteView? view;
+  final RouteGeometryContinuity continuity;
+}
+
+/// Loads a route for the map page; [isCancelled] turns true once the page
+/// no longer needs the result.
+typedef RouteMapLoader =
+    Future<RouteMapContent> Function(
+      RouteMapRequest request,
+      bool Function() isCancelled,
+    );
+
+/// A route or Trip from the package's read-only map capability
+/// ([TrackingMapController]): one bounded read, no writes. The package
+/// prepares missing details in the background and says so
+/// ([RouteMapContent.preparing]).
+Future<RouteMapContent> loadRouteMapContent(
+  TrackingMapController maps, {
+  String? trackId,
+  String? tripId,
+  required RouteMapRequest request,
+  required bool Function() isCancelled,
+  bool showDiagnostics = true,
+}) async {
+  assert((trackId == null) != (tripId == null));
+  final view = request.view?.geometryView;
+  final map = trackId != null
+      ? await maps.loadTrackMap(
+          trackId,
+          view: view,
+          continuity: request.continuity,
+          isCancelled: isCancelled,
+        )
+      : await maps.loadTripMap(
+          tripId!,
+          view: view,
+          continuity: request.continuity,
+          isCancelled: isCancelled,
+        );
+  final totals = switch ((map.routeSummary, map.tripSummary)) {
+    (final route?, _) => RouteTotals.ofRoute(route),
+    (_, final trip?) => RouteTotals.ofTrip(trip),
+    _ => null,
+  };
+  final route = await buildRouteGeometry(
+    map.geometry,
+    stops: map.stops,
+    totals: totals,
+    includeUncertainty: showDiagnostics,
+  );
+  return RouteMapContent(
+    route: route,
+    view: RouteView.of(map.view),
+    views: <RouteView>[for (final view in map.views) RouteView.of(view)],
+    preparing: map.preparing,
+  );
+}
+
+/// Routes with at least this many points are turned into map geometry off
+/// the UI isolate.
+const _isolatePointThreshold = 2000;
+
+/// [RouteGeometry.fromReport] for [report], off the UI isolate for a long
+/// route.
+Future<RouteGeometry> buildRouteGeometry(
+  RouteGeometryReport report, {
+  Iterable<TrackStop> stops = const <TrackStop>[],
+  RouteTotals? totals,
+  bool includeUncertainty = true,
+}) {
+  final pointCount = report.parts.fold<int>(
+    0,
+    (count, part) => count + part.points.length,
+  );
+  final stopList = stops.toList(growable: false);
+  RouteGeometry build() => RouteGeometry.fromReport(
+    report,
+    stops: stopList,
+    totals: totals,
+    includeUncertainty: includeUncertainty,
+  );
+  if (pointCount < _isolatePointThreshold) return Future.value(build());
+  return Isolate.run(build);
+}
+
+/// The map page of a route or Trip. The route loads once, again only when
+/// the view or continuity changes, and the previous map stays on screen
+/// meanwhile. Leaving the page cancels the load.
+class RouteMapPage extends StatefulWidget {
+  const RouteMapPage({
+    super.key,
+    required this.title,
+    required this.loader,
+    required this.initialContinuity,
+    this.showDiagnostics = true,
+    this.updates,
+    this.mapBuilder = _mapLibreMap,
+  });
+
+  final String title;
+  final RouteMapLoader loader;
+  final RouteGeometryContinuity initialContinuity;
+  final bool showDiagnostics;
+
+  /// Route changes; while a route is being prepared, an update offers to
+  /// show it.
+  final Stream<TrackHistoryEvent>? updates;
+  final RouteMapBuilder mapBuilder;
+
+  @override
+  State<RouteMapPage> createState() => _RouteMapPageState();
+}
+
+class _RouteMapPageState extends State<RouteMapPage> {
+  late RouteGeometryContinuity _continuity;
 
   /// The view picked on the page; null draws the route's default view.
   RouteView? _view;
+  RouteMapContent? _content;
+  Object? _error;
+  var _loading = true;
+
+  /// Whether the details being prepared have been stored since the load.
+  var _ready = false;
+  var _generation = 0;
+  StreamSubscription<TrackHistoryEvent>? _updates;
+  Timer? _readyDebounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _continuity = widget.initialContinuity;
+    _updates = widget.updates?.listen(_onUpdate);
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    // Cancels a load in flight; its result is dropped.
+    _generation += 1;
+    unawaited(_updates?.cancel());
+    _readyDebounce?.cancel();
+    super.dispose();
+  }
+
+  void _onUpdate(TrackHistoryEvent event) {
+    if (event.kind != TrackHistoryChangeKind.updated) return;
+    if (!(_content?.preparing ?? false) || _ready) return;
+    _readyDebounce?.cancel();
+    _readyDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) setState(() => _ready = true);
+    });
+  }
+
+  Future<void> _load() async {
+    final generation = ++_generation;
+    bool cancelled() => !mounted || generation != _generation;
+    if (mounted && _content != null) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    try {
+      final content = await widget.loader(
+        RouteMapRequest(view: _view, continuity: _continuity),
+        cancelled,
+      );
+      if (cancelled()) return;
+      setState(() {
+        _content = content;
+        _error = null;
+        _loading = false;
+        _ready = false;
+      });
+    } on Object catch (error) {
+      if (cancelled()) return;
+      if (error is TrackingException && error.code == 'route_map_cancelled') {
+        return;
+      }
+      setState(() {
+        _error = error;
+        _loading = false;
+      });
+    }
+  }
+
+  void _select({RouteView? view, RouteGeometryContinuity? continuity}) {
+    if ((view == null || view == (_view ?? _content?.view)) &&
+        (continuity == null || continuity == _continuity)) {
+      return;
+    }
+    setState(() {
+      _view = view ?? _view;
+      _continuity = continuity ?? _continuity;
+    });
+    unawaited(_load());
+  }
 
   @override
   Widget build(BuildContext context) => _RouteMapScaffold(
-    title: widget.track.routeId ?? 'Recorded route',
+    title: widget.title,
     showDiagnostics: widget.showDiagnostics,
     mapBuilder: widget.mapBuilder,
     continuity: _continuity,
-    onContinuityChanged: (value) => setState(() => _continuity = value),
-    onViewChanged: (value) => setState(() => _view = value),
-    future: loadTrackMap(
-      widget.tracking,
-      widget.track.id,
-      continuity: _continuity,
-      view: _view,
-    ),
+    content: _content,
+    loading: _loading,
+    error: _error,
+    ready: _ready,
+    onContinuityChanged: (value) => _select(continuity: value),
+    onViewChanged: (value) => _select(view: value),
+    onRetry: () => unawaited(_load()),
+    onShowRecorded: () => _select(view: RouteView.raw),
+    onShowReady: () => unawaited(_load()),
   );
 }
 
@@ -203,52 +491,6 @@ Iterable<RouteGeometrySourcePart> _sourceParts(
     points: segment.points,
   ),
 );
-
-class TripMapPage extends StatefulWidget {
-  const TripMapPage({
-    super.key,
-    required this.tracking,
-    required this.trip,
-    this.showDiagnostics = true,
-  });
-
-  final MultiDayTripController tracking;
-  final Trip trip;
-
-  /// As [TrackMapPage.showDiagnostics].
-  final bool showDiagnostics;
-
-  @override
-  State<TripMapPage> createState() => _TripMapPageState();
-}
-
-class _TripMapPageState extends State<TripMapPage> {
-  late RouteGeometryContinuity _continuity;
-
-  /// The view picked on the page; null draws the Trip's default view.
-  RouteView? _view;
-
-  @override
-  void initState() {
-    super.initState();
-    _continuity = widget.trip.routePresentation.geometryContinuity;
-  }
-
-  @override
-  Widget build(BuildContext context) => _RouteMapScaffold(
-    title: widget.trip.routeId ?? 'Multi-day Trip',
-    showDiagnostics: widget.showDiagnostics,
-    continuity: _continuity,
-    onContinuityChanged: (value) => setState(() => _continuity = value),
-    onViewChanged: (value) => setState(() => _view = value),
-    future: loadTripMap(
-      widget.tracking,
-      widget.trip.id,
-      continuity: _continuity,
-      view: _view,
-    ),
-  );
-}
 
 /// Loads [tripId] for the map in [view] when the Trip has it, else in its
 /// first view: reviewed when a day has a review, else cleaned when
@@ -401,18 +643,34 @@ class _RouteMapScaffold extends StatefulWidget {
     required this.title,
     required this.showDiagnostics,
     required this.continuity,
+    required this.content,
+    required this.loading,
+    required this.error,
+    required this.ready,
     required this.onContinuityChanged,
     required this.onViewChanged,
-    required this.future,
+    required this.onRetry,
+    required this.onShowRecorded,
+    required this.onShowReady,
     this.mapBuilder = _mapLibreMap,
   });
 
   final String title;
   final bool showDiagnostics;
   final RouteGeometryContinuity continuity;
+
+  /// The route drawn; while [loading], the previous one stays.
+  final RouteMapContent? content;
+  final bool loading;
+  final Object? error;
+
+  /// Whether details being prepared were stored since [content] loaded.
+  final bool ready;
   final ValueChanged<RouteGeometryContinuity> onContinuityChanged;
   final ValueChanged<RouteView> onViewChanged;
-  final Future<RouteMapContent> future;
+  final VoidCallback onRetry;
+  final VoidCallback onShowRecorded;
+  final VoidCallback onShowReady;
   final RouteMapBuilder mapBuilder;
 
   @override
@@ -486,106 +744,244 @@ class _RouteMapScaffoldState extends State<_RouteMapScaffold> {
       ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
       toolbarHeight: 64,
     ),
-    body: FutureBuilder<RouteMapContent>(
-      future: widget.future,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: SelectableText(snapshot.error.toString()),
+    body: _body(context),
+  );
+
+  Widget _body(BuildContext context) {
+    final content = widget.content;
+    final error = widget.error;
+    if (content == null) {
+      if (error != null) {
+        return _RouteMapError(
+          error: error,
+          showDetails: widget.showDiagnostics,
+          onRetry: widget.onRetry,
+        );
+      }
+      return const Center(child: CircularProgressIndicator());
+    }
+    final route = content.route;
+    // A review that keeps no fix still offers the recorded route.
+    if (route.points.isEmpty && content.view != RouteView.reviewed) {
+      return const Center(child: Text('No accepted coordinates yet.'));
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bodyHeight = constraints.maxHeight;
+        final peekPixels = math.min(
+          _peekPixels(context, content),
+          bodyHeight * 0.4,
+        );
+        final peek = peekPixels / bodyHeight;
+        final banner = _banner(context, content, error);
+        return Stack(
+          children: <Widget>[
+            Positioned.fill(
+              child: route.points.isEmpty
+                  ? const Center(child: Text('No accepted coordinates yet.'))
+                  : widget.mapBuilder(
+                      _map,
+                      route,
+                      widget.showDiagnostics,
+                      // The fitted route stays clear of the stats.
+                      EdgeInsets.fromLTRB(48, 48, 48, peekPixels + 32),
+                    ),
             ),
-          );
-        }
-        if (!snapshot.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final content = snapshot.requireData;
-        final route = content.route;
-        // A review that keeps no fix still offers the recorded route.
-        if (route.points.isEmpty && content.view != RouteView.reviewed) {
-          return const Center(child: Text('No accepted coordinates yet.'));
-        }
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final bodyHeight = constraints.maxHeight;
-            final peekPixels = math.min(
-              _peekPixels(context, content),
-              bodyHeight * 0.4,
-            );
-            final peek = peekPixels / bodyHeight;
-            return Stack(
-              children: <Widget>[
-                Positioned.fill(
-                  child: route.points.isEmpty
-                      ? const Center(
-                          child: Text('No accepted coordinates yet.'),
-                        )
-                      : widget.mapBuilder(
-                          _map,
-                          route,
-                          widget.showDiagnostics,
-                          // The fitted route stays clear of the stats.
-                          EdgeInsets.fromLTRB(48, 48, 48, peekPixels + 32),
-                        ),
+            if (widget.loading)
+              const Positioned(
+                left: 0,
+                right: 0,
+                top: 0,
+                child: LinearProgressIndicator(minHeight: 3),
+              ),
+            if (banner != null)
+              Positioned(left: 12, right: 12, top: 12, child: banner),
+            if (route.points.isNotEmpty)
+              // The buttons ride just above the sheet.
+              AnimatedBuilder(
+                animation: _sheet,
+                builder: (context, child) => Positioned(
+                  right: 16,
+                  bottom: (_sheet.isAttached ? _sheet.pixels : peekPixels) + 16,
+                  child: child!,
                 ),
-                if (route.points.isNotEmpty)
-                  // The buttons ride just above the sheet.
-                  AnimatedBuilder(
-                    animation: _sheet,
-                    builder: (context, child) => Positioned(
-                      right: 16,
-                      bottom:
-                          (_sheet.isAttached ? _sheet.pixels : peekPixels) + 16,
-                      child: child!,
-                    ),
-                    child: _MapButtons(
-                      showDiagnostics: widget.showDiagnostics,
-                      continuity: widget.continuity,
-                      onContinuityChanged: widget.onContinuityChanged,
-                      onFitRoute: () => _map.currentState?.fitRoute(),
-                    ),
-                  ),
-                DraggableScrollableSheet(
-                  controller: _sheet,
-                  initialChildSize: peek,
-                  minChildSize: peek,
-                  maxChildSize: _expandedSize,
-                  snap: true,
-                  builder: (context, scrollController) => Material(
-                    elevation: 8,
-                    color: Theme.of(context).colorScheme.surfaceContainerLow,
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.vertical(
-                        top: Radius.circular(24),
-                      ),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: RouteMapHeader(
-                      content: content,
-                      showDiagnostics: widget.showDiagnostics,
-                      continuity: widget.continuity,
-                      onContinuityChanged: widget.onContinuityChanged,
-                      onViewChanged: widget.onViewChanged,
-                      onStopSelected: (stop) =>
-                          _map.currentState?.focus(stop.coordinate),
-                      sheet: RouteMapSheetLayout(
-                        scrollController: scrollController,
-                        expandedHeight: bodyHeight * _expandedSize,
-                        onDragUpdate: (details) =>
-                            _dragSheet(details, bodyHeight, peek),
-                        onDragEnd: (details) => _settleSheet(details, peek),
-                      ),
-                    ),
+                child: _MapButtons(
+                  showDiagnostics: widget.showDiagnostics,
+                  continuity: widget.continuity,
+                  onContinuityChanged: widget.onContinuityChanged,
+                  onFitRoute: () => _map.currentState?.fitRoute(),
+                ),
+              ),
+            DraggableScrollableSheet(
+              controller: _sheet,
+              initialChildSize: peek,
+              minChildSize: peek,
+              maxChildSize: _expandedSize,
+              snap: true,
+              builder: (context, scrollController) => Material(
+                elevation: 8,
+                color: Theme.of(context).colorScheme.surfaceContainerLow,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: RouteMapHeader(
+                  content: content,
+                  showDiagnostics: widget.showDiagnostics,
+                  continuity: widget.continuity,
+                  onContinuityChanged: widget.onContinuityChanged,
+                  onViewChanged: widget.onViewChanged,
+                  onStopSelected: (stop) =>
+                      _map.currentState?.focus(stop.coordinate),
+                  sheet: RouteMapSheetLayout(
+                    scrollController: scrollController,
+                    expandedHeight: bodyHeight * _expandedSize,
+                    onDragUpdate: (details) =>
+                        _dragSheet(details, bodyHeight, peek),
+                    onDragEnd: (details) => _settleSheet(details, peek),
                   ),
                 ),
-              ],
-            );
-          },
+              ),
+            ),
+          ],
         );
       },
+    );
+  }
+
+  /// A note over the map: a failed reload, details being prepared, or
+  /// details ready to show.
+  Widget? _banner(
+    BuildContext context,
+    RouteMapContent content,
+    Object? error,
+  ) {
+    if (error != null) {
+      return _MapBanner(
+        icon: Icons.error_outline,
+        text: routeMapErrorMessage(error),
+        actions: <Widget>[
+          TextButton(onPressed: widget.onRetry, child: const Text('Retry')),
+          if (content.view != RouteView.raw)
+            TextButton(
+              onPressed: widget.onShowRecorded,
+              child: const Text('Show recorded'),
+            ),
+        ],
+      );
+    }
+    if (!content.preparing) return null;
+    if (widget.ready) {
+      return _MapBanner(
+        icon: Icons.check_circle_outline,
+        text: 'Route details are ready.',
+        actions: <Widget>[
+          TextButton(onPressed: widget.onShowReady, child: const Text('Show')),
+        ],
+      );
+    }
+    return _MapBanner(
+      icon: Icons.hourglass_top_rounded,
+      text: content.view == RouteView.cleaned
+          ? 'Preparing the cleaned view; showing the route as recorded.'
+          : 'Preparing route details.',
+    );
+  }
+}
+
+/// A short note floating over the map.
+class _MapBanner extends StatelessWidget {
+  const _MapBanner({
+    required this.icon,
+    required this.text,
+    this.actions = const <Widget>[],
+  });
+
+  final IconData icon;
+  final String text;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    elevation: 3,
+    borderRadius: BorderRadius.circular(14),
+    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      child: Row(
+        children: <Widget>[
+          Icon(icon, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(text, style: Theme.of(context).textTheme.bodySmall),
+          ),
+          ...actions,
+        ],
+      ),
     ),
   );
+}
+
+/// What went wrong opening a route, in a sentence: from the package's
+/// stable error codes, never the raw exception text.
+String routeMapErrorMessage(Object error) => switch (error) {
+  TrackingOwnershipException() =>
+    "This route isn't available for the current account.",
+  TrackingStorageException() =>
+    "The route database couldn't be read. Try again.",
+  TrackingException() => "The route couldn't be opened. Try again.",
+  _ => "The route couldn't be opened. Try again.",
+};
+
+/// The page when a route could not be opened at all.
+class _RouteMapError extends StatelessWidget {
+  const _RouteMapError({
+    required this.error,
+    required this.showDetails,
+    required this.onRetry,
+  });
+
+  final Object error;
+
+  /// Whether to show the error's stable code, for diagnostics.
+  final bool showDetails;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final code = error is TrackingException
+        ? (error as TrackingException).code
+        : error.runtimeType.toString();
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(Icons.map_outlined, size: 40, color: theme.colorScheme.error),
+            const SizedBox(height: 12),
+            Text(
+              "Couldn't open this route",
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              routeMapErrorMessage(error),
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium,
+            ),
+            if (showDetails) ...<Widget>[
+              const SizedBox(height: 6),
+              Text(code, style: theme.textTheme.bodySmall),
+            ],
+            const SizedBox(height: 16),
+            FilledButton.tonal(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// The map's floating buttons, above the panel: continuity, with
@@ -1001,58 +1397,76 @@ class TrackRouteMap extends StatefulWidget {
   State<TrackRouteMap> createState() => TrackRouteMapState();
 }
 
+/// Draws the route with three GeoJSON sources and five style layers: a
+/// handful of platform calls however long the route or many its stops, and
+/// one update of the sources when the route changes.
 class TrackRouteMapState extends State<TrackRouteMap> {
   maplibre.MapLibreMapController? _controller;
   bool _styleLoaded = false;
-  bool _routeDrawn = false;
+
+  /// Whether this style has the route's sources and layers.
+  bool _layersAdded = false;
+
+  /// Bumped per draw; a draw that finds it moved on stops.
+  int _drawGeneration = 0;
+
+  static const _routeSource = 'route';
+  static const _uncertainSource = 'route-uncertain';
+  static const _markerSource = 'route-markers';
+
+  /// Stop labels in a source of their own: a label the style can't draw
+  /// (a missing font fails its source's tiles) never hides a marker.
+  static const _labelSource = 'route-stop-labels';
+
+  /// The one font the basemap style serves glyphs for.
+  static const _labelFont = 'Noto Sans Regular';
 
   @override
   void dispose() {
-    _controller?.onCircleTapped.remove(_onCircleTapped);
-    _controller?.onSymbolTapped.remove(_onSymbolTapped);
+    _drawGeneration += 1;
+    _controller?.onFeatureTapped.remove(_onFeatureTapped);
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => maplibre.MapLibreMap(
-    styleString: _basemapStyle,
-    compassViewPosition: maplibre.CompassViewPosition.bottomRight,
-    initialCameraPosition: maplibre.CameraPosition(
-      target: widget.route.center,
-      zoom: widget.route.points.length == 1 ? 15 : 13,
+  void didUpdateWidget(TrackRouteMap oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.route, widget.route) ||
+        oldWidget.showDiagnostics != widget.showDiagnostics) {
+      unawaited(_drawRoute(fit: !identical(oldWidget.route, widget.route)));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => maplibre.MapLibreMap(
+      styleString: _basemapStyle,
+      compassViewPosition: maplibre.CompassViewPosition.bottomRight,
+      // The route's own sources and layers: no annotation managers.
+      annotationOrder: const <maplibre.AnnotationType>[],
+      initialCameraPosition: initialRouteCamera(
+        widget.route,
+        constraints.biggest,
+        widget.fitPadding,
+      ),
+      onMapCreated: (controller) {
+        _controller = controller;
+        controller.onFeatureTapped.add(_onFeatureTapped);
+      },
+      onStyleLoadedCallback: () {
+        _styleLoaded = true;
+        // A new style starts without the route's layers.
+        _layersAdded = false;
+        unawaited(_drawRoute(fit: true));
+      },
     ),
-    onMapCreated: (controller) {
-      _controller = controller;
-      controller.onCircleTapped.add(_onCircleTapped);
-      controller.onSymbolTapped.add(_onSymbolTapped);
-      unawaited(_drawRoute());
-    },
-    onStyleLoadedCallback: () {
-      _styleLoaded = true;
-      unawaited(_drawRoute());
-    },
   );
 
   /// Moves the camera so the whole route shows.
   Future<void> fitRoute() async {
     final controller = _controller;
     if (controller == null) return;
-    if (widget.route.points.length == 1) {
-      await controller.animateCamera(
-        maplibre.CameraUpdate.newLatLngZoom(widget.route.start, 16),
-      );
-      return;
-    }
-    final padding = widget.fitPadding;
-    await controller.animateCamera(
-      maplibre.CameraUpdate.newLatLngBounds(
-        widget.route.bounds,
-        left: padding.left,
-        top: padding.top,
-        right: padding.right,
-        bottom: padding.bottom,
-      ),
-    );
+    await controller.animateCamera(_routeCameraUpdate());
   }
 
   /// Moves the camera close to [coordinate], such as a stop.
@@ -1062,143 +1476,347 @@ class TrackRouteMapState extends State<TrackRouteMap> {
     );
   }
 
-  Future<void> _drawRoute() async {
+  maplibre.CameraUpdate _routeCameraUpdate() {
+    if (widget.route.points.length == 1) {
+      return maplibre.CameraUpdate.newLatLngZoom(widget.route.start, 16);
+    }
+    final padding = widget.fitPadding;
+    return maplibre.CameraUpdate.newLatLngBounds(
+      widget.route.bounds,
+      left: padding.left,
+      top: padding.top,
+      right: padding.right,
+      bottom: padding.bottom,
+    );
+  }
+
+  Future<void> _drawRoute({required bool fit}) async {
     final controller = _controller;
-    if (controller == null || !_styleLoaded || _routeDrawn) return;
-    _routeDrawn = true;
-    // A white casing under the route keeps it legible on any basemap.
-    for (final segment in widget.route.segments) {
-      await controller.addLine(
-        maplibre.LineOptions(
-          geometry: segment,
+    if (controller == null || !_styleLoaded) return;
+    final generation = ++_drawGeneration;
+    bool stale() =>
+        !mounted || controller.isDisposed || generation != _drawGeneration;
+    final route = widget.route;
+    final lines = routeFeatureCollection(route.segments);
+    final uncertain = routeFeatureCollection(
+      widget.showDiagnostics
+          ? route.uncertainSegments
+          : const <List<maplibre.LatLng>>[],
+    );
+    final markers = markerFeatureCollection(
+      route,
+      showDiagnostics: widget.showDiagnostics,
+    );
+    final labels = stopLabelFeatureCollection(route);
+    if (!_layersAdded) {
+      _layersAdded = true;
+      await controller.addGeoJsonSource(_routeSource, lines);
+      if (stale()) return;
+      await controller.addGeoJsonSource(_uncertainSource, uncertain);
+      if (stale()) return;
+      await controller.addGeoJsonSource(_markerSource, markers);
+      if (stale()) return;
+      await controller.addGeoJsonSource(_labelSource, labels);
+      if (stale()) return;
+      // A white casing under the route keeps it legible on any basemap.
+      await controller.addLineLayer(
+        _routeSource,
+        'route-casing',
+        const maplibre.LineLayerProperties(
           lineColor: '#FFFFFF',
           lineWidth: 9,
           lineOpacity: 0.95,
           lineJoin: 'round',
+          lineCap: 'round',
         ),
+        enableInteraction: false,
       );
-    }
-    for (final segment in widget.route.segments) {
-      await controller.addLine(
-        maplibre.LineOptions(
-          geometry: segment,
+      if (stale()) return;
+      await controller.addLineLayer(
+        _routeSource,
+        'route-line',
+        maplibre.LineLayerProperties(
           lineColor: _RouteColors.hex(_RouteColors.route),
           lineWidth: 5,
           lineOpacity: 0.95,
           lineJoin: 'round',
+          lineCap: 'round',
         ),
+        enableInteraction: false,
       );
-    }
-    // Stretches whose fixes zig-zag inside their own uncertainty: the route
-    // went somewhere here, but the positions can't say exactly where.
-    for (final stretch
-        in widget.showDiagnostics
-            ? widget.route.uncertainSegments
-            : const <List<maplibre.LatLng>>[]) {
-      await controller.addLine(
-        maplibre.LineOptions(
-          geometry: stretch,
+      if (stale()) return;
+      // Stretches whose fixes zig-zag inside their own uncertainty: the
+      // route went somewhere here, but the positions can't say exactly
+      // where.
+      await controller.addLineLayer(
+        _uncertainSource,
+        'route-uncertain-line',
+        maplibre.LineLayerProperties(
           lineColor: _RouteColors.hex(_RouteColors.uncertain),
           lineWidth: 4,
           lineOpacity: 0.9,
           lineJoin: 'round',
+          lineCap: 'round',
         ),
+        enableInteraction: false,
       );
-    }
-    for (final marker
-        in widget.showDiagnostics
-            ? widget.route.gapMarkers
-            : const <maplibre.LatLng>[]) {
-      await _drawCircle(
-        controller,
-        coordinate: marker,
-        color: _RouteColors.gap,
-        radius: 6,
-        strokeWidth: 2,
+      if (stale()) return;
+      // Gaps and stops, then the start and end above them.
+      await controller.addCircleLayer(
+        _markerSource,
+        'route-markers',
+        _markerCircles,
+        filter: const <Object>[
+          'in',
+          <Object>['get', 'kind'],
+          <Object>[
+            'literal',
+            <String>['gap', 'stop'],
+          ],
+        ],
       );
-    }
-    final stops = widget.route.stopMarkers;
-    for (var index = 0; index < stops.length; index += 1) {
-      final stop = stops[index];
-      final data = <String, dynamic>{_stopKey: index};
-      await _drawCircle(
-        controller,
-        coordinate: stop.coordinate,
-        color: _RouteColors.stop,
-        radius: 7,
-        strokeWidth: 2,
-        data: data,
+      if (stale()) return;
+      await controller.addCircleLayer(
+        _markerSource,
+        'route-endpoints',
+        _markerCircles,
+        filter: const <Object>[
+          'in',
+          <Object>['get', 'kind'],
+          <Object>[
+            'literal',
+            <String>['start', 'end'],
+          ],
+        ],
+        enableInteraction: false,
       );
+      if (stale()) return;
       try {
-        await controller.addSymbol(
-          maplibre.SymbolOptions(
-            geometry: stop.coordinate,
-            textField: stopDurationLabel(stop.duration),
+        await controller.addSymbolLayer(
+          _labelSource,
+          'route-stop-labels',
+          const maplibre.SymbolLayerProperties(
+            textField: <Object>['get', 'label'],
+            textFont: <Object>[
+              'literal',
+              <String>[_labelFont],
+            ],
             textSize: 12,
-            textOffset: const Offset(0, 1.4),
+            textOffset: <Object>[
+              'literal',
+              <double>[0, 1.4],
+            ],
             textColor: '#0D47A1',
             textHaloColor: '#FFFFFF',
             textHaloWidth: 1.5,
+            textAllowOverlap: false,
           ),
-          data,
+          enableInteraction: false,
         );
       } on Object {
-        // A style without glyphs still shows the stop marker.
+        // A style without glyphs still shows the stop markers.
       }
+    } else {
+      await controller.setGeoJsonSource(_routeSource, lines);
+      if (stale()) return;
+      await controller.setGeoJsonSource(_uncertainSource, uncertain);
+      if (stale()) return;
+      await controller.setGeoJsonSource(_markerSource, markers);
+      if (stale()) return;
+      await controller.setGeoJsonSource(_labelSource, labels);
     }
-    // A single-point route draws its end inside its start.
-    await _drawCircle(
-      controller,
-      coordinate: widget.route.start,
-      color: _RouteColors.start,
-      radius: widget.route.hasDistinctEndpoints ? 8 : 10,
-    );
-    await _drawCircle(
-      controller,
-      coordinate: widget.route.destination,
-      color: _RouteColors.end,
-      radius: widget.route.hasDistinctEndpoints ? 8 : 5,
-      strokeWidth: widget.route.hasDistinctEndpoints ? 3 : 1,
-    );
-    if (widget.route.points.length == 1) return;
-    await fitRoute();
+    if (stale() || !fit) return;
+    // Jump, not fly: the first camera was already close to this.
+    await controller.moveCamera(_routeCameraUpdate());
   }
 
-  static const _stopKey = 'stop';
+  /// A marker circle styled from its feature: green start, red end, blue
+  /// stops, orange gaps.
+  static const _markerCircles = maplibre.CircleLayerProperties(
+    circleColor: <Object>['get', 'color'],
+    circleRadius: <Object>['get', 'radius'],
+    circleStrokeColor: '#FFFFFF',
+    circleStrokeWidth: <Object>['get', 'stroke'],
+  );
 
-  void _onCircleTapped(maplibre.Circle circle) => _showStop(circle.data);
-
-  void _onSymbolTapped(maplibre.Symbol symbol) => _showStop(symbol.data);
-
-  void _showStop(Map<dynamic, dynamic>? data) {
-    final index = data?[_stopKey];
-    if (!mounted || index is! int) return;
+  void _onFeatureTapped(
+    math.Point<double> point,
+    maplibre.LatLng coordinates,
+    String id,
+    String layerId,
+    maplibre.Annotation? annotation,
+  ) {
+    if (!mounted || !id.startsWith(_stopIdPrefix)) return;
+    final index = int.tryParse(id.substring(_stopIdPrefix.length));
     final stops = widget.route.stopMarkers;
-    if (index >= stops.length) return;
+    if (index == null || index < 0 || index >= stops.length) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(describeStop(stops[index]))));
   }
+}
 
-  Future<void> _drawCircle(
-    maplibre.MapLibreMapController controller, {
-    required maplibre.LatLng coordinate,
+/// Feature IDs of stop markers: this prefix and the stop's index.
+const _stopIdPrefix = 'stop-';
+
+/// [lines] as a GeoJSON FeatureCollection of LineStrings, `[lng, lat]`.
+Map<String, dynamic> routeFeatureCollection(
+  Iterable<List<maplibre.LatLng>> lines,
+) => <String, dynamic>{
+  'type': 'FeatureCollection',
+  'features': <Map<String, dynamic>>[
+    for (final line in lines)
+      if (line.length >= 2)
+        <String, dynamic>{
+          'type': 'Feature',
+          'properties': const <String, dynamic>{},
+          'geometry': <String, dynamic>{
+            'type': 'LineString',
+            'coordinates': <List<double>>[
+              for (final point in line)
+                <double>[point.longitude, point.latitude],
+            ],
+          },
+        },
+  ],
+};
+
+/// [route]'s markers as GeoJSON points: gaps with [showDiagnostics], each
+/// stop with its duration label, then the start and the end on top.
+Map<String, dynamic> markerFeatureCollection(
+  RouteGeometry route, {
+  required bool showDiagnostics,
+}) {
+  Map<String, dynamic> marker(
+    String id,
+    String kind,
+    maplibre.LatLng at, {
     required Color color,
     required double radius,
-    double strokeWidth = 3,
-    Map<String, dynamic>? data,
-  }) async {
-    await controller.addCircle(
-      maplibre.CircleOptions(
-        geometry: coordinate,
-        circleColor: _RouteColors.hex(color),
-        circleRadius: radius,
-        circleStrokeColor: '#FFFFFF',
-        circleStrokeWidth: strokeWidth,
-      ),
-      data,
+    double stroke = 3,
+    String? label,
+  }) => <String, dynamic>{
+    'type': 'Feature',
+    'id': id,
+    'properties': <String, dynamic>{
+      'kind': kind,
+      'color': _RouteColors.hex(color),
+      'radius': radius,
+      'stroke': stroke,
+      'label': ?label,
+    },
+    'geometry': <String, dynamic>{
+      'type': 'Point',
+      'coordinates': <double>[at.longitude, at.latitude],
+    },
+  };
+  final distinct = route.hasDistinctEndpoints;
+  return <String, dynamic>{
+    'type': 'FeatureCollection',
+    'features': <Map<String, dynamic>>[
+      if (showDiagnostics)
+        for (final (index, gap) in route.gapMarkers.indexed)
+          marker(
+            'gap-$index',
+            'gap',
+            gap,
+            color: _RouteColors.gap,
+            radius: 6,
+            stroke: 2,
+          ),
+      for (final (index, stop) in route.stopMarkers.indexed)
+        marker(
+          '$_stopIdPrefix$index',
+          'stop',
+          stop.coordinate,
+          color: _RouteColors.stop,
+          radius: 7,
+          stroke: 2,
+          label: stopDurationLabel(stop.duration),
+        ),
+      if (route.points.isNotEmpty) ...<Map<String, dynamic>>[
+        marker(
+          'start',
+          'start',
+          route.start,
+          color: _RouteColors.start,
+          radius: distinct ? 8 : 10,
+        ),
+        // A single-point route draws its end inside its start.
+        marker(
+          'end',
+          'end',
+          route.destination,
+          color: _RouteColors.end,
+          radius: distinct ? 8 : 5,
+          stroke: distinct ? 3 : 1,
+        ),
+      ],
+    ],
+  };
+}
+
+/// [route]'s stop labels as GeoJSON points: each stop's duration, drawn
+/// below its marker.
+Map<String, dynamic> stopLabelFeatureCollection(RouteGeometry route) =>
+    <String, dynamic>{
+      'type': 'FeatureCollection',
+      'features': <Map<String, dynamic>>[
+        for (final (index, stop) in route.stopMarkers.indexed)
+          <String, dynamic>{
+            'type': 'Feature',
+            'id': 'label-$index',
+            'properties': <String, dynamic>{
+              'label': stopDurationLabel(stop.duration),
+            },
+            'geometry': <String, dynamic>{
+              'type': 'Point',
+              'coordinates': <double>[
+                stop.coordinate.longitude,
+                stop.coordinate.latitude,
+              ],
+            },
+          },
+      ],
+    };
+
+/// A first camera close to the fitted route, so the map opens on it
+/// without a fit animation: the route's [RouteGeometry.bounds] in [size]
+/// less [padding], in MapLibre's 512-point tiles.
+maplibre.CameraPosition initialRouteCamera(
+  RouteGeometry route,
+  Size size,
+  EdgeInsets padding,
+) {
+  if (route.points.length <= 1 || !size.isFinite) {
+    return maplibre.CameraPosition(
+      target: route.center,
+      zoom: route.points.length <= 1 ? 15 : 13,
     );
   }
+  final bounds = route.bounds;
+  final width = math.max(1.0, size.width - padding.horizontal);
+  final height = math.max(1.0, size.height - padding.vertical);
+  double mercator(double latitude) {
+    final radians = latitude * math.pi / 180;
+    return math.log(math.tan(math.pi / 4 + radians / 2));
+  }
+
+  final spanLongitude =
+      (bounds.northeast.longitude - bounds.southwest.longitude).abs();
+  final spanMercator =
+      (mercator(bounds.northeast.latitude) -
+              mercator(bounds.southwest.latitude))
+          .abs();
+  double log2(double value) => math.log(value) / math.ln2;
+  final zoomX = log2(width * 360 / (512 * math.max(spanLongitude, 1e-9)));
+  final zoomY = log2(
+    height * 2 * math.pi / (512 * math.max(spanMercator, 1e-12)),
+  );
+  return maplibre.CameraPosition(
+    target: route.center,
+    zoom: math.min(zoomX, zoomY).clamp(2.0, 17.0),
+  );
 }
 
 /// How long a stop lasted, as drawn beside its marker.
@@ -1342,13 +1960,15 @@ class RouteGeometry {
   /// Builds map geometry from [report], drawn at [cleaned] positions when
   /// given. Stops are the stored [stops]; a gap is marked when the route
   /// database marks it visible ([TrackingContinuityGap.isVisible]), so a stop
-  /// or pause is never a gap.
+  /// or pause is never a gap. Uncertain stretches are found only with
+  /// [includeUncertainty]: a map without diagnostics doesn't draw them.
   factory RouteGeometry.fromReport(
     RouteGeometryReport report, {
     Iterable<TrackingContinuityGap>? gaps,
     Map<String, maplibre.LatLng>? cleaned,
     Iterable<TrackStop> stops = const <TrackStop>[],
     RouteTotals? totals,
+    bool includeUncertainty = true,
   }) {
     final all = <maplibre.LatLng>[];
     final pointCoordinates = <String, maplibre.LatLng>{};
@@ -1366,7 +1986,9 @@ class RouteGeometry {
         pointCoordinates[valid[index].id] = coordinates[index];
       }
       if (coordinates.length >= 2) segments.add(coordinates);
-      uncertain.addAll(_uncertainStretches(valid, coordinates));
+      if (includeUncertainty) {
+        uncertain.addAll(_uncertainStretches(valid, coordinates));
+      }
     }
     final markers = <maplibre.LatLng>[];
     final representedBoundaries = <String>{};
@@ -1411,26 +2033,27 @@ class RouteGeometry {
   ) {
     const window = 5;
     final flagged = List<bool>.filled(points.length, false);
+    final sigmas = List<double>.filled(window, 0);
     for (var start = 0; start + window <= points.length; start += 1) {
-      final members = points.sublist(start, start + window);
-      if (members.last.capturedAt.difference(members.first.capturedAt) <
+      final first = points[start];
+      final last = points[start + window - 1];
+      if (last.capturedAt.difference(first.capturedAt) <
           const Duration(seconds: 30)) {
         continue;
       }
       var path = 0.0;
-      for (var index = 1; index < members.length; index += 1) {
-        path += _meters(members[index - 1], members[index]);
+      for (var index = start + 1; index < start + window; index += 1) {
+        path += _meters(points[index - 1], points[index]);
       }
-      final net = _meters(members.first, members.last);
-      final sigmas =
-          members
-              .map(
-                (point) =>
-                    math.max(1.5, (point.horizontalAccuracy ?? 20) / 1.51),
-              )
-              .toList()
-            ..sort();
-      final sigma = sigmas[sigmas.length ~/ 2];
+      final net = _meters(first, last);
+      for (var offset = 0; offset < window; offset += 1) {
+        sigmas[offset] = math.max(
+          1.5,
+          (points[start + offset].horizontalAccuracy ?? 20) / 1.51,
+        );
+      }
+      sigmas.sort();
+      final sigma = sigmas[window ~/ 2];
       if (net <= 2 * math.sqrt2 * sigma + 5 && path >= 2 * net + 10) {
         flagged.fillRange(start, start + window, true);
       }

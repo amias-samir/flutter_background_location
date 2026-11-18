@@ -12,11 +12,17 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 final class RepositoryHarness {
   /// Opens an in-memory database, or the file at [path] so that a test can
   /// also open it directly, for example to pin an older policy version.
-  RepositoryHarness({TrackingConfig? config, this.path})
-      : config = config ?? const TrackingConfig();
+  RepositoryHarness({
+    TrackingConfig? config,
+    this.path,
+    this.databaseFactory,
+  }) : config = config ?? const TrackingConfig();
 
   final TrackingConfig config;
   final String? path;
+
+  /// Replaces the FFI factory, for example with a logging wrapper.
+  final DatabaseFactory? databaseFactory;
   DateTime now = DateTime.utc(2026, 7, 20, 8);
 
   late final SqliteTrackRepository repository;
@@ -27,7 +33,7 @@ final class RepositoryHarness {
     final file = path;
     repository = SqliteTrackRepository(
       path: file ?? inMemoryDatabasePath,
-      databaseFactoryOverride: databaseFactoryFfi,
+      databaseFactoryOverride: databaseFactory ?? databaseFactoryFfi,
       clock: () => now,
       idGenerator: () => 'generated-${_nextId++}',
       singleInstance: file == null,

@@ -1300,6 +1300,26 @@ work_packages:
       - test/public_api_compatibility_test.dart
       - example/lib/route_map_page.dart
       - example/test/widget_test.dart
+  - id: LBO-38
+    phase: LBO
+    title: Read-only, bounded, cancellable route map loading
+    release_gate: opening a route or Trip on a map through TrackingMapController issues no database write or transaction and binds at most 999 arguments per statement on routes of any length; its geometry equals the facade's assembled route (recorded view) and the stored cleaned coordinates (cleaned view) with a recording route's uncleaned tail drawn as recorded; a missing cleaned view or older-rules details are prepared in the background after the read, followed by a TrackHistoryEvent update; a cancelled load or an owner switch stops with route_map_cancelled or owner_scope_changed; trip summary reads compute without writing; cleaned-point appends are batched; clean-route compaction runs in bounded chunks; the example keeps the map loaded across rebuilds, cancels on leave and draws through GeoJSON layers
+    required_before: release of the map-ready route API
+    evidence:
+      - lib/src/application/route_map_service.dart
+      - lib/src/domain/route_map.dart
+      - lib/src/storage/route_map_repository.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/storage/route_compaction_store.dart
+      - lib/src/application/route_detail_service.dart
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/application/tracking_client.dart
+      - test/route_map_test.dart
+      - test/derived_geometry_test.dart
+      - test/public_api_compatibility_test.dart
+      - example/lib/route_map_page.dart
+      - example/test/route_map_page_test.dart
   - id: LBO-37P
     phase: LBO
     title: Physical release-build check of clean recording

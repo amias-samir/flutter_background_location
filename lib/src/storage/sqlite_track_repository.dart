@@ -33,6 +33,7 @@ import '../domain/tracking_privacy.dart';
 import '../domain/tracking_quality.dart';
 import '../domain/tracking_start.dart';
 import 'route_compaction_store.dart';
+import 'route_map_repository.dart';
 import 'route_review_store.dart';
 import 'route_summary_store.dart';
 import 'track_repository.dart';
@@ -79,7 +80,9 @@ final class SqliteTrackRepository
         DerivedGeometryRepository,
         TrackStopRepository,
         DecisionTailRepository,
-        RecordingDetailRepository {
+        RecordingDetailRepository,
+        RouteMapRepository,
+        DerivedPathRepository {
   SqliteTrackRepository({
     required this.path,
     DatabaseFactory? databaseFactoryOverride,
@@ -3245,10 +3248,10 @@ final class SqliteTrackRepository
       ''',
       <Object?>[tripId],
     );
-    final summary = await _db.transaction(
-      (transaction) =>
-          RouteSummaryStore.refreshTrip(transaction, tripId, now: _clock()),
-    );
+    // Computed, not stored: reading a Trip never takes the write lock. The
+    // stored rows it folds are kept by the transactions that change them.
+    final summary =
+        await RouteSummaryStore.computeTrip(_db, tripId, now: _clock());
     return TripBundle(
       trip: trip,
       legs: legRows.map(TripLeg.fromDatabase),
@@ -3267,10 +3270,8 @@ final class SqliteTrackRepository
   }
 
   @override
-  Future<TripSummary?> tripSummary(String tripId) => _db.transaction(
-        (transaction) =>
-            RouteSummaryStore.refreshTrip(transaction, tripId, now: _clock()),
-      );
+  Future<TripSummary?> tripSummary(String tripId) =>
+      RouteSummaryStore.computeTrip(_db, tripId, now: _clock());
 
   @override
   Future<void> refreshRouteSummary(String trackId) => _db.transaction(
@@ -5940,16 +5941,35 @@ final class SqliteTrackRepository
     String trackId,
     Iterable<int> sequences,
   ) async {
-    final values = sequences.toList(growable: false);
+    final values = sequences.toSet().toList(growable: false);
     if (values.isEmpty) return;
-    final placeholders = List<String>.filled(values.length, '?').join(',');
-    await _db.rawUpdate(
-      '''
-      UPDATE track_points SET sync_state = 'synced', last_sync_error = NULL
-      WHERE track_id = ? AND sequence IN ($placeholders)
-      ''',
-      <Object?>[trackId, ...values],
-    );
+    await _db.transaction((transaction) async {
+      for (final chunk in _boundIdChunks(values)) {
+        final placeholders = List<String>.filled(chunk.length, '?').join(',');
+        await transaction.rawUpdate(
+          '''
+          UPDATE track_points SET sync_state = 'synced', last_sync_error = NULL
+          WHERE track_id = ? AND sequence IN ($placeholders)
+          ''',
+          <Object?>[trackId, ...chunk],
+        );
+      }
+    });
+  }
+
+  /// Ids bound in one `IN (…)` list. Android's framework SQLite allows at
+  /// most 999 bound variables per statement, so caller-sized lists are split.
+  static const int _maxBoundIdsPerStatement = 500;
+
+  static Iterable<List<T>> _boundIdChunks<T>(List<T> values) sync* {
+    for (var start = 0;
+        start < values.length;
+        start += _maxBoundIdsPerStatement) {
+      yield values.sublist(
+        start,
+        math.min(start + _maxBoundIdsPerStatement, values.length),
+      );
+    }
   }
 
   @override
@@ -6169,16 +6189,15 @@ final class SqliteTrackRepository
           <Object?>[entry.trackId, first, acceptedThrough],
         );
       }
-      if (rejected.isNotEmpty) {
-        final placeholders =
-            List<String>.filled(rejected.length, '?').join(',');
+      for (final chunk in _boundIdChunks(rejected)) {
+        final placeholders = List<String>.filled(chunk.length, '?').join(',');
         await transaction.rawUpdate(
           '''
           UPDATE track_points
           SET sync_state = 'rejected', last_sync_error = 'server_rejected'
           WHERE track_id = ? AND sequence IN ($placeholders)
           ''',
-          <Object?>[entry.trackId, ...rejected],
+          <Object?>[entry.trackId, ...chunk],
         );
       }
       await transaction.delete(
@@ -6516,6 +6535,22 @@ final class SqliteTrackRepository
     );
     var compacted = 0;
     for (final trackId in pending) {
+      // The readings go a chunk at a time, so a map read or a fix commit
+      // never waits behind one long transaction; the claim comes last.
+      final track = await getTrack(trackId);
+      final newest = (track?.nextSequence ?? 1) - 1;
+      for (var after = 0;
+          after < newest;
+          after += RouteCompactionStore.readingsChunkSize) {
+        await _db.transaction(
+          (transaction) => RouteCompactionStore.clearReadingsChunk(
+            transaction,
+            trackId,
+            after: after,
+            through: after + RouteCompactionStore.readingsChunkSize,
+          ),
+        );
+      }
       final done = await _db.transaction(
         (transaction) => RouteCompactionStore.compact(
           transaction,
@@ -7315,25 +7350,23 @@ final class SqliteTrackRepository
             message: 'A derived coordinate is invalid for this run.',
           );
         }
-        final sources = await transaction.query(
-          'track_points',
-          columns: <String>['track_id', 'segment_id', 'sequence', 'accepted'],
-          where: 'id = ?',
-          whereArgs: <Object?>[point.sourcePointId],
-          limit: 1,
-        );
-        if (sources.isEmpty ||
-            sources.single['track_id'] != trackId ||
-            sources.single['segment_id'] != point.segmentId ||
-            sources.single['sequence'] != point.sequence ||
-            sources.single['accepted'] != 1 ||
+      }
+      final sources = await _derivedSourceRows(transaction, trackId, values);
+      final batch = transaction.batch();
+      for (final point in values) {
+        final source = sources[point.sourcePointId];
+        if (source == null ||
+            source['track_id'] != trackId ||
+            source['segment_id'] != point.segmentId ||
+            source['sequence'] != point.sequence ||
+            source['accepted'] != 1 ||
             point.sequence > upper) {
           throw const TrackingStorageException(
             code: 'derived_geometry_source_mismatch',
             message: 'A derived coordinate does not match its raw point.',
           );
         }
-        await transaction.insert(
+        batch.insert(
           'derived_geometry_points',
           <String, Object?>{
             'run_id': runId,
@@ -7347,7 +7380,53 @@ final class SqliteTrackRepository
           },
         );
       }
+      await batch.commit(noResult: true);
     });
+  }
+
+  /// The raw rows [points] claim as sources, by point ID: one range read of
+  /// [trackId] by sequence when the points are dense, as a derivation's
+  /// are, else bounded ID lists.
+  Future<Map<String, Map<String, Object?>>> _derivedSourceRows(
+    DatabaseExecutor executor,
+    String trackId,
+    List<DerivedGeometryPoint> points,
+  ) async {
+    const columns = <String>[
+      'id',
+      'track_id',
+      'segment_id',
+      'sequence',
+      'accepted',
+    ];
+    var low = points.first.sequence;
+    var high = low;
+    for (final point in points) {
+      low = math.min(low, point.sequence);
+      high = math.max(high, point.sequence);
+    }
+    final rows = <Map<String, Object?>>[];
+    if (high - low <= 4 * points.length + 64) {
+      rows.addAll(await executor.query(
+        'track_points',
+        columns: columns,
+        where: 'track_id = ? AND sequence >= ? AND sequence <= ?',
+        whereArgs: <Object?>[trackId, low, high],
+      ));
+    } else {
+      final ids = points.map((point) => point.sourcePointId).toSet().toList();
+      for (final chunk in _boundIdChunks(ids)) {
+        rows.addAll(await executor.query(
+          'track_points',
+          columns: columns,
+          where: 'id IN (${List<String>.filled(chunk.length, '?').join(',')})',
+          whereArgs: chunk,
+        ));
+      }
+    }
+    return <String, Map<String, Object?>>{
+      for (final row in rows) row['id']! as String: row,
+    };
   }
 
   @override
@@ -7432,6 +7511,199 @@ final class SqliteTrackRepository
     );
   }
 
+  /// The point columns a map draws, read without the journaled readings and
+  /// activity probabilities ([TrackPoint.fromDatabase] tolerates their
+  /// absence).
+  static const _mapPointColumns = <String>[
+    'id',
+    'track_id',
+    'segment_id',
+    'sequence',
+    'latitude',
+    'longitude',
+    'altitude',
+    'horizontal_accuracy',
+    'speed',
+    'speed_accuracy',
+    'heading',
+    'captured_at',
+    'persisted_at',
+    'activity_type',
+    'activity_confidence',
+    'motion_state',
+    'provider',
+    'sampling_profile',
+    'quality_policy_version',
+    'accepted',
+    'quality_flags',
+    'rejection_reason',
+  ];
+
+  @override
+  Future<RouteMapLegSource> routeMapLeg(
+    TrackingOwner owner,
+    String trackId,
+  ) async {
+    // Plain reads, no transaction: a map never takes the write lock. Points
+    // are append-only, so the sequence read here bounds a consistent view.
+    final rows = await _db.query(
+      'tracks',
+      where: 'id = ? AND user_id = ? AND organization_id = ?',
+      whereArgs: <Object?>[trackId, owner.userId, owner.organizationId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw const TrackingOwnershipException(
+        code: 'owner_scope_conflict',
+        message: 'The requested route is outside the bound owner scope.',
+      );
+    }
+    final track = Track.fromDatabase(rows.single);
+    final segmentRows = await _db.query(
+      'track_segments',
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      orderBy: 'segment_number ASC',
+    );
+    final reviewRows = await _db.query(
+      'track_summaries',
+      columns: <String>['review_run_id'],
+      where: 'track_id = ?',
+      whereArgs: <Object?>[trackId],
+      limit: 1,
+    );
+    final cleanedRows = await _db.query(
+      'derived_geometry_runs',
+      where: 'track_id = ? AND algorithm = ? AND algorithm_version = ? '
+          'AND status = ?',
+      whereArgs: <Object?>[
+        trackId,
+        DerivedGeometryAlgorithm.stopAwareRouteCleaning,
+        DerivedGeometryAlgorithm.stopAwareRouteCleaningVersion,
+        DerivedGeometryRunStatus.completed.name,
+      ],
+      orderBy: 'created_at DESC, id DESC',
+      limit: 1,
+    );
+    return RouteMapLegSource(
+      track: track,
+      segments: segmentRows.map(TrackSegment.fromDatabase),
+      stops: await _trackStops(_db, trackId),
+      gaps: await listContinuityGaps(trackId),
+      legacyAutomaticAfterSegmentIds:
+          await safeLegacyAutomaticAfterSegmentIds(trackId),
+      upperSequence: track.nextSequence - 1,
+      summary: await RouteSummaryStore.readTrack(_db, trackId),
+      reviewRunId: reviewRows.isEmpty
+          ? null
+          : reviewRows.single['review_run_id'] as String?,
+      cleanedRun:
+          cleanedRows.isEmpty ? null : _derivedGeometryRun(cleanedRows.single),
+      awaitsReview: await awaitsReview(trackId),
+    );
+  }
+
+  @override
+  Future<List<RouteMapPointRow>> routeMapPointPage({
+    required String trackId,
+    required int afterSequence,
+    required int upperSequence,
+    required int limit,
+    String? cleanedRunId,
+    String? reviewRunId,
+  }) async {
+    if (limit < 1) throw ArgumentError.value(limit, 'limit');
+    final columns = _mapPointColumns.map((column) => 'p.$column').join(', ');
+    final String select;
+    final String join;
+    final String acceptance;
+    final List<Object?> joinArgs;
+    if (reviewRunId != null) {
+      // The fixes the review keeps, accepted or not.
+      select = columns;
+      join = 'JOIN derived_geometry_points k '
+          'ON k.run_id = ? AND k.source_point_id = p.id';
+      acceptance = '';
+      joinArgs = <Object?>[reviewRunId];
+    } else if (cleanedRunId != null) {
+      select = '$columns, d.latitude AS cleaned_latitude, '
+          'd.longitude AS cleaned_longitude';
+      join = 'LEFT JOIN derived_geometry_points d '
+          'ON d.run_id = ? AND d.source_point_id = p.id';
+      acceptance = 'AND p.accepted = 1';
+      joinArgs = <Object?>[cleanedRunId];
+    } else {
+      select = columns;
+      join = '';
+      acceptance = 'AND p.accepted = 1';
+      joinArgs = const <Object?>[];
+    }
+    final rows = await _db.rawQuery(
+      'SELECT $select FROM track_points p $join '
+      'WHERE p.track_id = ? $acceptance '
+      'AND p.sequence > ? AND p.sequence <= ? '
+      'ORDER BY p.sequence ASC LIMIT ?',
+      <Object?>[...joinArgs, trackId, afterSequence, upperSequence, limit],
+    );
+    return <RouteMapPointRow>[
+      for (final row in rows)
+        RouteMapPointRow(
+          TrackPoint.fromDatabase(row),
+          cleanedLatitude: (row['cleaned_latitude'] as num?)?.toDouble(),
+          cleanedLongitude: (row['cleaned_longitude'] as num?)?.toDouble(),
+        ),
+    ];
+  }
+
+  @override
+  Future<RouteMapTripSource> routeMapTrip(
+    TrackingOwner owner,
+    String tripId,
+  ) async {
+    final bundle = await loadTripBundleForOwner(owner, tripId);
+    return RouteMapTripSource(
+      trip: bundle.trip,
+      legs: bundle.legs,
+      gaps: bundle.gaps,
+      summary: bundle.summary,
+    );
+  }
+
+  @override
+  Future<double> derivedPathMeters(String runId) async {
+    const pageSize = 2000;
+    final previous = <String, (double, double)>{};
+    var total = 0.0;
+    var after = -1;
+    while (true) {
+      final rows = await _db.query(
+        'derived_geometry_points',
+        columns: <String>['segment_id', 'sequence', 'latitude', 'longitude'],
+        where: 'run_id = ? AND sequence > ?',
+        whereArgs: <Object?>[runId, after],
+        orderBy: 'sequence ASC',
+        limit: pageSize,
+      );
+      for (final row in rows) {
+        final segmentId = row['segment_id']! as String;
+        final latitude = (row['latitude']! as num).toDouble();
+        final longitude = (row['longitude']! as num).toDouble();
+        final last = previous[segmentId];
+        if (last != null) {
+          total += TrackGeodesy.sphericalHaversineMeters(
+            last.$1,
+            last.$2,
+            latitude,
+            longitude,
+          );
+        }
+        previous[segmentId] = (latitude, longitude);
+      }
+      if (rows.length < pageSize) return total;
+      after = (rows.last['sequence']! as num).toInt();
+    }
+  }
+
   @override
   Future<List<DerivedGeometryRun>> listDerivedGeometryRuns({
     required TrackingOwner owner,
@@ -7486,12 +7758,15 @@ final class SqliteTrackRepository
         message: 'The selected derived geometry is not complete.',
       );
     }
-    final placeholders = List<String>.filled(ids.length, '?').join(',');
-    final rows = await _db.query(
-      'derived_geometry_points',
-      where: 'run_id = ? AND source_point_id IN ($placeholders)',
-      whereArgs: <Object?>[runId, ...ids],
-    );
+    final rows = <Map<String, Object?>>[];
+    for (final chunk in _boundIdChunks(ids)) {
+      final placeholders = List<String>.filled(chunk.length, '?').join(',');
+      rows.addAll(await _db.query(
+        'derived_geometry_points',
+        where: 'run_id = ? AND source_point_id IN ($placeholders)',
+        whereArgs: <Object?>[runId, ...chunk],
+      ));
+    }
     final result = <String, DerivedGeometryPoint>{};
     for (final row in rows) {
       final point = DerivedGeometryPoint(
