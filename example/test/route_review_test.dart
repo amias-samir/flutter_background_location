@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:flutter_background_location_tracker_example/recorded_tracks_section.dart';
 import 'package:flutter_background_location_tracker_example/recorded_trips_section.dart';

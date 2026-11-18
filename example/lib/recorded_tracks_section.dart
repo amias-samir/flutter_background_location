@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 
 import 'route_totals.dart';
