@@ -47,6 +47,7 @@ final class _FakeTracker
   bool failNextPauseAfterStopping = false;
   int failAcknowledgements = 0;
   int hangAcknowledgements = 0;
+  int acknowledgementCalls = 0;
   PendingNativeUserAction? nativeUserAction;
   final List<String> acknowledgedNativeUserActions = <String>[];
   TrackingPermissionState permissionState = const TrackingPermissionState(
@@ -71,6 +72,7 @@ final class _FakeTracker
 
   @override
   Future<void> acknowledgeLocations(Iterable<String> eventIds) async {
+    acknowledgementCalls += 1;
     if (hangAcknowledgements > 0) {
       hangAcknowledgements -= 1;
       return Completer<void>().future;
@@ -1663,6 +1665,46 @@ void main() {
     await subscription.cancel();
     await client.completeTrack(trackId: trackId);
     await client.dispose();
+  });
+
+  test('FLT-03 a journal drain acknowledges its page in one call', () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final trackId = await harness.createActiveTrack(trackId: 'drained');
+    final tracker = _FakeTracker()
+      ..running = true
+      ..nativeTrackId = trackId
+      ..pending.addAll(<LocationSample>[
+        for (var i = 0; i < 30; i += 1)
+          LocationSample(
+            latitude: 0.001 + i * 0.0001,
+            longitude: 0.001,
+            horizontalAccuracy: 5,
+            capturedAt: harness.now.add(Duration(seconds: 5 * i)),
+            provider: 'test',
+            eventId: 'drained-$i',
+            trackId: trackId,
+          ),
+      ]);
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(minutes: 5)),
+    );
+    await client.initialize();
+
+    final track = (await harness.repository.getTrack(trackId))!;
+    expect(track.acceptedPointCount + track.rejectedPointCount, 30);
+    expect(tracker.acknowledged.toSet(), <String>{
+      for (var i = 0; i < 30; i += 1) 'drained-$i',
+    });
+    expect(tracker.acknowledgementCalls, 1,
+        reason: 'one native journal transaction for the page, not 30');
+    expect(tracker.pending, isEmpty);
+    await client.completeTrack(trackId: trackId);
+    await client.dispose();
+    await harness.repository.close();
   });
 
   test('REL-13 an acknowledgement that never answers cannot hold the route',

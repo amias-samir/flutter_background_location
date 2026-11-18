@@ -386,6 +386,11 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   StreamSubscription<ActivitySnapshot>? _activitySubscription;
   StreamSubscription<TrackerStatus>? _nativeStatusSubscription;
   StreamSubscription<Track?>? _currentTrackSubscription;
+
+  /// The current track the repository last emitted (FLT-05). Session
+  /// snapshots after a fix, an activity reading or a status use it instead
+  /// of querying the current track again.
+  (Track?,)? _knownCurrentTrack;
   TrackExportService? _exportService;
   TrackingBatchUploader? _batchUploader;
   TrackingCapabilityReport? _capabilityReport;
@@ -597,6 +602,10 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     // The repository emits the current track after every change, so the
     // snapshot can use it instead of querying it again.
     _currentTrackSubscription = _store.currentTrackStream.listen((track) {
+      // The package repository emits after every change it makes, so its
+      // latest value is what a query would return; a host repository may
+      // emit less often and is queried as before.
+      if (_store is SqliteTrackRepository) _knownCurrentTrack = (track,);
       unawaited(_publishSessionSnapshot(knownTrack: (track,)));
     });
     _exportFileWriter ??= PublicDownloadsExportWriter(
@@ -2159,6 +2168,10 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     _queueLocation(sample);
   }
 
+  /// Completes once the fixes queued so far are stored (or failed); used by
+  /// background passes to yield the database to live recording.
+  Future<void> _pointsSettled() => _pointTail;
+
   void _queueLocation(LocationSample sample) {
     _pointTail = _pointTail.then((_) => _processLocation(sample)).catchError((
       Object error,
@@ -2197,7 +2210,94 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
           details: <String, Object?>{'errorType': error.runtimeType.toString()},
         ),
       );
+      return _countPersistFailure(sample, error);
     });
+  }
+
+  /// Deterministic append failures per native event in this process.
+  final Map<String, int> _persistFailures = <String, int>{};
+  static const _quarantineAfterFailures = 3;
+  static const _maximumTrackedPersistFailures = 256;
+
+  /// A fix that fails the same way three times can never be stored. It
+  /// would stay in the native journal for good, replayed on every drain, so
+  /// it is quarantined: committed with its evidence to
+  /// `quarantined_native_events`, then acknowledged (REL-14). Transient
+  /// failures (busy, I/O, a full disk, a closed database, a state race)
+  /// never count; a full disk stays a visible stop.
+  Future<void> _countPersistFailure(LocationSample sample, Object error) async {
+    final eventId = sample.eventId;
+    final trackId = sample.trackId ?? _currentStatus.trackId;
+    if (eventId == null || trackId == null) return;
+    if (!_isDeterministicPersistFailure(error)) return;
+    final failures = (_persistFailures.remove(eventId) ?? 0) + 1;
+    if (failures < _quarantineAfterFailures) {
+      _persistFailures[eventId] = failures;
+      while (_persistFailures.length > _maximumTrackedPersistFailures) {
+        _persistFailures.remove(_persistFailures.keys.first);
+      }
+      return;
+    }
+    final store = _store;
+    if (store is! SqliteTrackRepository) return;
+    try {
+      final quarantined = await store.quarantineNativeEvent(
+        trackId: trackId,
+        eventId: eventId,
+        errorType: error.runtimeType.toString(),
+        failureCount: failures,
+        payload: _quarantinePayload(sample),
+      );
+      if (!quarantined) return;
+      await _acknowledgeCommitted(eventId, trackId: trackId);
+      await _safeHealthEvent(
+        trackId: trackId,
+        type: 'native_event_quarantined',
+        details: <String, Object?>{'errorType': error.runtimeType.toString()},
+      );
+    } on Object {
+      // Not stored: the event stays in the native journal.
+    }
+  }
+
+  static bool _isDeterministicPersistFailure(Object error) {
+    if (error is ArgumentError || error is FormatException) return true;
+    if (error is TypeError) return true;
+    if (error is DatabaseException) {
+      // CONSTRAINT, MISMATCH, TOOBIG and RANGE fail the same way every time;
+      // BUSY, LOCKED, IOERR, FULL, READONLY and a closed database do not.
+      final code = error.getResultCode();
+      return code != null && const <int>{18, 19, 20, 25}.contains(code & 0xff);
+    }
+    return false;
+  }
+
+  /// The fix's own values for the quarantine row: what the native journal
+  /// held, so dropping it there loses no raw evidence.
+  static Map<String, Object?> _quarantinePayload(LocationSample sample) {
+    // JSON has no NaN or infinity, and a value like that may be why the fix
+    // could not be stored; keep it as text instead of losing the payload.
+    Object? number(double? value) =>
+        value == null || value.isFinite ? value : value.toString();
+    return <String, Object?>{
+      'eventId': sample.eventId,
+      'trackId': sample.trackId,
+      'latitude': number(sample.latitude),
+      'longitude': number(sample.longitude),
+      'altitude': number(sample.altitude),
+      'horizontalAccuracy': number(sample.horizontalAccuracy),
+      'verticalAccuracy': number(sample.verticalAccuracy),
+      'speed': number(sample.speed),
+      'speedAccuracy': number(sample.speedAccuracy),
+      'heading': number(sample.heading),
+      'headingAccuracy': number(sample.headingAccuracy),
+      'timestamp': sample.capturedAt.millisecondsSinceEpoch,
+      'nativeReceivedAt': sample.nativeReceivedAt?.millisecondsSinceEpoch,
+      'provider': sample.provider,
+      'isMocked': sample.isMocked,
+      'captureGenerationId': sample.captureGenerationId,
+      'stepCount': sample.stepCount,
+    };
   }
 
   Future<void> _processLocation(LocationSample sample) async {
@@ -2235,16 +2335,23 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     if (segmentId == null) {
       throw StateError('Active track has no current segment.');
     }
-    final previousInSegment = await _store.findLastAcceptedPoint(
-      track.id,
-      segmentId: segmentId,
-    );
-    final previousAccepted =
-        previousInSegment ?? await _store.findLastAcceptedPoint(track.id);
     final continuityStore = _store is ContinuityTrackRepository
         ? _store as ContinuityTrackRepository
         : null;
     final previousRaw = await continuityStore?.findLastRawPoint(track.id);
+    // The newest point, when accepted and in this segment, is by definition
+    // the newest accepted point of the segment (and of the track): no second
+    // query while fixes are being accepted.
+    final previousInSegment = previousRaw != null &&
+            previousRaw.accepted &&
+            previousRaw.segmentId == segmentId
+        ? previousRaw
+        : await _store.findLastAcceptedPoint(
+            track.id,
+            segmentId: segmentId,
+          );
+    final previousAccepted =
+        previousInSegment ?? await _store.findLastAcceptedPoint(track.id);
     final policyEpoch = await _policyEpochFor(track.id);
     final stopStore =
         _store is TrackStopRepository ? _store as TrackStopRepository : null;
@@ -2413,6 +2520,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     // Keyed, so the replay of a fix committed before a crash adds none twice.
     await _recordJournaledProfileTransitions(track.id, sample);
     _lastCommittedAt = _clock();
+    _committedSinceUploadTick = true;
     final eventId = sample.eventId;
     if (eventId != null) {
       await _acknowledgeCommitted(eventId, trackId: track.id);
@@ -3442,8 +3550,9 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
             await _tracker.permissions(),
             _capabilityReport ?? await _tracker.capabilities(),
           );
-      final currentTrack = knownTrack != null
-          ? knownTrack.$1
+      final known = knownTrack ?? _knownCurrentTrack;
+      final currentTrack = known != null
+          ? known.$1
           : await _store.findActiveTrack() ??
               await _store.findLatestPausedTrack();
       final snapshot = TrackingSessionSnapshot(
@@ -3526,20 +3635,41 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       seconds: (expected.inSeconds * 2).clamp(30, 60),
     );
     final armedAt = _clock();
+    // LBO-17: while native capture is stationary, fixes are expected to be
+    // rare, so a quiet route is observed less often (doubling to four
+    // minutes) instead of running several native calls every minute of a
+    // long stop. Any commit, or leaving the stationary profile, restores the
+    // normal interval.
+    var observeEvery = interval;
+    DateTime? lastObservedAt;
     void onDeadline() {
       _healthWatchdogTimer = null;
       final committed = _lastCommittedAt;
       final lastActivity =
           committed != null && committed.isAfter(armedAt) ? committed : armedAt;
+      if (lastObservedAt != null && !lastActivity.isBefore(lastObservedAt!)) {
+        observeEvery = interval;
+      }
       final quiet = _clock().difference(lastActivity);
       if (quiet < interval) {
+        observeEvery = interval;
         _healthWatchdogTimer = Timer(interval - quiet, onDeadline);
         return;
       }
       unawaited(_observeHealth().whenComplete(() {
-        if (!_disposed && _healthWatchdogTimer == null) {
-          _healthWatchdogTimer = Timer(interval, onDeadline);
+        if (_disposed || _healthWatchdogTimer != null) return;
+        lastObservedAt = _clock();
+        final stationary =
+            _currentStatus.samplingProfile == SamplingProfile.stationary;
+        if (stationary) {
+          final doubled = observeEvery * 2;
+          observeEvery = doubled > _maximumStationaryHealthInterval
+              ? _maximumStationaryHealthInterval
+              : doubled;
+        } else {
+          observeEvery = interval;
         }
+        _healthWatchdogTimer = Timer(observeEvery, onDeadline);
       }));
     }
 
@@ -3559,11 +3689,20 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     if (uploader == null || config.batchMaxAge <= Duration.zero) return;
     _batchUploadTimer?.cancel();
     _batchUploadTrackId = trackId;
-    _batchUploadTimer = Timer.periodic(
-      config.batchMaxAge,
-      (_) => unawaited(_triggerUpload(trackId)),
-    );
+    _committedSinceUploadTick = true;
+    _batchUploadTimer = Timer.periodic(config.batchMaxAge, (_) {
+      // LBO-17: nothing committed since the last tick means nothing new to
+      // send; failed uploads are retried by the recovery loop instead.
+      if (!_committedSinceUploadTick) return;
+      _committedSinceUploadTick = false;
+      unawaited(_triggerUpload(trackId));
+    });
   }
+
+  /// Whether a fix committed since the last periodic upload tick.
+  var _committedSinceUploadTick = false;
+
+  static const _maximumStationaryHealthInterval = Duration(minutes: 4);
 
   /// Retries leftover uploads while any exist.
   ///
@@ -3634,14 +3773,52 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     String eventId, {
     required String trackId,
   }) async {
-    final eventIds = <String>[..._deferredAcknowledgements, eventId];
+    final batch = _drainAcknowledgements;
+    if (batch != null) {
+      // Committed already; a journal drain acknowledges its page at once.
+      batch.add(eventId);
+      _drainAcknowledgementTrackId = trackId;
+      return;
+    }
+    await _acknowledgeCommittedEvents(<String>[eventId], trackId: trackId);
+  }
+
+  /// Event IDs committed during a journal drain page, acknowledged together
+  /// after the page (FLT-03): one native journal transaction per page instead
+  /// of one per replayed fix. Null outside a drain.
+  List<String>? _drainAcknowledgements;
+  String? _drainAcknowledgementTrackId;
+
+  /// Runs [drain] collecting the acknowledgements of the fixes it commits,
+  /// then sends them in one call. Every collected event was committed
+  /// before it was collected, so commit-before-ack holds.
+  Future<void> _withDrainAcknowledgements(Future<void> Function() drain) async {
+    if (_drainAcknowledgements != null) return drain();
+    final collected = _drainAcknowledgements = <String>[];
+    try {
+      await drain();
+    } finally {
+      _drainAcknowledgements = null;
+      final trackId = _drainAcknowledgementTrackId;
+      _drainAcknowledgementTrackId = null;
+      if (collected.isNotEmpty && trackId != null) {
+        await _acknowledgeCommittedEvents(collected, trackId: trackId);
+      }
+    }
+  }
+
+  Future<void> _acknowledgeCommittedEvents(
+    List<String> committed, {
+    required String trackId,
+  }) async {
+    final eventIds = <String>[..._deferredAcknowledgements, ...committed];
     try {
       await _tracker
           .acknowledgeLocations(eventIds)
           .timeout(_acknowledgementTimeout);
     } on Object catch (error) {
       final firstFailure = _deferredAcknowledgements.isEmpty;
-      _deferredAcknowledgements.add(eventId);
+      _deferredAcknowledgements.addAll(committed);
       while (
           _deferredAcknowledgements.length > _maximumDeferredAcknowledgements) {
         // A dropped ID stays in the native journal; replay finds the event
@@ -3709,13 +3886,21 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       return (left.eventId ?? '').compareTo(right.eventId ?? '');
     });
     final seenEventIds = <String>{};
-    for (final sample in pending) {
-      final eventId = sample.eventId;
-      if (eventId != null && !seenEventIds.add(eventId)) continue;
-      _queueLocation(sample);
+    for (var start = 0; start < pending.length; start += _drainPageSize) {
+      final end = math.min(start + _drainPageSize, pending.length);
+      await _withDrainAcknowledgements(() async {
+        for (final sample in pending.sublist(start, end)) {
+          final eventId = sample.eventId;
+          if (eventId != null && !seenEventIds.add(eventId)) continue;
+          _queueLocation(sample);
+        }
+        await _pointTail;
+      });
     }
-    await _pointTail;
   }
+
+  /// Fixes replayed per acknowledgement when the journal is not paged.
+  static const _drainPageSize = 100;
 
   Future<void> _drainPagedNativeLocations(
     PagedNativeLocationAdapter pagedTracker,
@@ -3724,12 +3909,14 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     String? cursor;
     for (var pageIndex = 0; pageIndex < 1000; pageIndex += 1) {
       final page = await pagedTracker.pendingLocationPage(cursor: cursor);
-      for (final sample in page.events) {
-        final eventId = sample.eventId;
-        if (eventId != null && !seenEventIds.add(eventId)) continue;
-        _queueLocation(sample);
-      }
-      await _pointTail;
+      await _withDrainAcknowledgements(() async {
+        for (final sample in page.events) {
+          final eventId = sample.eventId;
+          if (eventId != null && !seenEventIds.add(eventId)) continue;
+          _queueLocation(sample);
+        }
+        await _pointTail;
+      });
       if (!page.hasMore) return;
       final nextCursor = page.nextCursor;
       if (nextCursor == null || nextCursor == cursor) {
@@ -5099,9 +5286,14 @@ final class _OwnerBoundTrackingController
   /// before returning them.
   void scheduleBackfill() {
     _backfill ??= _details
-        .backfillReviews(owner: _owner)
+        .backfillReviews(owner: _owner, beforeEach: _client._pointsSettled)
         .catchError((Object _) {})
-        .then((_) => _details.backfillStops(owner: _owner))
+        .then(
+          (_) => _details.backfillStops(
+            owner: _owner,
+            beforeEach: _client._pointsSettled,
+          ),
+        )
         .catchError((Object _) {})
         .then((_) => _compactCleanRoutes())
         .catchError((Object _) {})

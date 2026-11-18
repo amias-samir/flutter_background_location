@@ -14,6 +14,25 @@ import 'tracking_configuration_epoch.dart';
 /// capture, and one without `samplingPolicyVersion` keeps
 /// [TrackingPolicyVersions.legacySamplingPolicy].
 TrackingConfig decodePersistedTrackingConfig(String json) {
+  // A route's stored configuration is read with every track row, several
+  // times per fix; the result is immutable and depends only on the text.
+  final cached = _decodedConfigs.remove(json);
+  if (cached != null) {
+    _decodedConfigs[json] = cached;
+    return cached;
+  }
+  final config = _decode(json);
+  _decodedConfigs[json] = config;
+  if (_decodedConfigs.length > _decodedConfigCacheSize) {
+    _decodedConfigs.remove(_decodedConfigs.keys.first);
+  }
+  return config;
+}
+
+final Map<String, TrackingConfig> _decodedConfigs = <String, TrackingConfig>{};
+const _decodedConfigCacheSize = 32;
+
+TrackingConfig _decode(String json) {
   final map = Map<String, Object?>.of(
     (jsonDecode(json) as Map).cast<String, Object?>(),
   )

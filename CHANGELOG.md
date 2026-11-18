@@ -25,6 +25,23 @@
   - Keeping more than 999 routes with `deleteTracksExcept` works on Android.
   - Activity readings waiting for the stop rules are kept in order instead of
     being re-sorted for every reading.
+  - iOS: the fixes that wake a terminated app are kept, and a relaunch before
+    the first unlock after a reboot waits for the unlock instead of losing
+    the route's state.
+  - A fix that can never be stored (it fails the same way three times) is
+    kept in a quarantine table with its values and then released from the
+    native journal, instead of being replayed forever.
+- Faster, lighter recording (route database schema 20; same decisions and
+  stored routes):
+  - Each fix costs 18 SQLite statements (24 with a step count) instead of 25
+    (about 35).
+  - A replay of journaled fixes acknowledges each page of up to 100 fixes at
+    once instead of one by one.
+  - Schema 20 drops a duplicate point index, keeps only accepted points in the
+    pending-upload index, and indexes the columns a route deletion looks up,
+    so deleting a long route no longer holds up recording.
+  - Longer health checks and no empty upload checks while the phone is still,
+    and background reviews let new fixes go first.
 
 - Fixed: on Android, the cleaned map view of a route with more than about
   1,000 accepted points failed with `too many SQL variables`. Derived-coordinate

@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 19
+  route_database_schema: 20
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
@@ -1474,3 +1474,102 @@ work_packages:
       - lib/src/application/tracking_client.dart
       - lib/src/application/route_decision_engine.dart
       - test/live_replay_determinism_test.dart
+  - id: REL-09
+    phase: REL
+    title: iOS keeps the fixes that woke a terminated app
+    release_gate: fixes delivered by a significant-change relaunch before termination recovery can resume (up to five) are journaled under the recovered generation with captureOrigin relaunchBuffer, and dropped if recovery fails
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-10
+    phase: REL
+    title: iOS restores route state only once protected data is available
+    release_gate: a relaunch before the first unlock after a reboot neither reads nor overwrites the persisted route state; it restores on protectedDataDidBecomeAvailable and, if Dart already initialized, prepares the journal and recovers then
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-10P
+    phase: REL
+    title: Physical check of relaunch before first unlock
+    release_gate: an iPhone recording with Always permission and significant-change recovery is rebooted and left locked through a drive; after unlocking, the route is resumed or interrupted (never idle with the route lost) and the relaunch fixes are in the route
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
+  - id: REL-12
+    phase: REL
+    title: iOS service lifecycle tests
+    release_gate: XCTests drive BackgroundLocationService through its Core Location delegate with an isolated UserDefaults suite and pin the late-denial and unknown-location behavior
+    required_before: next release
+    evidence:
+      - example/ios/RunnerTests/BackgroundLocationServiceTests.swift
+  - id: REL-14
+    phase: REL
+    title: A native event that can never be stored is quarantined, then acknowledged
+    release_gate: after three deterministic append failures in one process (constraint, mismatch, too big, range, argument, format or type errors; never busy, I/O, full disk, read-only or closed database) the fix's own values are committed to quarantined_native_events and only then acknowledged; later fixes are unaffected
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/quarantine_test.dart
+  - id: FLT-15
+    phase: FLT
+    title: Per-fix SQLite budget
+    release_gate: a steady walking fix costs at most 18 statements and round trips and one with a step count at most 24, in clean and full detail (25 and about 35 before the statement diet); the ceilings only go down
+    required_before: per-fix pipeline changes
+    evidence:
+      - test/pipeline_budget_test.dart
+      - test/statement_log.dart
+  - id: FLT-04
+    phase: FLT
+    title: Per-fix statement diet with identical decisions and rows
+    release_gate: the append reads its track once, skips the accepted-point query when the newest point is accepted, creates the summary row once per track, builds the stored point from the inserted row (equal in every field), shares one summary read per fix, caches column lists per open database and parsed configurations and epochs; session snapshots reuse the current track the repository emits; incremental summaries still equal a refresh
+    required_before: per-fix pipeline changes
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/domain/persisted_tracking_config.dart
+      - lib/src/application/tracking_client.dart
+      - test/append_point_row_test.dart
+      - test/route_summary_test.dart
+      - test/pipeline_budget_test.dart
+  - id: FLT-16
+    phase: FLT
+    title: Schema 20 indexes and quarantine table
+    release_gate: the duplicate (track_id, sequence) index is dropped only where a unique index covers it; the pending-upload index holds accepted pending points only; every column a cascading route delete looks up is indexed; a schema 19 database upgrades to exactly the fresh schema and keeps its rows; reopening changes nothing
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/schema20_test.dart
+      - test/sqlite_track_repository_test.dart
+  - id: FLT-24
+    phase: FLT
+    title: Route database connection settings
+    release_gate: journal_size_limit 4 MiB (as a query), an 8 MiB page cache and in-memory temporary storage; synchronous stays FULL
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/sqlite_track_repository_test.dart
+  - id: FLT-03
+    phase: FLT
+    title: One native acknowledgement per journal drain page
+    release_gate: fixes replayed from the native journal are committed one by one as before and acknowledged together after their page (up to 100), so a drain costs one native journal transaction per page; every acknowledged event was committed first
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: FLT-21
+    phase: FLT
+    title: Background review and stop passes yield to live recording
+    release_gate: the owner backfill awaits the queued fixes before each route it reviews or derives stops for
+    required_before: next release
+    evidence:
+      - lib/src/application/route_detail_service.dart
+      - lib/src/application/tracking_client.dart
+  - id: LBO-17B
+    phase: LBO
+    title: Fewer Dart wakeups during stops
+    release_gate: while native capture is stationary the health watchdog doubles its quiet interval up to four minutes and returns to the normal interval on any commit; the periodic batch upload skips a tick when nothing committed since the last one
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart

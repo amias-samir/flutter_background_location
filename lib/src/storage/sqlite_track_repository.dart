@@ -52,6 +52,16 @@ Future<void> configureTrackDatabase(Database database) async {
   // survive power loss. WAL with NORMAL (Android's framework default) may
   // roll back the newest commits after a power cut; FULL syncs the WAL first.
   await database.execute('PRAGMA synchronous = FULL');
+  // FLT-24. A backfill, review or migration can grow the WAL to many
+  // megabytes, and SQLite keeps the file at its largest size after a
+  // checkpoint; cap what it keeps (Android's framework already does).
+  // Returns the limit, so it is a query.
+  await database.rawQuery('PRAGMA journal_size_limit = 4194304');
+  // An 8 MiB page cache (negative values are KiB) keeps a long route's
+  // indexes in memory for bundle loads and index builds, and temporary
+  // sort and index storage stays in memory instead of temp files.
+  await database.execute('PRAGMA cache_size = -8192');
+  await database.execute('PRAGMA temp_store = MEMORY');
 }
 
 final class SqliteTrackRepository
@@ -204,7 +214,7 @@ final class SqliteTrackRepository
     _database = await _databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 19,
+        version: 20,
         singleInstance: _singleInstance,
         onConfigure: configureTrackDatabase,
         onCreate: _createSchema,
@@ -222,6 +232,10 @@ final class SqliteTrackRepository
     await RouteSummaryStore.ensureSchema(_db);
     await RouteReviewStore.ensureSchema(_db);
     await RouteCompactionStore.ensureSchema(_db);
+    await _createSchema20(_db);
+    // The schema is final from here; column lists read during the upgrade
+    // may predate a column the ensures above added.
+    RouteSummaryStore.forgetSchema(_db);
     await _db.transaction(_repairInitialConfigurationEpochs);
     await _refreshStaleSummaries();
     await _emitCurrentTrack();
@@ -453,16 +467,8 @@ final class SqliteTrackRepository
       ON track_segments(track_id, segment_number)
     ''');
     await database.execute('''
-      CREATE INDEX idx_track_points_track_sequence
-      ON track_points(track_id, sequence)
-    ''');
-    await database.execute('''
       CREATE INDEX idx_track_points_segment_sequence
       ON track_points(segment_id, sequence)
-    ''');
-    await database.execute('''
-      CREATE INDEX idx_track_points_pending
-      ON track_points(sync_state, captured_at)
     ''');
     await database.execute('''
       CREATE UNIQUE INDEX idx_track_points_native_event
@@ -482,6 +488,123 @@ final class SqliteTrackRepository
     await RouteSummaryStore.ensureSchema(database);
     await RouteReviewStore.ensureSchema(database);
     await RouteCompactionStore.ensureSchema(database);
+    await _createSchema20(database);
+  }
+
+  /// Whether a unique index of [table] covers exactly [columns], in order.
+  /// Read from the index list, never from `sqlite_autoindex_*` names.
+  static Future<bool> _hasUniqueIndexOn(
+    DatabaseExecutor database,
+    String table,
+    List<String> columns,
+  ) async {
+    final indexes = await database.rawQuery('PRAGMA index_list($table)');
+    for (final index in indexes) {
+      if ((index['unique'] as num?)?.toInt() != 1) continue;
+      final name = index['name']! as String;
+      final info = List<Map<String, Object?>>.of(
+        await database.rawQuery("PRAGMA index_info('$name')"),
+      )..sort(
+          (a, b) => (a['seqno']! as num).compareTo(b['seqno']! as num),
+        );
+      final indexed = <String>[
+        for (final column in info) column['name']! as String,
+      ];
+      if (indexed.length == columns.length &&
+          List<int>.generate(columns.length, (i) => i)
+              .every((i) => indexed[i] == columns[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Schema 20 (FLT-16, REL-14): leaner point indexes, an index on every
+  /// column a cascading route delete looks up, and the quarantine for native
+  /// events that can never be stored. Idempotent; tables an unusual upgrade
+  /// path has not created yet are skipped.
+  static Future<void> _createSchema20(DatabaseExecutor database) async {
+    final tables = (await database.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table'",
+    ))
+        .map((row) => row['name']! as String)
+        .toSet();
+    if (tables.contains('track_points')) {
+      final columns =
+          (await database.rawQuery('PRAGMA table_info(track_points)'))
+              .map((row) => row['name']! as String)
+              .toSet();
+      // UNIQUE(track_id, sequence) already indexes these columns, so every
+      // point insert maintained the same B-tree twice. Older tables may lack
+      // the constraint; they keep the index.
+      if (await _hasUniqueIndexOn(
+        database,
+        'track_points',
+        const <String>['track_id', 'sequence'],
+      )) {
+        await database.execute(
+          'DROP INDEX IF EXISTS idx_track_points_track_sequence',
+        );
+      }
+      // Rejected points never leave `pending`, so the old index grew with
+      // every rejected fix; uploads only read accepted pending points.
+      if (columns.containsAll(
+        const <String>{'track_id', 'sequence', 'accepted', 'sync_state'},
+      )) {
+        await database.execute('''
+          CREATE INDEX IF NOT EXISTS idx_track_points_upload_pending
+          ON track_points(track_id, sequence)
+          WHERE accepted = 1 AND sync_state = 'pending'
+        ''');
+        await database.execute('DROP INDEX IF EXISTS idx_track_points_pending');
+      }
+    }
+    // Deleting a point looks up every row that references it; without these
+    // a route delete scanned each child table once per point.
+    const childIndexes = <(String, String, String)>[
+      (
+        'derived_geometry_points',
+        'idx_derived_points_source',
+        'source_point_id'
+      ),
+      ('track_continuity_gaps', 'idx_gaps_before_point', 'before_point_id'),
+      ('track_continuity_gaps', 'idx_gaps_after_point', 'after_point_id'),
+      (
+        'track_quality_runs',
+        'idx_quality_runs_before_point',
+        'before_point_id'
+      ),
+      ('track_quality_runs', 'idx_quality_runs_after_point', 'after_point_id'),
+      ('track_stops', 'idx_track_stops_arrival_point', 'arrival_point_id'),
+      ('track_stops', 'idx_track_stops_departure_point', 'departure_point_id'),
+      (
+        'tracking_health_events',
+        'idx_health_events_track',
+        'track_id, occurred_at'
+      ),
+    ];
+    for (final (table, index, columns) in childIndexes) {
+      if (!tables.contains(table)) continue;
+      final present = (await database.rawQuery('PRAGMA table_info($table)'))
+          .map((row) => row['name']! as String)
+          .toSet();
+      if (!columns.split(', ').every(present.contains)) continue;
+      await database.execute(
+        'CREATE INDEX IF NOT EXISTS $index ON $table($columns)',
+      );
+    }
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS quarantined_native_events (
+        event_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        error_type TEXT NOT NULL,
+        failure_count INTEGER NOT NULL,
+        payload_json TEXT,
+        quarantined_at TEXT NOT NULL,
+        PRIMARY KEY(track_id, event_id),
+        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+      )
+    ''');
   }
 
   static Future<void> _upgradeSchema(
@@ -715,6 +838,9 @@ final class SqliteTrackRepository
       // Routes recorded before schema 19 keep everything they recorded.
       await RouteCompactionStore.ensureSchema(database);
     }
+    // Schema 20 is index and table changes only; [_createSchema20] runs
+    // after the open's ensures, because some legacy paths only gain the
+    // columns its indexes use there.
   }
 
   /// Schema 17 stores one stop row per place: earlier rows of one visit are
@@ -2110,6 +2236,7 @@ final class SqliteTrackRepository
     TrackingContinuityDecision? continuity,
     TrackStopChange? stop,
   ) async {
+    var summaryRowCreated = false;
     final result = await _db.transaction((transaction) async {
       final nativeEventId = request.sample.eventId;
       if (nativeEventId != null) {
@@ -2140,19 +2267,11 @@ final class SqliteTrackRepository
         }
       }
 
-      final trackBefore = await _requiredTrack(transaction, request.trackId);
-      if (trackBefore.status != TrackStatus.active ||
-          trackBefore.currentSegmentId == null) {
-        throw StateError('Track is not active: ${request.trackId}');
-      }
-      final previousRaw = await _lastRawPoint(transaction, request.trackId);
-      final previousAccepted =
-          await _lastAcceptedPoint(transaction, request.trackId);
-      final beforeSegmentId = trackBefore.currentSegmentId!;
-
-      // Acquire the SQLite write lock before reading the allocated sequence.
-      // This stays safe across multiple database connections without relying on
-      // SELECT ... FOR UPDATE, which SQLite does not support.
+      // Allocate the sequence first: the guarded UPDATE proves the track is
+      // active with a segment, so one read after it gives both the segment
+      // and the sequence (it used to read the track before and after). The
+      // transaction already holds the write lock (BEGIN IMMEDIATE), which
+      // keeps this safe across connections without SELECT ... FOR UPDATE.
       final allocated = await transaction.rawUpdate(
         '''
         UPDATE tracks
@@ -2170,6 +2289,12 @@ final class SqliteTrackRepository
       }
       final track = await _requiredTrack(transaction, request.trackId);
       final sequence = track.nextSequence - 1;
+      final previousRaw = await _lastRawPoint(transaction, request.trackId);
+      // An accepted newest point is also the newest accepted one.
+      final previousAccepted = previousRaw != null && previousRaw.accepted
+          ? previousRaw
+          : await _lastAcceptedPoint(transaction, request.trackId);
+      final beforeSegmentId = track.currentSegmentId!;
       final configurationEpoch = await _configurationEpochForSequence(
         transaction,
         trackId: request.trackId,
@@ -2184,14 +2309,19 @@ final class SqliteTrackRepository
       }
 
       final now = _clock();
-      await RouteSummaryStore.create(
-        transaction,
-        request.trackId,
-        recordsStops: configurationEpoch.resolvedConfig.captureIntent ==
-                RouteCaptureIntent.adaptive &&
-            configurationEpoch.qualityPolicyVersion >= 3,
-        now: now,
-      );
+      // Summary rows are only ever deleted with their track, so a committed
+      // one need not be created again for every fix.
+      if (!_summaryRowTracks.contains(request.trackId)) {
+        await RouteSummaryStore.create(
+          transaction,
+          request.trackId,
+          recordsStops: configurationEpoch.resolvedConfig.captureIntent ==
+                  RouteCaptureIntent.adaptive &&
+              configurationEpoch.qualityPolicyVersion >= 3,
+          now: now,
+        );
+        summaryRowCreated = true;
+      }
       var segmentId = beforeSegmentId;
       final shouldSplit = request.accepted &&
           continuity?.treatment == TrackingGapTreatment.startNewSegment &&
@@ -2265,7 +2395,7 @@ final class SqliteTrackRepository
               now: now,
             );
       final id = _idGenerator();
-      await transaction.insert('track_points', <String, Object?>{
+      final pointRow = <String, Object?>{
         'id': id,
         'track_id': request.trackId,
         'segment_id': segmentId,
@@ -2339,7 +2469,8 @@ final class SqliteTrackRepository
         'accepted': request.accepted ? 1 : 0,
         'quality_flags': request.qualityFlags,
         'rejection_reason': request.rejectionReason,
-      });
+      };
+      await transaction.insert('track_points', pointRow);
       if (request.accepted) {
         await transaction.rawUpdate(
           '''
@@ -2479,13 +2610,10 @@ final class SqliteTrackRepository
         }
       }
 
-      final rows = await transaction.query(
-        'track_points',
-        where: 'id = ?',
-        whereArgs: <Object?>[id],
-        limit: 1,
-      );
-      final point = TrackPoint.fromDatabase(rows.single);
+      // The row as inserted; nothing in this transaction changes it before
+      // here, and TrackPoint.fromDatabase reads only inserted columns, so it
+      // needs no read back (append_point_row_test pins the equality).
+      final point = TrackPoint.fromDatabase(pointRow);
       // Before the quality run: poor fixes at the stop this change records
       // are stop evidence.
       final committedStop = stop == null
@@ -2546,6 +2674,9 @@ final class SqliteTrackRepository
         ],
       );
       final stepCount = request.sample.stepCount;
+      // Read once, after the stop change above updated it.
+      final summary =
+          await RouteSummaryStore.summaryRow(transaction, request.trackId);
       if (stepCount != null) {
         final (before, after) = await RouteSummaryStore.onStepCount(
           transaction,
@@ -2555,6 +2686,7 @@ final class SqliteTrackRepository
           stepCount: stepCount,
           coverage: request.sample.stepCoverage,
           now: now,
+          summary: summary,
         );
         if (_recordsDiagnosticHealthEvents) {
           await _recordStepCoverageChange(
@@ -2577,6 +2709,7 @@ final class SqliteTrackRepository
         maximumPlausibleSpeedMetersPerSecond: configurationEpoch
             .resolvedConfig.maximumPlausibleSpeedMetersPerSecond,
         now: now,
+        summary: summary,
       );
       return PointAppendResult(
         point: point,
@@ -2586,9 +2719,51 @@ final class SqliteTrackRepository
         stop: committedStop,
       );
     });
+    // Only once committed: a rolled-back transaction created no row.
+    if (summaryRowCreated) _summaryRowTracks.add(request.trackId);
     await _emitCurrentTrack();
     return result;
   }
+
+  /// Stores a native event that can never be appended (REL-14), so the
+  /// native journal may drop it: its evidence is committed here first, and
+  /// only then acknowledged. True when the event is quarantined (now or
+  /// before). [payload] carries the fix's own values, never derived data.
+  Future<bool> quarantineNativeEvent({
+    required String trackId,
+    required String eventId,
+    required String errorType,
+    required int failureCount,
+    required Map<String, Object?> payload,
+  }) async {
+    var encoded = jsonEncode(payload);
+    if (encoded.length > _maximumQuarantinePayloadLength) encoded = '{}';
+    await _db.insert(
+      'quarantined_native_events',
+      <String, Object?>{
+        'event_id': eventId,
+        'track_id': trackId,
+        'error_type': errorType,
+        'failure_count': failureCount,
+        'payload_json': encoded,
+        'quarantined_at': _timestamp(_clock()),
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    final rows = await _db.query(
+      'quarantined_native_events',
+      columns: <String>['event_id'],
+      where: 'track_id = ? AND event_id = ?',
+      whereArgs: <Object?>[trackId, eventId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  static const _maximumQuarantinePayloadLength = 64 * 1024;
+
+  /// Tracks whose summary row this repository has seen committed.
+  final Set<String> _summaryRowTracks = <String>{};
 
   /// Applies [change] for [point], the fix just appended, in its transaction.
   Future<TrackStop?> _applyStopChange(
@@ -5928,8 +6103,9 @@ final class SqliteTrackRepository
   }) async {
     final rows = await _db.query(
       'track_points',
-      where: 'track_id = ? AND accepted = 1 AND sync_state = ?',
-      whereArgs: <Object?>[trackId, 'pending'],
+      // A literal, so the partial upload index applies.
+      where: "track_id = ? AND accepted = 1 AND sync_state = 'pending'",
+      whereArgs: <Object?>[trackId],
       orderBy: 'sequence ASC',
       limit: limit,
     );
@@ -6008,8 +6184,8 @@ final class SqliteTrackRepository
       if (pointRows.isEmpty) {
         final candidateRows = await transaction.query(
           'track_points',
-          where: 'track_id = ? AND accepted = 1 AND sync_state = ?',
-          whereArgs: <Object?>[trackId, 'pending'],
+          where: "track_id = ? AND accepted = 1 AND sync_state = 'pending'",
+          whereArgs: <Object?>[trackId],
           orderBy: 'sequence ASC',
           limit: maximumPointCount,
         );
@@ -7015,9 +7191,39 @@ final class SqliteTrackRepository
       orderBy: 'activation_sequence DESC',
       limit: 1,
     );
-    return rows.isEmpty
-        ? null
-        : TrackingConfigurationEpoch.fromDatabase(rows.single);
+    if (rows.isEmpty) return null;
+    return _parsedEpoch(rows.single);
+  }
+
+  /// Parsed epochs by id, with the row they were parsed from. Epoch rows are
+  /// immutable, so each fix of a route used to parse the same configuration
+  /// JSON again; a cached epoch is reused only while its row is unchanged.
+  static final Map<String, (Map<String, Object?>, TrackingConfigurationEpoch)>
+      _epochCache =
+      <String, (Map<String, Object?>, TrackingConfigurationEpoch)>{};
+  static const _epochCacheSize = 32;
+
+  static TrackingConfigurationEpoch _parsedEpoch(Map<String, Object?> row) {
+    final id = row['id']! as String;
+    final cached = _epochCache.remove(id);
+    if (cached != null && _sameRow(cached.$1, row)) {
+      _epochCache[id] = cached;
+      return cached.$2;
+    }
+    final epoch = TrackingConfigurationEpoch.fromDatabase(row);
+    _epochCache[id] = (Map<String, Object?>.of(row), epoch);
+    if (_epochCache.length > _epochCacheSize) {
+      _epochCache.remove(_epochCache.keys.first);
+    }
+    return epoch;
+  }
+
+  static bool _sameRow(Map<String, Object?> a, Map<String, Object?> b) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (b[entry.key] != entry.value) return false;
+    }
+    return true;
   }
 
   static Future<Track> _requireOwnedTrack(

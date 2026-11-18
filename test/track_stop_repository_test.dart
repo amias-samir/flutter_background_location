@@ -225,13 +225,15 @@ void main() {
       await repository.initialize();
       await repository.close();
       expect(await stopSchema('fresh'), <String>[
+        'idx_track_stops_arrival_point',
+        'idx_track_stops_departure_point',
         'idx_track_stops_open',
         'idx_track_stops_review',
         'idx_track_stops_track_started',
         'track_stops',
       ]);
       final raw = await openRaw('fresh');
-      expect(await raw.getVersion(), 19);
+      expect(await raw.getVersion(), 20);
       await raw.close();
     });
 
