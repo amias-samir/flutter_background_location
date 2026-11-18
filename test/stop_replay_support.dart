@@ -179,6 +179,7 @@ final class StopReplay {
     required TrackingConfig config,
     int? qualityPolicy,
     int? continuityPolicy,
+    DatabaseFactory? databaseFactory,
   }) async {
     final pinnedContinuity = continuityPolicy ??
         (qualityPolicy != null && qualityPolicy < 5 ? 3 : null);
@@ -188,7 +189,11 @@ final class StopReplay {
       addTearDown(() => directory.delete(recursive: true));
       path = '${directory.path}/route.sqlite';
     }
-    final harness = RepositoryHarness(config: config, path: path)..now = t0;
+    final harness = RepositoryHarness(
+      config: config,
+      path: path,
+      databaseFactory: databaseFactory,
+    )..now = t0;
     await harness.initialize();
     final adapter = FakeTrackerAdapter();
     final client = await TrackingClient.openWithTrips(

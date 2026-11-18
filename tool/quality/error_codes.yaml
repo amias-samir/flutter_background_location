@@ -94,6 +94,15 @@ codes:
     redaction: no route or owner identity
     commands:
       - incremental export
+      - loadTrackMap
+      - loadTripMap
+  - code: route_map_cancelled
+    owner: TrackingException
+    recovery: refresh
+    redaction: no route or owner identity
+    commands:
+      - loadTrackMap
+      - loadTripMap
   - code: education_issue_stale
     owner: TrackingNotReadyException
     recovery: refresh
@@ -126,6 +135,8 @@ codes:
       - open
       - switchOwner
       - resolveOwnerScopeConflict
+      - loadTrackMap
+      - loadTripMap
   - code: native_persistence_failed
     owner: TrackingException
     recovery: retry

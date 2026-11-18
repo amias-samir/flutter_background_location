@@ -201,6 +201,44 @@ final routeSegments = bundle.segments
 You can draw each item in `routeSegments` as a separate polyline. This avoids
 connecting the location before a pause to the location after a resume.
 
+### Loading a route for a map
+
+To draw a route or a Trip, feature-detect `TrackingMapController` on the
+owner-scoped controller. One call returns the route ready to draw:
+
+```dart
+if (tracking case final TrackingMapController maps) {
+  final map = await maps.loadTrackMap(trackId); // or loadTripMap(tripId)
+  for (final part in map.geometry.parts) {
+    drawPolyline(part.points.map((p) => (p.latitude, p.longitude)));
+  }
+  drawStops(map.stops);
+  if (map.preparing) showNote('Preparing route details…');
+}
+```
+
+- `map.geometry` is the route assembled by `RouteGeometryAssembler`, with each
+  point at the coordinates of `map.view`. `map.views` lists the views the
+  route offers (`RouteGeometryView.reviewed`, `cleaned`, `raw`); pass `view:`
+  to pick one.
+- `map.stops`, `map.routeSummary` or `map.tripSummary` are the stored values.
+- Loading a map never writes to the route database and never takes its write
+  lock, so it does not hold up a recording route. It reads in bounded pages
+  whatever the route's length.
+- Pass `isCancelled:` to stop a load the screen no longer needs. A cancelled
+  load throws `TrackingException` with code `route_map_cancelled`.
+- Details a map lacks are prepared in the background: the cleaned view of a
+  completed route, or the review and stops of a route recorded under older
+  rules. Meanwhile `map.preparing` is true and the cleaned view draws the
+  route as recorded. A `TrackHistoryEvent` with
+  `TrackHistoryChangeKind.updated` follows when they are stored; load the map
+  again then.
+- A recording route's cleaned view covers the points up to its last cleaning;
+  newer points are drawn as recorded. It is refreshed in the background at
+  most every 15 minutes, once 300 new points have arrived.
+- The points carry the fields a map draws. Use `loadTrackBundle` or the point
+  pages for the full evidence.
+
 Map rendering is deliberately not a package dependency. The example app shows
 how to display recorded tracks with `maplibre_gl` and the muted OpenFreeMap
 Positron style; applications can use MapLibre, Google Maps, Apple MapKit, or any
@@ -263,8 +301,10 @@ stops, gaps and totals.
 
 `currentCleanedGeometry(trackId)` returns the route's current stop-aware
 cleaned view: the newest run when it covers the route's newest point under the
-current cleaning version, otherwise a new one. It deletes older runs and
-stores the cleaned distance in the summary.
+current cleaning version, otherwise a new one. It stores the cleaned distance
+in the summary, then deletes older runs. The package also prepares this view
+in the background when a route completes and when a map asks for it, so most
+calls find it ready. A map load (`TrackingMapController`) never derives it.
 
 ## Steps
 

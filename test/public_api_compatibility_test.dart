@@ -204,6 +204,51 @@ void main() {
     expect((await controller.routeSummary('track')).stopCount, 2);
     expect(advanced.RouteSummaryRepository, isNotNull);
   });
+
+  test('route maps are an optional capability with a stable view order',
+      () async {
+    expect(RouteGeometryView.values, <RouteGeometryView>[
+      RouteGeometryView.reviewed,
+      RouteGeometryView.cleaned,
+      RouteGeometryView.raw,
+    ]);
+    final TrackingMapController maps = _HostMaps();
+    final map = await maps.loadTrackMap('track');
+    expect(map.view, RouteGeometryView.raw);
+    expect(map.views, <RouteGeometryView>[RouteGeometryView.raw]);
+    expect(map.stops, isEmpty);
+    expect(map.preparing, isFalse);
+    expect(map.routeSummary, isNull);
+    expect(map.tripSummary, isNull);
+  });
+}
+
+/// A host implementation of the optional map capability.
+final class _HostMaps implements TrackingMapController {
+  @override
+  Future<RouteMap> loadTrackMap(
+    String trackId, {
+    RouteGeometryView? view,
+    RouteGeometryContinuity continuity =
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    bool Function()? isCancelled,
+  }) async =>
+      RouteMap(
+        geometry: const RouteGeometryAssembler().assemble(
+          sourceParts: const <RouteGeometrySourcePart>[],
+        ),
+        view: RouteGeometryView.raw,
+        views: const <RouteGeometryView>[RouteGeometryView.raw],
+      );
+
+  @override
+  Future<RouteMap> loadTripMap(
+    String tripId, {
+    RouteGeometryView? view,
+    RouteGeometryContinuity? continuity,
+    bool Function()? isCancelled,
+  }) =>
+      loadTrackMap(tripId);
 }
 
 /// A host implementation of the optional summary capability.

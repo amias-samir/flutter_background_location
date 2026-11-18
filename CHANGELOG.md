@@ -3,6 +3,29 @@
 - Fixed: on Android, the cleaned map view of a route with more than about
   1,000 accepted points failed with `too many SQL variables`. Derived-coordinate
   lookups and point sync updates now bind at most 500 ids per statement.
+- New `TrackingMapController` (owner-scoped controllers): `loadTrackMap` and
+  `loadTripMap` return a route ready to draw (`RouteMap`, `RouteGeometryView`).
+  - Opening a map never writes to the route database or takes its write lock,
+    reads in bounded pages whatever the route's length, and can be cancelled
+    (`isCancelled`, error code `route_map_cancelled`).
+  - The cleaned view of a completed route, and the review and stops of a
+    route recorded under older rules, are prepared in the background, when
+    the route completes or when a map asks. `RouteMap.preparing` says so
+    meanwhile, and a `TrackHistoryEvent` update follows when they are stored.
+  - A recording route's cleaned view draws its newest points as recorded and
+    is refreshed at most every 15 minutes.
+- Faster and lighter route reads:
+  - `tripSummary` and `loadTripBundle` compute the Trip's totals without
+    writing.
+  - Deriving a cleaned view stores its points in batches and cleans long
+    segments off the UI isolate.
+  - `currentCleanedGeometry` records the new view before it deletes older
+    ones, and a background and a host call on the same route share one
+    derivation.
+  - Compacting a finished clean route runs in short transactions.
+- Example app: the map page loads a route once (not on every rebuild),
+  cancels the load when you leave, keeps the previous map while switching
+  views, draws through GeoJSON layers, and shows a friendly error with Retry.
 - Shorter README with example-app screenshots. The detail moved into guides in
   `doc/`: platform setup, integration, multi-day Trips, route details, export
   and configuration. The Android manifest listing now shows `WAKE_LOCK`.

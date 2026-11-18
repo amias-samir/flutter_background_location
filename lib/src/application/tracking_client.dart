@@ -42,6 +42,9 @@ import '../domain/tracking_settings.dart';
 import '../domain/tracking_start.dart';
 import '../export/track_export_service.dart';
 import 'route_detail_service.dart';
+import 'route_map_service.dart';
+import '../domain/route_map.dart';
+import '../storage/route_map_repository.dart';
 import '../export/track_export_v2_service.dart';
 import '../export/trip_export_service.dart';
 import '../platform/native_tracker_adapter.dart';
@@ -4125,7 +4128,8 @@ final class _OwnerBoundTrackingController
         TrackingGeometryController,
         TrackingQualityController,
         TrackingStopController,
-        TrackingSummaryController {
+        TrackingSummaryController,
+        TrackingMapController {
   _OwnerBoundTrackingController(this._client, this._owner) {
     _sessionSubscription = _client.sessionStream.listen(
       (snapshot) {
@@ -4147,6 +4151,11 @@ final class _OwnerBoundTrackingController
       StreamController<TrackHistoryEvent>.broadcast();
   TrackingSessionSnapshot? _snapshot;
   Future<void>? _backfill;
+  final List<String> _preparationQueue = <String>[];
+  Future<void>? _preparation;
+  final Map<String, Future<DerivedGeometryRun>> _cleaning =
+      <String, Future<DerivedGeometryRun>>{};
+  bool _disposed = false;
   String? _foreignConflictTrackId;
   String? _foreignConflictToken;
 
@@ -4713,6 +4722,7 @@ final class _OwnerBoundTrackingController
         );
       }
       _client._scheduleReview(track.id);
+      _enqueuePreparation(<String>[track.id]);
       await _client._releaseNativeCommandLease(track.id);
       _client._clearFixAcquisition();
       _client._cancelBatchUploads(track.id);
@@ -4903,6 +4913,7 @@ final class _OwnerBoundTrackingController
     final track = await _currentOwnedTrack();
     await _client.completeTrack(trackId: track.id, reason: reason);
     scheduleBackfill();
+    _enqueuePreparation(<String>[track.id]);
     final updated = (await _client.getTrack(track.id))!;
     _history.add(TrackHistoryEvent(
       kind: TrackHistoryChangeKind.updated,
@@ -5101,7 +5112,201 @@ final class _OwnerBoundTrackingController
   Future<DerivedGeometryRun> currentCleanedGeometry(String trackId) async {
     await _requireOwnedTrack(trackId);
     await _client.initialize();
-    return _details.currentCleanedGeometry(_owner, trackId);
+    return _cleanedGeometry(trackId);
+  }
+
+  @override
+  Future<RouteMap> loadTrackMap(
+    String trackId, {
+    RouteGeometryView? view,
+    RouteGeometryContinuity continuity =
+        RouteGeometryContinuity.mergeAutomaticCallbackGaps,
+    bool Function()? isCancelled,
+  }) async {
+    final checkpoint = _mapCheckpoint(isCancelled);
+    await _client.initialize();
+    checkpoint();
+    final store = _client._store;
+    if (store is! RouteMapRepository) {
+      return _rawTrackMap(trackId, continuity, checkpoint);
+    }
+    final read = await _mapReader(store as RouteMapRepository).loadTrack(
+      owner: _owner,
+      trackId: trackId,
+      view: view,
+      continuity: continuity,
+      checkpoint: checkpoint,
+    );
+    _prepareLater(read.prepare);
+    return read.map;
+  }
+
+  @override
+  Future<RouteMap> loadTripMap(
+    String tripId, {
+    RouteGeometryView? view,
+    RouteGeometryContinuity? continuity,
+    bool Function()? isCancelled,
+  }) async {
+    final checkpoint = _mapCheckpoint(isCancelled);
+    await _client.initialize();
+    checkpoint();
+    final store = _client._store;
+    if (store is! RouteMapRepository) {
+      return _rawTripMap(tripId, continuity, checkpoint);
+    }
+    final read = await _mapReader(store as RouteMapRepository).loadTrip(
+      owner: _owner,
+      tripId: tripId,
+      view: view,
+      continuity: continuity,
+      checkpoint: checkpoint,
+    );
+    _prepareLater(read.prepare);
+    return read.map;
+  }
+
+  RouteMapReader _mapReader(RouteMapRepository store) =>
+      RouteMapReader(store, now: _client._clock);
+
+  /// Throws once [isCancelled] says so or the owner scope changes.
+  void Function() _mapCheckpoint(bool Function()? isCancelled) {
+    final owner = _owner;
+    return () {
+      if (isCancelled?.call() ?? false) {
+        throw const TrackingException(
+          code: 'route_map_cancelled',
+          message: 'The route map load was cancelled.',
+        );
+      }
+      if (!_sameOwner(owner, _owner)) {
+        throw const TrackingOwnershipException(
+          code: 'owner_scope_changed',
+          message: 'The owner scope changed while the route map loaded.',
+        );
+      }
+    };
+  }
+
+  /// A repository without lean map reads: the recorded route only, through
+  /// the public contracts, without preparing anything.
+  Future<RouteMap> _rawTrackMap(
+    String trackId,
+    RouteGeometryContinuity continuity,
+    void Function() checkpoint,
+  ) async {
+    await _requireOwnedTrack(trackId);
+    final store = _client._store;
+    final report =
+        await assembleTrackRouteGeometry(trackId, continuity: continuity);
+    checkpoint();
+    return RouteMap(
+      geometry: report,
+      view: RouteGeometryView.raw,
+      views: const <RouteGeometryView>[RouteGeometryView.raw],
+      stops: store is TrackStopRepository
+          ? await (store as TrackStopRepository).listTrackStops(trackId)
+          : const <TrackStop>[],
+      routeSummary: store is RouteSummaryRepository
+          ? await (store as RouteSummaryRepository).routeSummary(trackId)
+          : null,
+    );
+  }
+
+  Future<RouteMap> _rawTripMap(
+    String tripId,
+    RouteGeometryContinuity? continuity,
+    void Function() checkpoint,
+  ) async {
+    final bundle = await _tripStore.loadTripBundleForOwner(_owner, tripId);
+    final report =
+        await assembleTripRouteGeometry(tripId, continuity: continuity);
+    checkpoint();
+    final store = _client._store;
+    final stops = <TrackStop>[
+      if (store is TrackStopRepository)
+        for (final leg in bundle.legs)
+          ...await (store as TrackStopRepository).listTrackStops(leg.trackId),
+    ]..sort((a, b) => a.startedAt.compareTo(b.startedAt));
+    return RouteMap(
+      geometry: report,
+      view: RouteGeometryView.raw,
+      views: const <RouteGeometryView>[RouteGeometryView.raw],
+      stops: stops,
+      tripSummary: bundle.summary,
+    );
+  }
+
+  /// Prepares [trackIds]' details after the current read has returned, so
+  /// the read itself never writes.
+  void _prepareLater(Iterable<String> trackIds) {
+    final ids = trackIds.toList(growable: false);
+    if (ids.isEmpty) return;
+    Timer.run(() => _enqueuePreparation(ids, first: true));
+  }
+
+  /// Queues [trackIds] for background preparation: [first] puts them ahead
+  /// of routes queued earlier, as for a map someone is looking at.
+  void _enqueuePreparation(Iterable<String> trackIds, {bool first = false}) {
+    if (_disposed) return;
+    final ids = trackIds.where((id) => !_preparationQueue.contains(id));
+    if (first) {
+      _preparationQueue.insertAll(0, ids.toList(growable: false));
+    } else {
+      _preparationQueue.addAll(ids);
+    }
+    _preparation ??= _drainPreparation().whenComplete(
+      () => _preparation = null,
+    );
+  }
+
+  Future<void> _drainPreparation() async {
+    // Let a background pass in progress finish first: both write.
+    await _backfill;
+    while (_preparationQueue.isNotEmpty && !_disposed) {
+      final trackId = _preparationQueue.removeAt(0);
+      try {
+        await _prepareTrack(trackId);
+      } on Object {
+        // Retried the next time a map asks for it.
+      }
+    }
+  }
+
+  /// Reviews [trackId] or derives its stops when it still waits for them,
+  /// then brings its cleaned view up to date, and tells listeners.
+  Future<void> _prepareTrack(String trackId) async {
+    final track = await _ownedTrack(trackId);
+    if (track == null || _disposed) return;
+    await _ensureDetails(trackId);
+    if (_disposed) return;
+    if (track.acceptedPointCount > 0 &&
+        _client._store is DerivedGeometryRepository &&
+        _client._store is StreamingTrackRepository) {
+      await _cleanedGeometry(trackId);
+    }
+    if (_disposed || _history.isClosed) return;
+    _history.add(TrackHistoryEvent(
+      kind: TrackHistoryChangeKind.updated,
+      trackId: trackId,
+    ));
+  }
+
+  /// [trackId]'s current cleaned view, joining a derivation already running
+  /// for it, so two never delete each other's run.
+  Future<DerivedGeometryRun> _cleanedGeometry(String trackId) {
+    final running = _cleaning[trackId];
+    if (running != null) return running;
+    final owner = _owner;
+    final future = _details
+        .currentCleanedGeometry(owner, trackId)
+        // A block body: the removed entry is this future, and returning it
+        // would make the future wait for itself.
+        .whenComplete(() {
+      _cleaning.remove(trackId);
+    });
+    _cleaning[trackId] = future;
+    return future;
   }
 
   @override
@@ -5290,6 +5495,9 @@ final class _OwnerBoundTrackingController
 
   @override
   Future<void> dispose() async {
+    _disposed = true;
+    _preparationQueue.clear();
+    await _preparation;
     await _backfill;
     await _sessionSubscription.cancel();
     await _history.close();
