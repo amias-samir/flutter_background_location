@@ -1,5 +1,31 @@
 ## Unreleased
 
+- Reliability fixes (no change to what is recorded or decided):
+  - Android: a temporary Google Play services failure (an update, a lost
+    connection) no longer ends the route. Location requests are retried for
+    about two minutes; if Play services stays unavailable the route is
+    interrupted and can be resumed.
+  - Android: after a reboot, a route is restored only when background
+    location is allowed. Otherwise it is interrupted and resumable, instead of
+    Android refusing the restart (API 34+). An unexpected error while the
+    service starts is recorded instead of crashing the app.
+  - Android: each fix carries one consistent activity reading, the native
+    journal returns free space once it is empty, and the export thread ends
+    when the Flutter engine detaches.
+  - iOS: a late "location denied" error interrupts a recording route (it no
+    longer marks it failed) and leaves paused or finished routes alone.
+  - iOS: a relaunch that cannot resume no longer keeps relaunching the app
+    through significant-location changes; a relaunch that resumes also
+    restores the low-battery rule and asks for a fresh first fix.
+  - iOS: a full journal file is reported as `location_journal_capacity`, and
+    status no longer calls a blocking Location Services check every time.
+  - A native acknowledgement that never answers no longer blocks pause or
+    complete, and a fix that cannot be stored keeps the route recording and
+    no longer reports the database error text.
+  - Keeping more than 999 routes with `deleteTracksExcept` works on Android.
+  - Activity readings waiting for the stop rules are kept in order instead of
+    being re-sorted for every reading.
+
 - Fixed: on Android, the cleaned map view of a route with more than about
   1,000 accepted points failed with `too many SQL variables`. Derived-coordinate
   lookups and point sync updates now bind at most 500 ids per statement.

@@ -474,6 +474,11 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       LinkedHashSet<String>();
   static const _maximumDeferredAcknowledgements = 2000;
 
+  /// Longest wait for a native acknowledgement. A platform call that never
+  /// answers would otherwise hold `_pointTail`, and pause or complete with it;
+  /// the IDs are retried with the next commit like any failed acknowledgement.
+  static const _acknowledgementTimeout = Duration(seconds: 10);
+
   /// Activity readings buffered for the stop hold until the fixes they
   /// precede are evaluated. Live readings wait only while a backlog of older
   /// fixes is replayed; past this bound, about five hours of five-second
@@ -2159,11 +2164,37 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       Object error,
       StackTrace stackTrace,
     ) {
+      // The fix stays unacknowledged in the native journal and is replayed,
+      // so the route is not failed. The decision engine may have advanced in
+      // decide() before the store failed; drop it so the next fix rebuilds it
+      // from the stored tail, exactly as a restart does.
+      _decisionEngine = null;
+      _policyEpoch = null;
+      final current = _currentStatus;
+      // Never echo the error text: database errors can carry bound values.
       _emitStatus(
         TrackerStatus(
-          lifecycle: TrackerLifecycle.failed,
-          trackId: _currentStatus.trackId,
-          message: 'Could not persist a location fix: $error',
+          lifecycle: current.lifecycle,
+          trackId: current.trackId,
+          lastPointAt: current.lastPointAt,
+          message: 'Could not persist a location fix '
+              '(${error.runtimeType}); it stays in the native journal and '
+              'will be retried.',
+          motionState: current.motionState,
+          samplingProfile: current.samplingProfile,
+          motionEvidence: current.motionEvidence,
+          profileTransitionReason: current.profileTransitionReason,
+          stepCount: current.stepCount,
+          captureGenerationId: current.captureGenerationId,
+          stepCoverage: current.stepCoverage,
+          stepFinal: current.stepFinal,
+        ),
+      );
+      unawaited(
+        _safeHealthEvent(
+          trackId: current.trackId,
+          type: 'location_persist_failed',
+          details: <String, Object?>{'errorType': error.runtimeType.toString()},
         ),
       );
     });
@@ -2477,12 +2508,14 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       }
     }
     final capturedAt = sample.capturedAt;
-    _pendingStopReadings.sort((a, b) => a.recordedAt!.compareTo(b.recordedAt!));
-    while (_pendingStopReadings.isNotEmpty &&
-        !_pendingStopReadings.first.recordedAt!.isAfter(capturedAt)) {
-      final reading = _pendingStopReadings.removeAt(0);
+    // The buffer is kept in evidence order (_insertPendingStopReading).
+    var due = 0;
+    while (due < _pendingStopReadings.length &&
+        !_pendingStopReadings[due].recordedAt!.isAfter(capturedAt)) {
+      final reading = _pendingStopReadings[due++];
       _applyStopReading(gate, reading, reading.recordedAt!);
     }
+    if (due > 0) _pendingStopReadings.removeRange(0, due);
     final attached = sample.capturedActivity;
     if (attached != null && attached.recordedAt != null) {
       _applyStopReading(gate, attached, capturedAt);
@@ -3205,10 +3238,8 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     if (gate != null && gate.policyVersion >= 2) {
       // Applied in evidence order when the fixes they precede are evaluated.
       if (activity.recordedAt != null) {
-        _pendingStopReadings.add(activity);
+        _insertPendingStopReading(activity);
         if (_pendingStopReadings.length > _maximumPendingStopReadings) {
-          _pendingStopReadings
-              .sort((a, b) => a.recordedAt!.compareTo(b.recordedAt!));
           final oldest = _pendingStopReadings.removeAt(0);
           _applyStopReading(gate, oldest, oldest.recordedAt!);
         }
@@ -3218,6 +3249,26 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     }
     if (!_activityController.isClosed) _activityController.add(activity);
     unawaited(_publishSessionSnapshot());
+  }
+
+  /// Keeps [_pendingStopReadings] ordered by evidence time as readings
+  /// arrive, after any reading with the same time, so the buffer is never
+  /// re-sorted. Under quality policy 5 nothing drains it, so it sits at its
+  /// bound and a sort per reading was the dominant cost.
+  void _insertPendingStopReading(ActivitySnapshot reading) {
+    final recordedAt = reading.recordedAt!;
+    final readings = _pendingStopReadings;
+    var low = 0;
+    var high = readings.length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      if (readings[middle].recordedAt!.isAfter(recordedAt)) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+    readings.insert(low, reading);
   }
 
   ActivitySnapshot? _recentActivityFor(DateTime capturedAt) {
@@ -3585,7 +3636,9 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   }) async {
     final eventIds = <String>[..._deferredAcknowledgements, eventId];
     try {
-      await _tracker.acknowledgeLocations(eventIds);
+      await _tracker
+          .acknowledgeLocations(eventIds)
+          .timeout(_acknowledgementTimeout);
     } on Object catch (error) {
       final firstFailure = _deferredAcknowledgements.isEmpty;
       _deferredAcknowledgements.add(eventId);

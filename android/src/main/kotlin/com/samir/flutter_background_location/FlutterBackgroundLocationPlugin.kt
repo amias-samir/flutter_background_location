@@ -108,6 +108,9 @@ class FlutterBackgroundLocationPlugin :
             activeExports.values.forEach { abortActiveExport(it, deleteCommitted = true) }
             activeExports.clear()
         }
+        // The abort above still runs; the thread then ends instead of idling
+        // for the life of the process after every engine detach.
+        exportExecutor.shutdown()
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {

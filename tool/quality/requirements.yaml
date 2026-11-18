@@ -1377,3 +1377,100 @@ work_packages:
       - tool/quality/analyze_stop_jitter.dart
       - test/sampling_profile_diagnostics_test.dart
       - test/analyze_stop_jitter_test.dart
+  - id: REL-01
+    phase: REL
+    title: Android fused-location request failures are retried instead of failing the route
+    release_gate: a transient FusedLocationProviderClient failure (Play services updating, binder lost, timeout) is retried five times over about two minutes in the same capture generation; exhausted retries interrupt the route (resumable) and a revoked permission or a permanent status still fails it
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycle.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycleTest.kt
+  - id: REL-01P
+    phase: REL
+    title: Physical check of provider retry
+    release_gate: force-stopping Google Play services during a recorded drive on an Android phone leaves the route tracking (or interrupted after two minutes, never failed) and the journal replays every committed fix
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
+  - id: REL-02
+    phase: REL
+    title: Android boot and sticky restore are safe on API 34 and later
+    release_gate: a boot or package-replaced broadcast starts the service only with foreground location and, from API 29, background location; otherwise the route is interrupted; a refused foreground promotion on a restore persists an interruption instead of stopping with nothing saved; unexpected runtime exceptions in onStartCommand are persisted failures, not process crashes
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingBootReceiver.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycle.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycleTest.kt
+  - id: REL-02P
+    phase: REL
+    title: Physical check of boot restore permissions
+    release_gate: rebooting an API 34+ phone mid-route with location allowed only while in use leaves the route interrupted and resumable with no crash dialog; with Allow all the time it resumes capture after boot
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
+  - id: REL-04
+    phase: REL
+    title: Android fix payloads read one activity reading and configuration snapshot
+    release_gate: the provider thread reads the volatile latest reading once per fix, so a journaled fix never carries one reading's type with another's time
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: REL-05
+    phase: REL
+    title: Android journal housekeeping (byte counters, free-page reclaim, export thread)
+    release_gate: journal counters count UTF-8 bytes like SQLite's blob length; an empty journal returns free pages (incremental vacuum, or a one-time VACUUM that enables it) at most every ten minutes; the export thread ends on engine detach
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+  - id: REL-07
+    phase: REL
+    title: iOS late permission denial interrupts, never fails, and only a capturing route
+    release_gate: kCLErrorDenied from didFailWithError interrupts a tracking or starting route and leaves paused, interrupted and idle routes unchanged, matching the state a relaunch restores
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-08
+    phase: REL
+    title: iOS termination recovery that cannot resume stops significant-change relaunches and restores battery and probe setup
+    release_gate: both recovery failure branches stop significant-location-change monitoring; a successful relaunch recovery enables battery monitoring and requests a fresh-fix probe like a start
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-11
+    phase: REL
+    title: iOS journal page limit reports capacity; status reads a cached Location Services switch
+    release_gate: SQLITE_FULL on append is reported as location_journal_capacity; the status map no longer calls locationServicesEnabled() on the main thread for every emission, the value is refreshed on authorization changes
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-13
+    phase: REL
+    title: A hung acknowledgement or a failed commit never holds or misreports the route
+    release_gate: native acknowledgements time out after 10 s into the deferred-ack path, so pause and complete always finish; a fix that fails to persist keeps the route's lifecycle, reports no error text (which can carry bound coordinates), stays unacknowledged for replay and rebuilds the decision engine from the stored tail
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: REL-15
+    phase: REL
+    title: Route retention binds no caller-sized list
+    release_gate: deleteTracksExcept and deleteTracksExceptForOwner keep a Trip with any retained leg without an IN list, so retaining more than 999 routes works on Android
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/route_map_test.dart
+  - id: REL-16
+    phase: REL
+    title: Ordered stop-reading buffer and no per-fix suspect copies
+    release_gate: activity readings buffered for the stop gate are inserted in evidence order (equal times keep arrival order) and never re-sorted; the kinematic re-anchor test reads the suspects in place; decisions are unchanged (determinism and replay suites green)
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/application/route_decision_engine.dart
+      - test/live_replay_determinism_test.dart

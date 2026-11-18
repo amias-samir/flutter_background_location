@@ -1165,17 +1165,23 @@ final class RouteDecisionEngine {
         return true;
       }
     }
-    final run = <KinematicPoint>[
-      ..._suspects.map((suspect) => suspect.point),
-      point,
-    ];
-    if (run.length < KinematicPolicy.suspectConsensusFixes) return false;
-    if (point.capturedAt.difference(run.first.capturedAt) <
+    // The run is the suspects plus this fix. Only its length, its first fix
+    // and its last few fixes matter, so it is never copied: a long outlier
+    // run would otherwise cost a copy of every suspect on each fix.
+    const consensus = KinematicPolicy.suspectConsensusFixes;
+    if (_suspects.length + 1 < consensus) return false;
+    if (point.capturedAt.difference(_suspects.first.point.capturedAt) <
         KinematicPolicy.suspectPersistence) {
       return false;
     }
     final residual = KinematicPolicy.constantVelocityResidualMeters(
-      run.sublist(run.length - KinematicPolicy.suspectConsensusFixes),
+      <KinematicPoint>[
+        for (var index = _suspects.length - (consensus - 1);
+            index < _suspects.length;
+            index += 1)
+          _suspects[index].point,
+        point,
+      ],
     );
     return residual != null && residual <= uncertainty;
   }

@@ -225,6 +225,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
   }
   private var lastEmittedLocation: CLLocation?
+  /// The system-wide Location Services switch, read for every status map.
+  /// `locationServicesEnabled()` is a synchronous call Apple warns can block
+  /// the main thread, so it is read once and again whenever Core Location
+  /// reports an authorization change, which a switch change also triggers.
+  private lazy var locationServicesEnabledCache = CLLocationManager.locationServicesEnabled()
+  private var cachedLocationServicesEnabled: Bool { locationServicesEnabledCache }
   /// Records a fix at sharp turns while the moving profile captures them;
   /// under sampling policy 2 it alone chooses the moving profile's fixes.
   private var turnSampler: TurnCaptureSampler?
@@ -662,7 +668,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     default:
       motionState = "unknown"
     }
-    let locationServicesEnabled = CLLocationManager.locationServicesEnabled()
+    let locationServicesEnabled = cachedLocationServicesEnabled
     var state: [String: Any] = [
       "platform": "ios",
       "state": lifecycle.rawValue,
@@ -1211,6 +1217,9 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       currentAuthorizationStatus() == .authorizedAlways,
       CLLocationManager.locationServicesEnabled()
     else {
+      // Significant-change monitoring would keep relaunching the app for a
+      // route that cannot resume here.
+      locationManager.stopMonitoringSignificantLocationChanges()
       lifecycle = .interrupted
       profile = .paused
       persistState()
@@ -1224,15 +1233,20 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       lifecycle = .starting
       persistState()
       configureLocationManager(for: .moving)
+      // As a fresh start does: the low-battery durability rule reads the
+      // battery level, and the first fix after a relaunch is acquired fresh.
+      UIDevice.current.isBatteryMonitoringEnabled = true
       startBackgroundActivitySessionIfNeeded()
       startMotionUpdatesIfPossible()
       motionSensorFusion.start(configuration: configuration)
       startStepCounter()
       startConfiguredLocationUpdates()
+      requestStationaryExitProbe()
       lifecycle = .tracking
       recoveredFromTermination = true
       persistState()
     } catch {
+      locationManager.stopMonitoringSignificantLocationChanges()
       lifecycle = .interrupted
       profile = .paused
       persistState()
@@ -2265,10 +2279,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     completeStationaryExitProbe(outcome: "failed")
 
     if coreLocationError?.code == .denied {
-      stopNativeUpdates()
-      lifecycle = .failed
-      profile = .paused
-      persistState()
+      // Only a capturing route reacts. The authorization callback usually
+      // got here first and interrupted it; a late denial must not turn that,
+      // or a paused or idle route, into a failure. Revoked permission leaves
+      // the route resumable, the same state a relaunch restores.
+      if lifecycle == .tracking || lifecycle == .starting {
+        stopNativeUpdates()
+        lifecycle = .interrupted
+        profile = .paused
+        persistState()
+      }
     }
     emitStatus(message: DiagnosticsMode.detail("Location updates failed", error))
   }
@@ -2282,6 +2302,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    locationServicesEnabledCache = CLLocationManager.locationServicesEnabled()
     finishPermissionRequestIfNeeded()
     enforceActiveTrackingPreconditions(reason: "authorization_changed")
   }
@@ -2293,6 +2314,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     if #available(iOS 14.0, *) {
       return
     }
+    locationServicesEnabledCache = CLLocationManager.locationServicesEnabled()
     finishPermissionRequestIfNeeded()
     enforceActiveTrackingPreconditions(reason: "authorization_changed")
   }

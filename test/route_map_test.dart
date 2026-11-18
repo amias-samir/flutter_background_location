@@ -423,4 +423,27 @@ void main() {
     );
     await raw.close();
   });
+
+  test('retention with many kept routes binds a bounded argument list',
+      () async {
+    final log = StatementLog();
+    final harness = RepositoryHarness(databaseFactory: log.factory());
+    await harness.initialize();
+    final kept = await harness.createActiveTrack(trackId: 'kept');
+    await harness.repository.completeTrack(kept, reason: 'finished');
+    final dropped = await harness.createActiveTrack(trackId: 'dropped');
+    await harness.repository.completeTrack(dropped, reason: 'finished');
+
+    log.clear();
+    await harness.repository.deleteTracksExcept(<String>{
+      kept,
+      for (var i = 0; i < 1200; i++) 'retained-elsewhere-$i',
+    });
+
+    expect(log.maxArguments, lessThanOrEqualTo(999),
+        reason: "Android's framework SQLite allows 999 bound variables");
+    expect(await harness.repository.getTrack(kept), isNotNull);
+    expect(await harness.repository.getTrack(dropped), isNull);
+    await harness.repository.close();
+  });
 }

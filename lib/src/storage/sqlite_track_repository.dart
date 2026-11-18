@@ -6749,15 +6749,6 @@ final class SqliteTrackRepository
       conditions.add('status IN (?, ?)');
       args.addAll(<Object?>[TripStatus.completed.name, TripStatus.failed.name]);
     }
-    if (retainedTrackIds.isNotEmpty) {
-      final placeholders = List.filled(retainedTrackIds.length, '?').join(',');
-      conditions.add('''NOT EXISTS (
-        SELECT 1 FROM trip_legs retained
-        WHERE retained.trip_id = trips.id
-          AND retained.track_id IN ($placeholders)
-      )''');
-      args.addAll(retainedTrackIds);
-    }
     final tripRows = await executor.query(
       'trips',
       columns: <String>['id'],
@@ -6772,6 +6763,11 @@ final class SqliteTrackRepository
         where: 'trip_id = ?',
         whereArgs: <Object?>[tripId],
       );
+      // A Trip with any retained leg is kept whole. Checked here rather than
+      // with an `IN` list, which Android's 999-variable limit would cap.
+      if (legRows.any((leg) => retainedTrackIds.contains(leg['track_id']))) {
+        continue;
+      }
       await executor.update(
         'trips',
         <String, Object?>{'current_leg_track_id': null},

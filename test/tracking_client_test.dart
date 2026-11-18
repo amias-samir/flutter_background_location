@@ -46,6 +46,7 @@ final class _FakeTracker
   String? nativeTrackId;
   bool failNextPauseAfterStopping = false;
   int failAcknowledgements = 0;
+  int hangAcknowledgements = 0;
   PendingNativeUserAction? nativeUserAction;
   final List<String> acknowledgedNativeUserActions = <String>[];
   TrackingPermissionState permissionState = const TrackingPermissionState(
@@ -70,6 +71,10 @@ final class _FakeTracker
 
   @override
   Future<void> acknowledgeLocations(Iterable<String> eventIds) async {
+    if (hangAcknowledgements > 0) {
+      hangAcknowledgements -= 1;
+      return Completer<void>().future;
+    }
     if (failAcknowledgements > 0) {
       failAcknowledgements -= 1;
       throw StateError('Native acknowledgement failed.');
@@ -1658,6 +1663,92 @@ void main() {
     await subscription.cancel();
     await client.completeTrack(trackId: trackId);
     await client.dispose();
+  });
+
+  test('REL-13 an acknowledgement that never answers cannot hold the route',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(seconds: 30)),
+    );
+    await client.initialize();
+    final trackId = await client.startTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: harness.config,
+    );
+
+    tracker.hangAcknowledgements = 1;
+    tracker.locations.add(LocationSample(
+      latitude: 0.001,
+      longitude: 0.001,
+      horizontalAccuracy: 5,
+      capturedAt: harness.now,
+      provider: 'test',
+      trackId: trackId,
+      eventId: 'ack-hangs',
+    ));
+    // Completing awaits the point tail; before REL-13 this never returned.
+    await client
+        .completeTrack(trackId: trackId)
+        .timeout(const Duration(seconds: 20));
+
+    final track = (await harness.repository.getTrack(trackId))!;
+    expect(track.status, TrackStatus.completed);
+    expect(track.acceptedPointCount, 1);
+    await client.dispose();
+  }, timeout: const Timeout(Duration(seconds: 40)));
+
+  test('REL-13 a fix that fails to persist keeps the route and hides the error',
+      () async {
+    final harness = RepositoryHarness();
+    await harness.initialize();
+    final tracker = _FakeTracker();
+    final client = TrackingClient(
+      trackerAdapter: tracker,
+      repository: harness.repository,
+      exportFileWriter: _MemoryWriter(),
+      clock: () => harness.now.add(const Duration(seconds: 30)),
+    );
+    await client.initialize();
+    final trackId = await client.startTrack(
+      userId: 'user-1',
+      organizationId: 'org-1',
+      config: harness.config,
+    );
+    final statuses = <TrackerStatus>[];
+    final subscription = client.statusStream.listen(statuses.add);
+
+    // A coordinate the validator accepts but the point table rejects is hard
+    // to build, so close the database under the client instead.
+    await harness.repository.close();
+    tracker.locations.add(LocationSample(
+      latitude: 27.123456,
+      longitude: 85.654321,
+      horizontalAccuracy: 5,
+      capturedAt: harness.now,
+      provider: 'test',
+      trackId: trackId,
+      eventId: 'persist-fails',
+    ));
+    await _waitUntil(() async => statuses.any(
+          (status) => status.message?.contains('persist') ?? false,
+        ));
+
+    final failure = statuses.lastWhere(
+      (status) => status.message?.contains('persist') ?? false,
+    );
+    expect(failure.lifecycle, isNot(TrackerLifecycle.failed));
+    expect(failure.trackId, trackId);
+    expect(failure.message, isNot(contains('27.12')));
+    expect(failure.message, isNot(contains('85.65')));
+    expect(tracker.acknowledged, isNot(contains('persist-fails')));
+    await subscription.cancel();
   });
 
   test(

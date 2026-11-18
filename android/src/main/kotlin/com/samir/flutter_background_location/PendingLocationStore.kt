@@ -68,6 +68,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
     // PendingLocationCoordinator owns the only store, so no other writer can
     // change the table behind these counters; diagnostics resynchronize them.
     private val counters = JournalCounters(MAX_PENDING_ROWS, MAX_DATABASE_BYTES)
+    private var lastReclaimCheckAt = Long.MIN_VALUE / 2
 
     init {
         databaseFile.parentFile?.mkdirs()
@@ -111,7 +112,10 @@ internal class PendingLocationStore(context: Context) : Closeable {
         require(trackId.isNotBlank() && trackId.length <= MAX_IDENTIFIER_LENGTH)
 
         val payload = encode(event)
-        if (payload.toByteArray(Charsets.UTF_8).size > MAX_PAYLOAD_BYTES) {
+        // Bytes, as SQLite's length(CAST(payload AS BLOB)) counts them; the
+        // counters used UTF-16 units and drifted on non-BMP text.
+        val payloadBytes = payload.toByteArray(Charsets.UTF_8).size
+        if (payloadBytes > MAX_PAYLOAD_BYTES) {
             throw PendingLocationCapacityException("A native location event exceeded its safety limit.")
         }
 
@@ -155,7 +159,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
         } finally {
             database.endTransaction()
         }
-        if (inserted) counters.recordInsert(sequence, payload.length)
+        if (inserted) counters.recordInsert(sequence, payloadBytes)
         return inserted
     }
 
@@ -266,6 +270,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
         }
         counters.recordDelete(deleted, deletedLength)
         checkpointIfLarge()
+        if (deleted > 0) reclaimFreePagesIfEmpty()
         return deleted
     }
 
@@ -290,8 +295,11 @@ internal class PendingLocationStore(context: Context) : Closeable {
             database.endTransaction()
         }
         counters.recordDelete(deleted, deletedLength)
-        // Erasing a route's evidence should also shrink the files.
-        if (counters.rows == 0) stats(performMaintenance = true)
+        // Erasing a route's evidence also shrinks the files.
+        if (counters.rows == 0) {
+            reclaimFreePagesIfEmpty(force = true)
+            stats(performMaintenance = true)
+        }
         return deleted
     }
 
@@ -364,7 +372,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
     private fun loadCounters() {
         database.rawQuery(
-            "SELECT COUNT(*), COALESCE(SUM(length($COLUMN_PAYLOAD)), 0), " +
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST($COLUMN_PAYLOAD AS BLOB))), 0), " +
                 "COALESCE(MAX($COLUMN_JOURNAL_SEQUENCE), 0) FROM $TABLE_PENDING_LOCATIONS",
             null,
         ).use { cursor ->
@@ -376,7 +384,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
     private fun payloadLength(where: String, arguments: Array<String>): Long =
         database.rawQuery(
-            "SELECT COALESCE(SUM(length($COLUMN_PAYLOAD)), 0) FROM $TABLE_PENDING_LOCATIONS WHERE $where",
+            "SELECT COALESCE(SUM(length(CAST($COLUMN_PAYLOAD AS BLOB))), 0) FROM $TABLE_PENDING_LOCATIONS WHERE $where",
             arguments,
         ).use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L
@@ -455,6 +463,32 @@ internal class PendingLocationStore(context: Context) : Closeable {
         }
     }
 
+    /**
+     * Returns free pages to the file system once the journal is empty.
+     * `auto_vacuum = INCREMENTAL` only takes effect on a database created with
+     * it (Android writes `android_metadata` at open, before the PRAGMA), so a
+     * journal that never got it is vacuumed once, while it holds no rows, to
+     * switch modes. Throttled: an empty journal after an acknowledgement is
+     * the steady state while Dart keeps up.
+     */
+    private fun reclaimFreePagesIfEmpty(force: Boolean = false) {
+        if (counters.rows != 0) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastReclaimCheckAt < RECLAIM_CHECK_INTERVAL_MS) return
+        lastReclaimCheckAt = now
+        runCatching {
+            if (!force && pragmaLong("freelist_count") < RECLAIM_MINIMUM_FREE_PAGES) return
+            if (pragmaLong("auto_vacuum") == AUTO_VACUUM_INCREMENTAL) {
+                database.rawQuery("PRAGMA incremental_vacuum", null).use { cursor ->
+                    while (cursor.moveToNext()) Unit
+                }
+            } else {
+                database.execSQL("PRAGMA auto_vacuum = INCREMENTAL")
+                database.execSQL("VACUUM")
+            }
+        }
+    }
+
     private fun quickCheck(): String = database.rawQuery(
         "PRAGMA quick_check(1)",
         null,
@@ -494,6 +528,9 @@ internal class PendingLocationStore(context: Context) : Closeable {
         private const val MAX_SQL_ARGUMENTS = 500
         private const val WAL_CHECKPOINT_BYTES = 4L * 1024L * 1024L
         private const val MAINTENANCE_NOT_RUN = "not_run"
+        private const val AUTO_VACUUM_INCREMENTAL = 2L
+        private const val RECLAIM_MINIMUM_FREE_PAGES = 256L
+        private const val RECLAIM_CHECK_INTERVAL_MS = 10L * 60L * 1000L
     }
 }
 

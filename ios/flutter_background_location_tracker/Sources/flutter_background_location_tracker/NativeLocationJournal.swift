@@ -351,6 +351,19 @@ final class NativeLocationJournal {
     else {
       return encoded.map { $0.map { _ in pendingCount } }
     }
+    do {
+      return try appendEncoded(encoded)
+    } catch NativeLocationJournalError.database(_, let code, _) where code & 0xFF == SQLITE_FULL {
+      // The file hit its page limit (max_page_count) before the row limit:
+      // the same visible capacity stop, not a generic journal failure.
+      throw NativeLocationJournalError.capacity(
+        current: pendingCount,
+        maximum: Self.maximumPendingEvents
+      )
+    }
+  }
+
+  private func appendEncoded(_ encoded: [Result<EncodedEvent, Error>]) throws -> [Result<Int, Error>] {
     return try transaction {
       let statement = try prepareStatement(Self.insertSQL, operation: "prepare insert")
       defer { sqlite3_finalize(statement) }
