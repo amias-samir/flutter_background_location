@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path_util;
@@ -269,7 +270,7 @@ final class TrackExportService {
                 const <TrackingContinuityGap>[],
             continuity: options.geometryContinuity,
           );
-    return renderAssembledBundle(
+    return renderAssembledAsync(
       bundle: bundle,
       format: format,
       options: options,
@@ -287,6 +288,36 @@ final class TrackExportService {
     required TrackExportOptions options,
     required RouteGeometryReport report,
   }) =>
+      _render(bundle, format, options, report);
+
+  /// Like [renderAssembledBundle], but a long route (2,000 points or more)
+  /// is encoded on a background isolate, so building a large document does
+  /// not hold up the UI. The result is identical either way; reading the
+  /// route and writing the file stay with the caller.
+  static Future<TrackExportArtifact> renderAssembledAsync({
+    required TrackBundle bundle,
+    required TrackExportFormat format,
+    required TrackExportOptions options,
+    required RouteGeometryReport report,
+  }) async {
+    final points = bundle.segments.fold<int>(
+      0,
+      (total, segment) => total + segment.points.length,
+    );
+    if (points < _backgroundRenderPointThreshold) {
+      return _render(bundle, format, options, report);
+    }
+    return Isolate.run(() => _render(bundle, format, options, report));
+  }
+
+  static const _backgroundRenderPointThreshold = 2000;
+
+  static TrackExportArtifact _render(
+    TrackBundle bundle,
+    TrackExportFormat format,
+    TrackExportOptions options,
+    RouteGeometryReport report,
+  ) =>
       switch (format) {
         TrackExportFormat.geoJson => _geoJson(bundle, options, report),
         TrackExportFormat.kml => _kml(bundle, options, report),
@@ -527,7 +558,6 @@ final class TrackExportService {
       },
     );
     final contents = builder.buildDocument().toXmlString(pretty: true);
-    XmlDocument.parse(contents);
     return _artifact(
       bundle,
       TrackExportFormat.kml,
@@ -685,7 +715,6 @@ final class TrackExportService {
       },
     );
     final contents = builder.buildDocument().toXmlString(pretty: true);
-    XmlDocument.parse(contents);
     return _artifact(
       bundle,
       TrackExportFormat.gpx,

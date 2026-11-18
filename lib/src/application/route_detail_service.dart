@@ -62,10 +62,11 @@ final class RouteDetailService {
       return;
     }
     final bundle = await repository.loadTrackBundle(trackId);
-    await summaries.storeDerivedStops(
-      trackId,
-      deriveStops(bundle, track.config),
-    );
+    final config = track.config;
+    // Off the UI isolate, as the review is: the closure captures only the
+    // bundle and the configuration, never the repository.
+    final stops = await Isolate.run(() => deriveStops(bundle, config));
+    await summaries.storeDerivedStops(trackId, stops);
   }
 
   /// Decides [trackId] again under the current rules ([RouteReviewer]) once

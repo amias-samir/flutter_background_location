@@ -137,7 +137,7 @@ class LocationTrackingService : Service() {
             if (!captureStarted) return
             stateStore.markServiceHeartbeat(captureActive = true)
             // Entry can come due while neither fixes nor readings arrive.
-            stationaryPolicy?.let { applyStationaryPolicy(it.evaluate(System.currentTimeMillis())) }
+            stationaryPolicy?.let { applyStationaryPolicy(it.evaluate(policyNowMs())) }
             evaluateStepCounter()
             stateStore.emitCurrentStatus()
             mainHandler.postDelayed(this, SERVICE_HEARTBEAT_INTERVAL_MS)
@@ -199,7 +199,7 @@ class LocationTrackingService : Service() {
                 }
                 val policy = stationaryPolicy
                 if (policy != null && evidence["state"] == "moving") {
-                    applyStationaryPolicy(policy.onMovingEvidence(System.currentTimeMillis()))
+                    applyStationaryPolicy(policy.onMovingEvidence(policyNowMs()))
                 } else if (evidence["state"] == "moving") {
                     stillSince = null
                     stationaryDisplacementWindow.reset()
@@ -608,6 +608,9 @@ class LocationTrackingService : Service() {
         val accepted = PendingLocationCoordinator.diagnose(
             this,
             performMaintenance = false,
+            // Start right after a stop, or right after the plugin's own
+            // check: the unchanged file need not be scanned again.
+            trustVerifiedFile = true,
         ) { diagnostic ->
             mainHandler.post {
                 if (prepareGeneration != journalPrepareGeneration) return@post
@@ -886,7 +889,7 @@ class LocationTrackingService : Service() {
                 latestActivity = event
                 publishActivity(event)
                 stationaryPolicy?.let {
-                    applyStationaryPolicy(it.onActivityUnavailable(System.currentTimeMillis()))
+                    applyStationaryPolicy(it.onActivityUnavailable(policyNowMs()))
                 }
                 if (currentActivityPendingIntent == registeredPendingIntent) {
                     currentActivityPendingIntent = null
@@ -1251,8 +1254,8 @@ class LocationTrackingService : Service() {
             }
             applyStationaryPolicy(
                 policy.onReading(
-                    StationaryPolicyV2.Reading(type, confidence, timestamp, source),
-                    now,
+                    StationaryPolicyV2.Reading(type, confidence, policyTimeOfWallMs(timestamp), source),
+                    policyNowMs(),
                 ),
             )
             return
@@ -1391,8 +1394,9 @@ class LocationTrackingService : Service() {
                     },
                     hasVerticalAccuracy = hasVerticalAccuracy,
                     mocked = mocked,
-                    // The fix's own time, so batched deliveries keep their spacing.
-                    observedAtMs = location.time,
+                    // The fix's own monotonic time, so batched deliveries keep
+                    // their spacing and GPS-versus-device clock skew is moot.
+                    observedAtMs = policyTimeOf(location),
                 ),
             ),
         )
@@ -2040,9 +2044,26 @@ class LocationTrackingService : Service() {
         )
     }
 
+    /**
+     * The motion-policy-2 clock (REL-05 B10): elapsed realtime. The policy
+     * used to compare the device wall clock (its own now), GPS time (fixes)
+     * and reading times with each other, so a skewed or jumping device clock
+     * moved its windows. Journaled and emitted times stay wall clock.
+     */
+    private fun policyNowMs(): Long = SystemClock.elapsedRealtime()
+
+    /** A wall-clock reading time on the policy clock, by its age now. */
+    private fun policyTimeOfWallMs(wallMs: Long): Long =
+        SystemClock.elapsedRealtime() - (System.currentTimeMillis() - wallMs)
+
+    private fun policyTimeOf(location: Location): Long {
+        val nanos = location.elapsedRealtimeNanos
+        return if (nanos > 0L) nanos / 1_000_000L else policyTimeOfWallMs(location.time)
+    }
+
     private fun tryEnterStationaryProfile() {
         stationaryPolicy?.let {
-            applyStationaryPolicy(it.evaluate(System.currentTimeMillis()))
+            applyStationaryPolicy(it.evaluate(policyNowMs()))
             return
         }
         val beganAt = stillSince ?: return

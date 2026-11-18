@@ -194,10 +194,7 @@ final class TripExportService {
               updatedAt: totals.updatedAt,
             ),
     );
-    final trackArtifact = TrackExportService(
-      repository: repository,
-      fileWriter: fileWriter,
-    ).renderAssembledBundle(
+    final trackArtifact = await TrackExportService.renderAssembledAsync(
       bundle: bundle,
       format: format,
       options: options,

@@ -329,15 +329,23 @@ internal class PendingLocationStore(context: Context) : Closeable {
         )
     }
 
+    /**
+     * [integrityTrusted]: this process verified this exact file and closed it
+     * unchanged since ([JournalCheckCache]), so the full scan is skipped.
+     */
     @Synchronized
-    fun diagnostic(performMaintenance: Boolean = false): Map<String, Any?> {
-        val integrity = quickCheck()
+    fun diagnostic(
+        performMaintenance: Boolean = false,
+        integrityTrusted: Boolean = false,
+    ): Map<String, Any?> {
+        val integrity = if (integrityTrusted) "ok" else quickCheck()
         return linkedMapOf(
             "platform" to "android",
             "healthy" to (integrity == "ok"),
             "opened" to true,
             "databaseName" to DATABASE_NAME,
             "integrityCheck" to integrity,
+            "integrityCheckSkipped" to integrityTrusted,
             "stats" to stats(performMaintenance).toMap(),
             "usableSpaceBytes" to (databaseFile.parentFile?.usableSpace ?: databaseFile.usableSpace),
         )
@@ -509,6 +517,8 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
         val databaseNameForDiagnostics: String = DATABASE_NAME
 
+        fun databaseFile(context: Context): File = File(context.noBackupFilesDir, DATABASE_NAME)
+
         private const val TABLE_PENDING_LOCATIONS = "pending_locations"
         private const val COLUMN_EVENT_ID = "event_id"
         private const val COLUMN_TRACK_ID = "track_id"
@@ -553,6 +563,9 @@ internal object PendingLocationCoordinator {
     private val lock = Any()
     private var store: PendingLocationStore? = null
 
+    // Touched only on the executor thread.
+    private val checkCache = JournalCheckCache()
+
     fun execute(
         context: Context,
         onFailure: (Exception) -> Unit = {},
@@ -579,6 +592,8 @@ internal object PendingLocationCoordinator {
                 try {
                     onSuccess(action(storeFor(appContext)))
                 } catch (error: Exception) {
+                    // Whatever failed, the next start checks the file again.
+                    checkCache.forget()
                     onFailure(error)
                 }
             }
@@ -588,17 +603,30 @@ internal object PendingLocationCoordinator {
         }
     }
 
+    /**
+     * [trustVerifiedFile]: capture start may skip the full integrity scan of a
+     * file this process verified and closed unchanged (REL-05 B9). Host
+     * diagnostics leave it false and always scan.
+     */
     fun diagnose(
         context: Context,
         performMaintenance: Boolean = false,
+        trustVerifiedFile: Boolean = false,
         onDiagnostic: (Map<String, Any?>) -> Unit,
     ): Boolean {
         val appContext = context.applicationContext
         return try {
             executor.execute {
                 val diagnostic = try {
-                    storeFor(appContext).diagnostic(performMaintenance)
+                    val trusted = trustVerifiedFile && synchronized(lock) { store == null } &&
+                        checkCache.canSkip(
+                            JournalFileIdentity.of(PendingLocationStore.databaseFile(appContext)),
+                        )
+                    storeFor(appContext).diagnostic(performMaintenance, integrityTrusted = trusted).also {
+                        if (it["healthy"] == true) checkCache.markVerified() else checkCache.forget()
+                    }
                 } catch (error: Exception) {
+                    checkCache.forget()
                     failureDiagnostic(error)
                 }
                 onDiagnostic(diagnostic)
@@ -613,9 +641,16 @@ internal object PendingLocationCoordinator {
         val appContext = context.applicationContext
         return try {
             executor.execute {
-                synchronized(lock) {
-                    store?.close()
+                val closed = synchronized(lock) {
+                    val open = store
+                    open?.close()
                     store = null
+                    open != null
+                }
+                if (closed) {
+                    checkCache.onClosed(
+                        JournalFileIdentity.of(PendingLocationStore.databaseFile(appContext)),
+                    )
                 }
             }
             true
@@ -626,7 +661,10 @@ internal object PendingLocationCoordinator {
 
     private fun storeFor(context: Context): PendingLocationStore =
         synchronized(lock) {
-            store ?: PendingLocationStore(context).also { store = it }
+            store ?: PendingLocationStore(context).also {
+                store = it
+                checkCache.onOpened()
+            }
         }
 
     private fun failureDiagnostic(error: Exception): Map<String, Any?> = linkedMapOf(

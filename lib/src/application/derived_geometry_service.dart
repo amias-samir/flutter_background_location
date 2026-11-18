@@ -8,6 +8,7 @@ import '../domain/track_point.dart';
 import '../domain/track_data_page.dart';
 import '../domain/tracking_error.dart';
 import '../domain/tracking_start.dart';
+import '../storage/sqlite_track_repository.dart';
 import '../storage/track_repository.dart';
 import 'stop_episode_detector.dart';
 import 'uncertainty_route_smoother.dart';
@@ -102,6 +103,15 @@ final class DerivedGeometryService {
               : request,
       sourceMaximumSequence: snapshot.upperSequence,
     );
+    // FLT-25: a closed segment the newest equivalent cleaning run already
+    // covers is copied from it instead of being derived again; cleaning is
+    // per segment, so the copy equals a fresh derivation.
+    final copier = cleaning && repository is SqliteTrackRepository
+        ? repository as SqliteTrackRepository
+        : null;
+    final previous = copier == null
+        ? null
+        : await _previousCleaningRun(store, owner, trackId, run);
     try {
       String? segmentCursor;
       do {
@@ -113,6 +123,15 @@ final class DerivedGeometryService {
           snapshot: snapshot,
         );
         for (final segment in segments.items) {
+          if (copier != null && previous != null) {
+            final copied = await copier.copyDerivedSegment(
+              owner: owner,
+              runId: run.id,
+              sourceRunId: previous.id,
+              segmentId: segment.id,
+            );
+            if (copied != null) continue;
+          }
           if (request.algorithm ==
                   DerivedGeometryAlgorithm.uncertaintyWeightedSmoothing ||
               detector != null) {
@@ -180,6 +199,31 @@ final class DerivedGeometryService {
       await store.failDerivedGeometryRun(run.id, code: 'derivation_failed');
       rethrow;
     }
+  }
+
+  /// The newest completed cleaning run of [trackId] other than [run], with
+  /// the same version and configuration as [run].
+  static Future<DerivedGeometryRun?> _previousCleaningRun(
+    DerivedGeometryRepository store,
+    TrackingOwner owner,
+    String trackId,
+    DerivedGeometryRun run,
+  ) async {
+    final runs = await store.listDerivedGeometryRuns(
+      owner: owner,
+      trackId: trackId,
+    );
+    final candidates = runs
+        .where(
+          (candidate) =>
+              candidate.id != run.id &&
+              candidate.algorithm == run.algorithm &&
+              candidate.algorithmVersion == run.algorithmVersion &&
+              candidate.status == DerivedGeometryRunStatus.completed,
+        )
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return candidates.isEmpty ? null : candidates.first;
   }
 
   /// [request] with the parameters, and optionally the version, the built-in

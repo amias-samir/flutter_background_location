@@ -1573,3 +1573,69 @@ work_packages:
     required_before: next release
     evidence:
       - lib/src/application/tracking_client.dart
+  - id: FLT-02
+    phase: FLT
+    title: Batched ingestion of queued fixes (one transaction and one acknowledgement per batch)
+    release_gate: fixes for one route that queue up behind the point tail (a journal drain page of up to 100, a live burst of up to 25) on a quality policy 5 or later route in the package repository are decided fix by fix inside one transaction and acknowledged once after it commits; points, gaps, stops, summaries, step counts, emitted points and their order equal the fix-by-fix path; a failure rolls back and the same fixes are stored one by one; anything else, including routes recorded before policy 5 and host repositories, keeps the fix-by-fix path
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/application/point_ingest.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/batch_ingestion_test.dart
+      - test/pipeline_budget_test.dart
+      - test/live_replay_determinism_test.dart
+  - id: FLT-22
+    phase: FLT
+    title: Route reviews stored in short transactions
+    release_gate: a review's kept fixes are written in 1,000-row transactions under a processing run that no reader sees; one final transaction replaces the previous review and makes the new one current; reviews of one route are serialized; a run a crash left processing is deleted on open and the previous review stays current
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/route_review_test.dart
+  - id: FLT-23
+    phase: FLT
+    title: Finished routes' summaries refreshed after the open
+    release_gate: after a summary-definition change, routes that can still record and routes without a summary row are refreshed before initialize returns; completed and failed routes are refreshed in the background, or first when their summary or bundle is read; close waits for the pass
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/summary_refresh_test.dart
+  - id: FLT-25
+    phase: FLT
+    title: Incremental cleaned view
+    release_gate: a cleaning run copies every closed segment the newest equivalent completed run (same algorithm, version, configuration and map data, created after the segment ended) covered and derives only the rest; the result equals a full derivation
+    required_before: next release
+    evidence:
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/incremental_cleaning_test.dart
+  - id: FLT-26
+    phase: FLT
+    title: Stop derivation and long exports off the UI isolate
+    release_gate: derived stops are computed on a background isolate; track and Trip exports of 2,000 points or more are encoded on one with byte-identical output (TrackExportService.renderAssembledAsync); the redundant XML re-parse is gone
+    required_before: next release
+    evidence:
+      - lib/src/application/route_detail_service.dart
+      - lib/src/export/track_export_service.dart
+      - lib/src/export/trip_export_service.dart
+      - test/export_render_isolate_test.dart
+  - id: REL-05B
+    phase: REL
+    title: Android journal re-check skipped for an unchanged verified file; one clock for the stationary policy
+    release_gate: capture start skips quick_check only for the journal file this process verified and closed unchanged (size and modification time of the database and WAL), and host diagnostics always check; StationaryPolicyV2 is fed elapsed realtime for fixes, readings and now, while journaled and emitted times stay wall clock; the shared motion-policy fixture passes unchanged
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/JournalCheckCache.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/JournalCheckCacheTest.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StationaryPolicyV2Test.kt
+  - id: REL-05BP
+    phase: REL
+    title: Physical check of the stationary policy clock
+    release_gate: an Android phone with its clock set two minutes off records a stop and a departure that start and end as on a correctly set phone
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart

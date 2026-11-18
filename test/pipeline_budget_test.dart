@@ -4,6 +4,8 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker_testing.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_background_location_tracker/src/application/point_ingest.dart';
+
 import 'statement_log.dart';
 import 'stop_replay_support.dart';
 import 'test_support.dart';
@@ -149,38 +151,50 @@ SyntheticTrackingRoute _withSteps(SyntheticTrackingRoute route, int first) =>
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  tearDown(() => pointBatchLimit = null);
 
-  for (final (detail, statementCeiling, roundTripCeiling, stepStatementCeiling)
-      in <(RouteRecordingDetail, double, double, double)>[
-    // Before the statement diet (2026-11-18): 25 per steady fix, 35 with a
-    // step count. Lower these as the per-fix path gets cheaper.
-    (RouteRecordingDetail.clean, 18, 18, 24),
-    (RouteRecordingDetail.full, 18, 18, 24),
+  for (final (mode, batchLimit, steadyCeiling, stepCeiling)
+      in <(String, int?, double, double)>[
+    // Fix by fix. Before the statement diet (2026-11-18): 25 per steady
+    // fix, about 35 with a step count.
+    ('per fix', 1, 18, 24),
+    // A burst stored in one transaction (FLT-02): one commit and one
+    // current-track read per batch instead of per fix.
+    ('batched', null, 16, 22),
   ]) {
-    test('a steady walking fix stays within its SQLite budget (${detail.name})',
-        () async {
-      final (statements, roundTrips) = await _perFix(detail, _steadyWalk);
-      // ignore: avoid_print
-      print('FLT-15 ${detail.name}: ${statements.toStringAsFixed(1)} '
-          'statements, ${roundTrips.toStringAsFixed(1)} round trips per fix');
-      expect(statements, lessThanOrEqualTo(statementCeiling));
-      expect(roundTrips, lessThanOrEqualTo(roundTripCeiling));
-    });
+    for (final detail in <RouteRecordingDetail>[
+      RouteRecordingDetail.clean,
+      RouteRecordingDetail.full,
+    ]) {
+      test(
+          'a steady walking fix stays within its SQLite budget '
+          '(${detail.name}, $mode)', () async {
+        pointBatchLimit = batchLimit;
+        final (statements, roundTrips) = await _perFix(detail, _steadyWalk);
+        // ignore: avoid_print
+        print('FLT-15 ${detail.name} $mode: '
+            '${statements.toStringAsFixed(1)} statements, '
+            '${roundTrips.toStringAsFixed(1)} round trips per fix');
+        expect(statements, lessThanOrEqualTo(steadyCeiling));
+        expect(roundTrips, lessThanOrEqualTo(steadyCeiling));
+      });
 
-    test(
-        'a walking fix with a step count stays within its budget '
-        '(${detail.name})', () async {
-      final (statements, roundTrips) = await _perFix(
-        detail,
-        (trackId) => _withSteps(_steadyWalk(trackId), 100),
-        steps: true,
-      );
-      // ignore: avoid_print
-      print('FLT-15 ${detail.name} with steps: '
-          '${statements.toStringAsFixed(1)} statements, '
-          '${roundTrips.toStringAsFixed(1)} round trips per fix');
-      expect(statements, lessThanOrEqualTo(stepStatementCeiling));
-      expect(roundTrips, lessThanOrEqualTo(stepStatementCeiling));
-    });
+      test(
+          'a walking fix with a step count stays within its budget '
+          '(${detail.name}, $mode)', () async {
+        pointBatchLimit = batchLimit;
+        final (statements, roundTrips) = await _perFix(
+          detail,
+          (trackId) => _withSteps(_steadyWalk(trackId), 100),
+          steps: true,
+        );
+        // ignore: avoid_print
+        print('FLT-15 ${detail.name} $mode with steps: '
+            '${statements.toStringAsFixed(1)} statements, '
+            '${roundTrips.toStringAsFixed(1)} round trips per fix');
+        expect(statements, lessThanOrEqualTo(stepCeiling));
+        expect(roundTrips, lessThanOrEqualTo(stepCeiling));
+      });
+    }
   }
 }

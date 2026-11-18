@@ -49,6 +49,7 @@ import '../export/track_export_v2_service.dart';
 import '../export/trip_export_service.dart';
 import '../platform/native_tracker_adapter.dart';
 import '../platform/tracker_adapter.dart';
+import 'point_ingest.dart';
 import '../storage/sqlite_track_repository.dart';
 import '../storage/track_repository.dart';
 import '../storage/trip_repository.dart';
@@ -2173,46 +2174,201 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   Future<void> _pointsSettled() => _pointTail;
 
   void _queueLocation(LocationSample sample) {
-    _pointTail = _pointTail.then((_) => _processLocation(sample)).catchError((
-      Object error,
-      StackTrace stackTrace,
-    ) {
-      // The fix stays unacknowledged in the native journal and is replayed,
-      // so the route is not failed. The decision engine may have advanced in
-      // decide() before the store failed; drop it so the next fix rebuilds it
-      // from the stored tail, exactly as a restart does.
+    // FLT-07: fixes wait in an inbox drained by one task on the point tail.
+    // A fix arriving while the tail is idle is stored alone, as before;
+    // fixes that queue up behind it (a journal page, a delivery burst) are
+    // stored together in one transaction when they can be.
+    _pointInbox.add(sample);
+    if (_pointPumpScheduled) return;
+    _pointPumpScheduled = true;
+    _pointTail = _pointTail.then((_) => _pumpPoints());
+  }
+
+  final List<LocationSample> _pointInbox = <LocationSample>[];
+  var _pointPumpScheduled = false;
+
+  /// The decision status of the fix just stored inside a batch, read by the
+  /// next fix's continuity classification before the batch has emitted it.
+  TrackerStatus? _batchStatus;
+
+  Future<void> _pumpPoints() async {
+    try {
+      while (_pointInbox.isNotEmpty) {
+        final limit = pointBatchLimitOverride ??
+            (_drainAcknowledgements != null
+                ? _drainBatchLimit
+                : _liveBatchLimit);
+        final batch = _takeBatch(limit);
+        if (batch.length >= 2 && _batchEligible(batch)) {
+          final stored = await _ingestBatch(batch);
+          if (stored < 0) {
+            // Rolled back: the same fixes again, one by one, first in line.
+            for (final sample in batch) {
+              await _processLocationGuarded(sample);
+            }
+          } else if (stored < batch.length) {
+            _pointInbox.insertAll(0, batch.sublist(stored));
+            await _processLocationGuarded(_pointInbox.removeAt(0));
+          }
+        } else {
+          _pointInbox.insertAll(0, batch.sublist(1));
+          await _processLocationGuarded(batch.first);
+        }
+      }
+    } finally {
+      _pointPumpScheduled = false;
+    }
+  }
+
+  static const _drainBatchLimit = 100;
+  static const _liveBatchLimit = 25;
+
+  /// The longest prefix of the inbox for one route, at most [limit] fixes.
+  List<LocationSample> _takeBatch(int limit) {
+    final trackId = _pointInbox.first.trackId;
+    var count = 1;
+    while (count < _pointInbox.length &&
+        count < limit &&
+        trackId != null &&
+        _pointInbox[count].trackId == trackId) {
+      count += 1;
+    }
+    final batch = _pointInbox.sublist(0, count);
+    _pointInbox.removeRange(0, count);
+    return batch;
+  }
+
+  /// Batches only what the per-fix path would decide with the decision
+  /// engine (quality policy 5 or later) in the package's own repository,
+  /// for one route, once its epoch is known; anything else goes fix by fix.
+  bool _batchEligible(List<LocationSample> batch) {
+    if (_store is! SqliteTrackRepository) return false;
+    final trackId = batch.first.trackId;
+    if (trackId == null) return false;
+    final epoch = _policyEpoch;
+    if (epoch == null || epoch.trackId != trackId) return false;
+    return TrackingPolicyVersions.resolveQualityPolicy(
+          epoch.qualityPolicyVersion,
+        ) >=
+        RouteDecisionEngine.policyVersion;
+  }
+
+  /// Stores [batch] in one transaction (FLT-02). Returns how many fixes were
+  /// stored (fewer when a fix needs the per-fix path; the rest go back to
+  /// the inbox), or -1 when the transaction rolled back.
+  Future<int> _ingestBatch(List<LocationSample> batch) async {
+    final repository = _store as SqliteTrackRepository;
+    final pendingClose = _pendingStopRecordClose;
+    final sourceFailed = _stopActivitySourceFailed;
+    final effects = <_FixEffects>[];
+    int? acceptedBefore;
+    Track? lastTrack;
+    final int stored;
+    try {
+      stored = await repository.ingestBatch((session) async {
+        final store = _SessionPointStore(session);
+        var count = 0;
+        for (final sample in batch) {
+          final track = await store.findActiveTrack();
+          if (track == null ||
+              track.status != TrackStatus.active ||
+              track.id != sample.trackId ||
+              track.currentSegmentId == null) {
+            break;
+          }
+          final epoch = await _policyEpochFor(track.id, store);
+          if (epoch == null ||
+              TrackingPolicyVersions.resolveQualityPolicy(
+                    epoch.qualityPolicyVersion,
+                  ) <
+                  RouteDecisionEngine.policyVersion) {
+            break;
+          }
+          acceptedBefore ??= track.acceptedPointCount;
+          lastTrack = track;
+          final effect = await _decideAndStore(sample, track, store);
+          _batchStatus = effect.status;
+          effects.add(effect);
+          count += 1;
+        }
+        return count;
+      });
+    } on Object {
+      _batchStatus = null;
+      _pendingStopRecordClose = pendingClose;
+      _stopActivitySourceFailed = sourceFailed || _stopActivitySourceFailed;
       _decisionEngine = null;
       _policyEpoch = null;
-      final current = _currentStatus;
-      // Never echo the error text: database errors can carry bound values.
-      _emitStatus(
-        TrackerStatus(
-          lifecycle: current.lifecycle,
-          trackId: current.trackId,
-          lastPointAt: current.lastPointAt,
-          message: 'Could not persist a location fix '
-              '(${error.runtimeType}); it stays in the native journal and '
-              'will be retried.',
-          motionState: current.motionState,
-          samplingProfile: current.samplingProfile,
-          motionEvidence: current.motionEvidence,
-          profileTransitionReason: current.profileTransitionReason,
-          stepCount: current.stepCount,
-          captureGenerationId: current.captureGenerationId,
-          stepCoverage: current.stepCoverage,
-          stepFinal: current.stepFinal,
-        ),
-      );
-      unawaited(
-        _safeHealthEvent(
-          trackId: current.trackId,
-          type: 'location_persist_failed',
-          details: <String, Object?>{'errorType': error.runtimeType.toString()},
-        ),
-      );
-      return _countPersistFailure(sample, error);
+      return -1;
+    }
+    _batchStatus = null;
+    // Committed: the effects follow in order, acknowledged together.
+    await _withDrainAcknowledgements(() async {
+      for (final effect in effects) {
+        await effect.apply(inBatch: true);
+      }
     });
+    final track = lastTrack;
+    final before = acceptedBefore;
+    if (track != null &&
+        before != null &&
+        _batchUploader != null &&
+        effects.any((effect) => effect.accepted)) {
+      final updated = await _store.getTrack(track.id);
+      if (updated != null &&
+          crossesUploadThreshold(
+            acceptedBefore: before,
+            acceptedAfter: updated.acceptedPointCount,
+            batchPointCount: track.config.batchPointCount,
+          )) {
+        unawaited(_triggerUpload(track.id));
+      }
+    }
+    return stored;
   }
+
+  Future<void> _processLocationGuarded(LocationSample sample) =>
+      _processLocation(sample).catchError((
+        Object error,
+        StackTrace stackTrace,
+      ) {
+        // The fix stays unacknowledged in the native journal and is replayed,
+        // so the route is not failed. The decision engine may have advanced in
+        // decide() before the store failed; drop it so the next fix rebuilds it
+        // from the stored tail, exactly as a restart does.
+        _decisionEngine = null;
+        _policyEpoch = null;
+        final current = _currentStatus;
+        // Never echo the error text: database errors can carry bound values.
+        _emitStatus(
+          TrackerStatus(
+            lifecycle: current.lifecycle,
+            trackId: current.trackId,
+            lastPointAt: current.lastPointAt,
+            message: 'Could not persist a location fix '
+                '(${error.runtimeType}); it stays in the native journal and '
+                'will be retried.',
+            motionState: current.motionState,
+            samplingProfile: current.samplingProfile,
+            motionEvidence: current.motionEvidence,
+            profileTransitionReason: current.profileTransitionReason,
+            stepCount: current.stepCount,
+            captureGenerationId: current.captureGenerationId,
+            stepCoverage: current.stepCoverage,
+            stepFinal: current.stepFinal,
+          ),
+        );
+        unawaited(
+          _safeHealthEvent(
+            trackId: current.trackId,
+            type: 'location_persist_failed',
+            details: <String, Object?>{
+              'errorType': error.runtimeType.toString()
+            },
+          ),
+        );
+        return _countPersistFailure(sample, error);
+      });
 
   /// Deterministic append failures per native event in this process.
   final Map<String, int> _persistFailures = <String, int>{};
@@ -2301,7 +2457,8 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   }
 
   Future<void> _processLocation(LocationSample sample) async {
-    final track = await _store.findActiveTrack();
+    final store = _RepositoryPointStore(_store);
+    final track = await store.findActiveTrack();
     if (track == null || track.status != TrackStatus.active) {
       await _safeHealthEvent(
         type: 'location_without_active_track',
@@ -2331,14 +2488,26 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       }
       return;
     }
+    final effects = await _decideAndStore(sample, track, store);
+    await effects.apply(inBatch: false);
+  }
+
+  /// Decides [sample] for [track] and stores it through [store], then
+  /// returns what must follow its commit: health events, the
+  /// acknowledgement, the point and status streams and the upload trigger
+  /// (FLT-02). The state the next fix's decision depends on is updated here,
+  /// so a batch can decide fix after fix inside one transaction.
+  Future<_FixEffects> _decideAndStore(
+    LocationSample sample,
+    Track track,
+    _PointStore store,
+  ) async {
     final segmentId = track.currentSegmentId;
     if (segmentId == null) {
       throw StateError('Active track has no current segment.');
     }
-    final continuityStore = _store is ContinuityTrackRepository
-        ? _store as ContinuityTrackRepository
-        : null;
-    final previousRaw = await continuityStore?.findLastRawPoint(track.id);
+    final previousRaw =
+        store.recordsContinuity ? await store.findLastRawPoint(track.id) : null;
     // The newest point, when accepted and in this segment, is by definition
     // the newest accepted point of the segment (and of the track): no second
     // query while fixes are being accepted.
@@ -2346,15 +2515,14 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
             previousRaw.accepted &&
             previousRaw.segmentId == segmentId
         ? previousRaw
-        : await _store.findLastAcceptedPoint(
+        : await store.findLastAcceptedPoint(
             track.id,
             segmentId: segmentId,
           );
     final previousAccepted =
-        previousInSegment ?? await _store.findLastAcceptedPoint(track.id);
-    final policyEpoch = await _policyEpochFor(track.id);
-    final stopStore =
-        _store is TrackStopRepository ? _store as TrackStopRepository : null;
+        previousInSegment ?? await store.findLastAcceptedPoint(track.id);
+    final policyEpoch = await _policyEpochFor(track.id, store);
+    final recordsStops = store.recordsStops;
     final qualityPolicy = TrackingPolicyVersions.resolveQualityPolicy(
       policyEpoch?.qualityPolicyVersion ?? TrackingPolicyVersions.qualityPolicy,
     );
@@ -2363,7 +2531,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
             track: track,
             segmentId: segmentId,
             policyEpoch: policyEpoch,
-            stopStore: stopStore,
+            store: store,
           )
         : null;
     // Quality policy 5 decides from the evidence the fix will store, so a
@@ -2397,10 +2565,10 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     } else {
       // A restart, a new gate or another route rebuilds the stop state, from
       // the open stop record when there is one.
-      final openStop = stopStore != null &&
+      final openStop = recordsStops &&
               (!identical(_stopStateGate, _motionGate) ||
                   _stopStateTrackId != track.id)
-          ? await stopStore.findOpenTrackStop(track.id)
+          ? await store.findOpenTrackStop(track.id)
           : null;
       stopContext = _stopContextFor(
         track: track,
@@ -2451,37 +2619,27 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
             decision: decision,
             sample: sample,
             config: track.config,
-            recordStops: stopStore != null,
+            recordStops: recordsStops,
           )
         : null;
     var stopChange = engine == null
         ? stopTransition?.change
-        : stopStore == null
+        : !recordsStops
             ? null
             : step!.stopChange;
     if (engine != null &&
-        stopStore != null &&
+        recordsStops &&
         stopChange == null &&
         _pendingStopRecordClose &&
         !engine.stayCurrent) {
       stopChange = const TrackStopClose(departure: false);
     }
-    final appendResult = stopStore != null && stopChange != null
-        ? await stopStore.appendPointWithStop(
-            request,
-            continuityDecision,
-            stopChange,
-          )
-        : continuityStore == null
-            ? PointAppendResult(
-                point: await _store.appendPoint(request),
-                segmentId: segmentId,
-                duplicate: false,
-              )
-            : await continuityStore.appendPointWithContinuity(
-                request,
-                continuityDecision,
-              );
+    final appendResult = await store.append(
+      request,
+      continuityDecision,
+      stopChange,
+      segmentId,
+    );
     final point = appendResult.point;
     if (stopChange is TrackStopClose && !stopChange.departure) {
       _pendingStopRecordClose = false;
@@ -2503,63 +2661,79 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
       // Another epoch covered this point; look it up again for the next fix.
       _policyEpoch = null;
     }
-    final gap = appendResult.gap;
-    if (gap != null) {
-      await _safeHealthEvent(
-        trackId: track.id,
-        type: 'continuity_gap_recorded',
-        details: <String, Object?>{
-          'cause': gap.cause.name,
-          'treatment': gap.treatment.name,
-          'providerGapMs': gap.providerGap?.inMilliseconds,
-          'rawReceiptGapMs': gap.rawReceiptGap?.inMilliseconds,
-          'continuityPolicyVersion': gap.continuityPolicyVersion,
-        },
-      );
-    }
-    // Keyed, so the replay of a fix committed before a crash adds none twice.
-    await _recordJournaledProfileTransitions(track.id, sample);
-    _lastCommittedAt = _clock();
-    _committedSinceUploadTick = true;
-    final eventId = sample.eventId;
-    if (eventId != null) {
-      await _acknowledgeCommitted(eventId, trackId: track.id);
-    }
-    if (!_pointController.isClosed) _pointController.add(point);
-    _latestPoint = point;
-    if (point.accepted) {
-      _firstFixTimer?.cancel();
-      _firstFixTimer = null;
-      _fixState = TrackingFixState.healthy;
-      _lastAcceptedAt = point.capturedAt;
-    }
     final samplingProfile = switch (capturedMotionState) {
       MotionState.stationary => SamplingProfile.stationary,
       MotionState.moving => SamplingProfile.moving,
       MotionState.unknown =>
         _motionGate?.samplingProfile ?? SamplingProfile.moving,
     };
-    _emitStatus(
-      TrackerStatus(
-        lifecycle: TrackerLifecycle.tracking,
-        trackId: track.id,
-        lastPointAt: point.capturedAt,
-        motionState: capturedMotionState,
-        samplingProfile: samplingProfile,
-        motionEvidence: _currentStatus.motionEvidence,
-      ),
+    final status = TrackerStatus(
+      lifecycle: TrackerLifecycle.tracking,
+      trackId: track.id,
+      lastPointAt: point.capturedAt,
+      motionState: capturedMotionState,
+      samplingProfile: samplingProfile,
     );
-    if (point.accepted && !appendResult.duplicate && _batchUploader != null) {
-      final updated = await _store.getTrack(track.id);
-      if (updated != null &&
-          crossesUploadThreshold(
-            acceptedBefore: updated.acceptedPointCount - 1,
-            acceptedAfter: updated.acceptedPointCount,
-            batchPointCount: track.config.batchPointCount,
-          )) {
-        unawaited(_triggerUpload(track.id));
-      }
-    }
+    return _FixEffects(
+      status: status,
+      accepted: point.accepted && !appendResult.duplicate,
+      apply: ({required bool inBatch}) async {
+        final gap = appendResult.gap;
+        if (gap != null) {
+          await _safeHealthEvent(
+            trackId: track.id,
+            type: 'continuity_gap_recorded',
+            details: <String, Object?>{
+              'cause': gap.cause.name,
+              'treatment': gap.treatment.name,
+              'providerGapMs': gap.providerGap?.inMilliseconds,
+              'rawReceiptGapMs': gap.rawReceiptGap?.inMilliseconds,
+              'continuityPolicyVersion': gap.continuityPolicyVersion,
+            },
+          );
+        }
+        // Keyed, so the replay of a fix committed before a crash adds none twice.
+        await _recordJournaledProfileTransitions(track.id, sample);
+        _lastCommittedAt = _clock();
+        _committedSinceUploadTick = true;
+        final eventId = sample.eventId;
+        if (eventId != null) {
+          await _acknowledgeCommitted(eventId, trackId: track.id);
+        }
+        if (!_pointController.isClosed) _pointController.add(point);
+        _latestPoint = point;
+        if (point.accepted) {
+          _firstFixTimer?.cancel();
+          _firstFixTimer = null;
+          _fixState = TrackingFixState.healthy;
+          _lastAcceptedAt = point.capturedAt;
+        }
+        _emitStatus(
+          TrackerStatus(
+            lifecycle: status.lifecycle,
+            trackId: status.trackId,
+            lastPointAt: status.lastPointAt,
+            motionState: status.motionState,
+            samplingProfile: status.samplingProfile,
+            motionEvidence: _currentStatus.motionEvidence,
+          ),
+        );
+        if (!inBatch &&
+            point.accepted &&
+            !appendResult.duplicate &&
+            _batchUploader != null) {
+          final updated = await _store.getTrack(track.id);
+          if (updated != null &&
+              crossesUploadThreshold(
+                acceptedBefore: updated.acceptedPointCount - 1,
+                acceptedAfter: updated.acceptedPointCount,
+                batchPointCount: track.config.batchPointCount,
+              )) {
+            unawaited(_triggerUpload(track.id));
+          }
+        }
+      },
+    );
   }
 
   /// Stop-hold state for [sample] under quality policies 2 and 3, or null
@@ -3236,9 +3410,16 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
   /// reinterprets a route that is already recording. Repositories without
   /// [ActiveConfigurationEpochRepository] are evaluated under the current
   /// versions.
-  Future<TrackingConfigurationEpoch?> _policyEpochFor(String trackId) async {
+  Future<TrackingConfigurationEpoch?> _policyEpochFor(
+    String trackId, [
+    _PointStore? store,
+  ]) async {
     final cached = _policyEpoch;
     if (cached != null && cached.trackId == trackId) return cached;
+    if (store != null) {
+      if (!store.recordsEpochs) return null;
+      return _policyEpoch = await store.activeConfigurationEpoch(trackId);
+    }
     if (_store case final ActiveConfigurationEpochRepository epochs) {
       return _policyEpoch = await epochs.activeConfigurationEpoch(trackId);
     }
@@ -3266,8 +3447,9 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
         currentSegmentId: currentSegmentId,
         continuityPolicyVersion: continuityPolicyVersion,
         policyEpoch: policyEpoch,
-        fallbackLifecycle: _currentStatus.lifecycle,
-        fallbackSamplingProfile: _currentStatus.samplingProfile,
+        fallbackLifecycle: (_batchStatus ?? _currentStatus).lifecycle,
+        fallbackSamplingProfile:
+            (_batchStatus ?? _currentStatus).samplingProfile,
         stayExplainsGap: stayExplainsGap,
       );
 
@@ -3278,7 +3460,7 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     required Track track,
     required String segmentId,
     required TrackingConfigurationEpoch? policyEpoch,
-    required TrackStopRepository? stopStore,
+    required _PointStore store,
   }) async {
     final current = _decisionEngine;
     if (current != null &&
@@ -3290,8 +3472,8 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
     final engine =
         RouteDecisionEngine(policyEpoch?.resolvedConfig ?? track.config);
     DateTime? segmentStartedAt;
-    if (_store case final DecisionTailRepository tails) {
-      final tail = await tails.decisionTail(track.id, segmentId: segmentId);
+    if (store.recordsDecisionTails) {
+      final tail = await store.decisionTail(track.id, segmentId: segmentId);
       if (tail != null) {
         segmentStartedAt = tail.segmentStartedAt;
         if (tail.points.isNotEmpty) {
@@ -3299,7 +3481,9 @@ class TrackingClient implements Tracking, StepCounterDiagnosticsController {
             tail: tail.points.map(RouteDecisionInputs.restoredFix).toList(),
             segmentId: segmentId,
             segmentStartedAt: tail.segmentStartedAt,
-            openStop: await stopStore?.findOpenTrackStop(track.id),
+            openStop: store.recordsStops
+                ? await store.findOpenTrackStop(track.id)
+                : null,
           );
         }
       }
@@ -5835,4 +6019,163 @@ final class _StopTransition {
 
   final StopSiteAnchor? promote;
   final TrackStopChange? change;
+}
+
+/// What follows one fix's commit (FLT-02).
+final class _FixEffects {
+  const _FixEffects({
+    required this.status,
+    required this.accepted,
+    required this.apply,
+  });
+
+  /// The status the fix's decision emits.
+  final TrackerStatus status;
+
+  /// Whether a new accepted point was stored.
+  final bool accepted;
+
+  /// Health events, acknowledgement, streams and, outside a batch, the
+  /// upload trigger.
+  final Future<void> Function({required bool inBatch}) apply;
+}
+
+/// What deciding and storing one fix reads and writes: the repository
+/// itself, or one ingest batch's transaction (FLT-02).
+abstract final class _PointStore {
+  bool get recordsContinuity;
+  bool get recordsStops;
+  bool get recordsEpochs;
+  bool get recordsDecisionTails;
+  Future<Track?> findActiveTrack();
+  Future<TrackPoint?> findLastRawPoint(String trackId);
+  Future<TrackPoint?> findLastAcceptedPoint(String trackId,
+      {String? segmentId});
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(String trackId);
+  Future<DecisionTail?> decisionTail(String trackId,
+      {required String segmentId});
+  Future<TrackStop?> findOpenTrackStop(String trackId);
+  Future<PointAppendResult> append(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
+    String segmentId,
+  );
+}
+
+/// The per-fix path: exactly the capabilities the repository implements.
+final class _RepositoryPointStore implements _PointStore {
+  const _RepositoryPointStore(this.store);
+
+  final TrackRepository store;
+
+  @override
+  bool get recordsContinuity => store is ContinuityTrackRepository;
+  @override
+  bool get recordsStops => store is TrackStopRepository;
+  @override
+  bool get recordsEpochs => store is ActiveConfigurationEpochRepository;
+  @override
+  bool get recordsDecisionTails => store is DecisionTailRepository;
+
+  @override
+  Future<Track?> findActiveTrack() => store.findActiveTrack();
+  @override
+  Future<TrackPoint?> findLastRawPoint(String trackId) =>
+      (store as ContinuityTrackRepository).findLastRawPoint(trackId);
+  @override
+  Future<TrackPoint?> findLastAcceptedPoint(
+    String trackId, {
+    String? segmentId,
+  }) =>
+      store.findLastAcceptedPoint(trackId, segmentId: segmentId);
+  @override
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(
+    String trackId,
+  ) =>
+      (store as ActiveConfigurationEpochRepository)
+          .activeConfigurationEpoch(trackId);
+  @override
+  Future<DecisionTail?> decisionTail(
+    String trackId, {
+    required String segmentId,
+  }) =>
+      (store as DecisionTailRepository)
+          .decisionTail(trackId, segmentId: segmentId);
+  @override
+  Future<TrackStop?> findOpenTrackStop(String trackId) =>
+      (store as TrackStopRepository).findOpenTrackStop(trackId);
+
+  @override
+  Future<PointAppendResult> append(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
+    String segmentId,
+  ) async {
+    final repository = store;
+    if (repository is TrackStopRepository && stop != null) {
+      return (repository as TrackStopRepository)
+          .appendPointWithStop(request, continuity, stop);
+    }
+    if (repository is ContinuityTrackRepository) {
+      return (repository as ContinuityTrackRepository)
+          .appendPointWithContinuity(request, continuity);
+    }
+    return PointAppendResult(
+      point: await repository.appendPoint(request),
+      segmentId: segmentId,
+      duplicate: false,
+    );
+  }
+}
+
+/// One ingest batch: every read and append goes through its transaction.
+final class _SessionPointStore implements _PointStore {
+  const _SessionPointStore(this.session);
+
+  final PointIngestSession session;
+
+  @override
+  bool get recordsContinuity => true;
+  @override
+  bool get recordsStops => true;
+  @override
+  bool get recordsEpochs => true;
+  @override
+  bool get recordsDecisionTails => true;
+
+  @override
+  Future<Track?> findActiveTrack() => session.findActiveTrack();
+  @override
+  Future<TrackPoint?> findLastRawPoint(String trackId) =>
+      session.findLastRawPoint(trackId);
+  @override
+  Future<TrackPoint?> findLastAcceptedPoint(
+    String trackId, {
+    String? segmentId,
+  }) =>
+      session.findLastAcceptedPoint(trackId, segmentId: segmentId);
+  @override
+  Future<TrackingConfigurationEpoch?> activeConfigurationEpoch(
+    String trackId,
+  ) =>
+      session.activeConfigurationEpoch(trackId);
+  @override
+  Future<DecisionTail?> decisionTail(
+    String trackId, {
+    required String segmentId,
+  }) =>
+      session.decisionTail(trackId, segmentId: segmentId);
+  @override
+  Future<TrackStop?> findOpenTrackStop(String trackId) =>
+      session.findOpenTrackStop(trackId);
+  @override
+  Future<PointAppendResult> append(
+    PointWriteRequest request,
+    TrackingContinuityDecision? continuity,
+    TrackStopChange? stop,
+    String segmentId,
+  ) =>
+      session.append(request, continuity, stop);
 }

@@ -42,6 +42,24 @@
     so deleting a long route no longer holds up recording.
   - Longer health checks and no empty upload checks while the phone is still,
     and background reviews let new fixes go first.
+  - Fixes that arrive together (a provider batch, a burst, a replay of the
+    journal) are stored in one database transaction and acknowledged once,
+    with exactly the rows storing them one by one gives: about 15 statements
+    per fix instead of 18.
+  - Reviews of older routes are stored in short transactions, so they no
+    longer hold up recording; a review interrupted by a crash is discarded
+    and the previous one stays.
+  - After a summary-definition change, finished routes are refreshed in the
+    background (or when read) instead of before the app can start.
+  - The cleaned map view of a recording route reuses the segments it already
+    cleaned and cleans only the newest one.
+  - Stop derivation and exports of long routes run off the UI thread.
+    `TrackExportService.renderAssembledAsync` renders on a background
+    isolate for long routes.
+  - Android: starting capture no longer re-scans the native journal file when
+    this app run already checked it and nothing changed since, and the
+    stationary rules measure time with one steady clock, so a phone whose
+    clock is wrong or jumps decides stops the same way.
 
 - Fixed: on Android, the cleaned map view of a route with more than about
   1,000 accepted points failed with `too many SQL variables`. Derived-coordinate

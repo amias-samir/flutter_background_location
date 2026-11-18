@@ -185,6 +185,22 @@ available. Format-specific metadata that has no equivalent in the destination
 may not be retained. Invalid input or input without usable coordinates throws a
 `FormatException`.
 
+The converter is pure and synchronous. For a large file, run it on a
+background isolate so the UI stays responsive:
+
+```dart
+final converted = await Isolate.run(
+  () => const RouteFormatConverter().convert(
+    contents: sourceContents,
+    sourceFormat: TrackExportFormat.gpx,
+    targetFormat: TrackExportFormat.geoJson,
+  ),
+);
+```
+
+The package's own track and Trip exports already encode routes of 2,000
+points or more on a background isolate.
+
 ## Abort, delete, and erase are different operations
 
 `Complete` retains a successful route. The additive `TrackingPrivacyService`
