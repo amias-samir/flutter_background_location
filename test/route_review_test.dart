@@ -2,7 +2,9 @@ import 'dart:math' as math;
 
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker.dart';
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker_testing.dart';
+import 'package:flutter_background_location_tracker/src/storage/sqlite_track_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'stop_replay_support.dart';
 
@@ -234,5 +236,112 @@ void main() {
         .routeSummary(run.trackId);
     expect(summary.correctedDistanceMeters, isNull);
     expect(summary.displayDistanceMeters, summary.distanceMeters);
+  });
+  test(
+      'FLT-22 a review a crash left half-stored is removed on open and the '
+      'previous review stays current', () async {
+    final run = await StopReplay.start(
+      t0,
+      config: const TrackingConfig(),
+      qualityPolicy: 4,
+    );
+    await run.replay(excursion(run.trackId));
+    await (run.client as TrackingTripController)
+        .endCurrentDay(operationId: 'crash-end-day');
+    final reviewed = await (run.client as TrackingSummaryController)
+        .routeSummary(run.trackId);
+    final geometry = run.client as TrackingGeometryController;
+    Future<List<String>> reviewRuns() async => <String>[
+          for (final derived in await geometry.listDerivedGeometry(run.trackId))
+            if (derived.algorithm ==
+                DerivedGeometryAlgorithm.routeQualityReview)
+              derived.id,
+        ];
+    final current = await reviewRuns();
+    expect(current, hasLength(1));
+
+    // A newer review whose kept fixes were partly written when the app died.
+    final path = run.databasePath!;
+    final raw = await databaseFactoryFfi.openDatabase(
+      path,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    // The client's connection may be busy with its background passes.
+    await raw.rawQuery('PRAGMA busy_timeout = 5000');
+    final point = (await raw.query(
+      'track_points',
+      where: 'track_id = ? AND accepted = 1',
+      whereArgs: <Object?>[run.trackId],
+      limit: 1,
+    ))
+        .single;
+    // A second connection's write can meet the client's commits; retry.
+    Future<void> retried(Future<void> Function() write) async {
+      for (var attempt = 0;; attempt += 1) {
+        try {
+          return await write();
+        } on DatabaseException catch (error) {
+          if (attempt >= 100 || error.getResultCode() != 5) rethrow;
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+      }
+    }
+
+    await retried(() => raw.insert('derived_geometry_runs', <String, Object?>{
+          'id': 'abandoned-review',
+          'track_id': run.trackId,
+          'name': 'reviewed',
+          'algorithm': 'route_quality_review',
+          'algorithm_version': '1',
+          'configuration_json': '{}',
+          'source_maximum_sequence': 1,
+          'status': 'processing',
+          'point_count': 1,
+          'created_at': DateTime.utc(2030).toIso8601String(),
+        }));
+    await retried(() => raw.insert('derived_geometry_points', <String, Object?>{
+          'run_id': 'abandoned-review',
+          'source_point_id': point['id'],
+          'segment_id': point['segment_id'],
+          'sequence': point['sequence'],
+          'latitude': point['latitude'],
+          'longitude': point['longitude'],
+          'matched': 1,
+        }));
+    await raw.close();
+    expect(await reviewRuns(), current,
+        reason: 'a processing review is never listed');
+
+    final reopened = SqliteTrackRepository(
+      path: path,
+      databaseFactoryOverride: databaseFactoryFfi,
+      singleInstance: false,
+    );
+    await reopened.initialize();
+    final summary = (await reopened.routeSummary(run.trackId))!;
+    expect(summary.correctedDistanceMeters, reviewed.correctedDistanceMeters);
+    await reopened.close();
+    final inspected = await databaseFactoryFfi.openDatabase(
+      path,
+      options: OpenDatabaseOptions(singleInstance: false),
+    );
+    await inspected.rawQuery('PRAGMA busy_timeout = 5000');
+    expect(
+      await inspected.query(
+        'derived_geometry_runs',
+        where: 'id = ?',
+        whereArgs: <Object?>['abandoned-review'],
+      ),
+      isEmpty,
+    );
+    expect(
+      await inspected.query(
+        'derived_geometry_points',
+        where: 'run_id = ?',
+        whereArgs: <Object?>['abandoned-review'],
+      ),
+      isEmpty,
+    );
+    await inspected.close();
   });
 }

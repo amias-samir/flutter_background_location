@@ -64,6 +64,13 @@ Do not remove `ACCESS_BACKGROUND_LOCATION` or the `location` foreground-service
 type. The package intentionally keeps the native
 `com.samir.flutter_background_location` namespace for upgrade compatibility.
 
+After a reboot or an app update, `TrackingBootReceiver` restarts a route that
+was recording only if location access, and on Android 10 and later
+**Allow all the time**, is still granted. Without it, Android would refuse the
+restart (Android 14 and later) or deliver no fixes, so the route is left
+`interrupted` instead. The user can resume it the next time they open the app;
+see [Recommended UI state](integration_guide.md#recommended-ui-state).
+
 ### Required runtime state
 
 `startTrack()` and `resumeTrack()` refuse to start native background capture

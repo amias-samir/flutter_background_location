@@ -116,6 +116,7 @@ abstract final class RouteSummaryStore {
     final columns = await database.rawQuery('PRAGMA table_info($table)');
     if (columns.isEmpty || columns.any((row) => row['name'] == column)) return;
     await database.execute('ALTER TABLE $table ADD COLUMN $column $type');
+    forgetSchema(database);
   }
 
   /// Starts [trackId]'s summary. Its stops are [TrackStopSource.recorded] when
@@ -151,8 +152,9 @@ abstract final class RouteSummaryStore {
     required double? speedAccuracy,
     required double maximumPlausibleSpeedMetersPerSecond,
     required DateTime now,
+    Map<String, Object?>? summary,
   }) async {
-    final current = await _summaryRow(database, trackId);
+    final current = summary ?? await _summaryRow(database, trackId);
     if (current == null) return;
     final recording =
         await _recordingMs(database, trackId, openEnd: capturedAt);
@@ -294,8 +296,9 @@ abstract final class RouteSummaryStore {
     required int stepCount,
     StepCoverage? coverage,
     required DateTime now,
+    Map<String, Object?>? summary,
   }) async {
-    final current = await _summaryRow(database, trackId);
+    final current = summary ?? await _summaryRow(database, trackId);
     if (current == null) return (null, null);
     final key = generation ?? '';
     final rows = await database.query(
@@ -366,7 +369,8 @@ abstract final class RouteSummaryStore {
           'step_generation': key,
           'step_last_count': math.max(stepCount, previous ?? 0),
           'step_count': await _steps(database, trackId),
-          'step_count_stopped_at': await _stepsStoppedAt(database, trackId),
+          'step_count_stopped_at':
+              await _stepsStoppedAt(database, trackId, summary: current),
           'updated_at': _timestamp(now),
         },
         where: 'track_id = ?',
@@ -886,16 +890,30 @@ abstract final class RouteSummaryStore {
   static Future<(String, List<Object?>)> rowsOf(
     DatabaseExecutor database,
     String table,
-    String trackId,
-  ) async {
+    String trackId, {
+    Map<String, Object?>? summary,
+  }) async {
     if (!(await _columnNames(database, table)).contains('review_run_id')) {
       return ('track_id = ?', <Object?>[trackId]);
     }
-    final runId = await currentReviewRunId(database, trackId);
+    // [summary], when given, is [trackId]'s summary row read in the same
+    // transaction, so its review id is current.
+    final runId = summary != null && summary.containsKey('review_run_id')
+        ? summary['review_run_id'] as String?
+        : await currentReviewRunId(database, trackId);
     return runId == null
         ? ('track_id = ? AND review_run_id IS NULL', <Object?>[trackId])
         : ('track_id = ? AND review_run_id = ?', <Object?>[trackId, runId]);
   }
+
+  /// [trackId]'s summary row, for the per-fix writers to share: a row read
+  /// after the fix's stop change serves [onStepCount] and [onPointStored],
+  /// which neither read nor write each other's fields.
+  static Future<Map<String, Object?>?> summaryRow(
+    DatabaseExecutor database,
+    String trackId,
+  ) =>
+      _summaryRow(database, trackId);
 
   static Future<Map<String, Object?>?> _summaryRow(
     DatabaseExecutor database,
@@ -963,10 +981,15 @@ abstract final class RouteSummaryStore {
   /// while the device walked, from its live or current review rows.
   static Future<String?> _stepsStoppedAt(
     DatabaseExecutor database,
-    String trackId,
-  ) async {
-    final (where, args) =
-        await rowsOf(database, 'track_step_generations', trackId);
+    String trackId, {
+    Map<String, Object?>? summary,
+  }) async {
+    final (where, args) = await rowsOf(
+      database,
+      'track_step_generations',
+      trackId,
+      summary: summary,
+    );
     final row = (await database.rawQuery(
       'SELECT MIN(stopped_at) AS stopped_at FROM track_step_generations '
       'WHERE $where AND stopped_at IS NOT NULL',
@@ -1035,10 +1058,23 @@ abstract final class RouteSummaryStore {
   static Future<Set<String>> _columnNames(
     DatabaseExecutor database,
     String table,
-  ) async =>
-      (await database.rawQuery('PRAGMA table_info($table)'))
-          .map((row) => row['name']! as String)
-          .toSet();
+  ) async {
+    // Two PRAGMAs ran on every fix with a step count. Columns change only
+    // while a database opens, which ends with [forgetSchema].
+    final tables = _columnCache[database.database] ??= <String, Set<String>>{};
+    return tables[table] ??=
+        (await database.rawQuery('PRAGMA table_info($table)'))
+            .map((row) => row['name']! as String)
+            .toSet();
+  }
+
+  static final Expando<Map<String, Set<String>>> _columnCache =
+      Expando<Map<String, Set<String>>>('route summary columns');
+
+  /// Drops cached column lists of [database], after its schema changed.
+  static void forgetSchema(DatabaseExecutor database) {
+    _columnCache[database.database] = null;
+  }
 
   /// Fills `visible` for gaps stored before schema 17.
   static Future<void> _fillGapDecisions(

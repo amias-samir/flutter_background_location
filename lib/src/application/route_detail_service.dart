@@ -62,10 +62,11 @@ final class RouteDetailService {
       return;
     }
     final bundle = await repository.loadTrackBundle(trackId);
-    await summaries.storeDerivedStops(
-      trackId,
-      deriveStops(bundle, track.config),
-    );
+    final config = track.config;
+    // Off the UI isolate, as the review is: the closure captures only the
+    // bundle and the configuration, never the repository.
+    final stops = await Isolate.run(() => deriveStops(bundle, config));
+    await summaries.storeDerivedStops(trackId, stops);
   }
 
   /// Decides [trackId] again under the current rules ([RouteReviewer]) once
@@ -107,7 +108,15 @@ final class RouteDetailService {
 
   /// Reviews completed routes still waiting for it, oldest first, [batch] at
   /// a time; with [owner], only that owner's.
-  Future<void> backfillReviews({TrackingOwner? owner, int batch = 10}) async {
+  ///
+  /// [beforeEach] runs before each route (FLT-21): the client lets fixes
+  /// already queued commit first, so a long review never sits in front of
+  /// live recording.
+  Future<void> backfillReviews({
+    TrackingOwner? owner,
+    int batch = 10,
+    Future<void> Function()? beforeEach,
+  }) async {
     final store = repository;
     if (store is! RouteReviewRepository) return;
     final reviews = store as RouteReviewRepository;
@@ -121,6 +130,7 @@ final class RouteDetailService {
           .toList();
       if (pending.isEmpty) return;
       for (final trackId in pending) {
+        await beforeEach?.call();
         await ensureReviewed(trackId);
       }
     }
@@ -128,7 +138,11 @@ final class RouteDetailService {
 
   /// Derives stops for completed routes still waiting for them, oldest
   /// first, [batch] at a time; with [owner], only that owner's.
-  Future<void> backfillStops({int batch = 20, TrackingOwner? owner}) async {
+  Future<void> backfillStops({
+    int batch = 20,
+    TrackingOwner? owner,
+    Future<void> Function()? beforeEach,
+  }) async {
     final store = repository;
     if (store is! RouteSummaryRepository) return;
     final summaries = store as RouteSummaryRepository;
@@ -142,6 +156,7 @@ final class RouteDetailService {
           .toList();
       if (pending.isEmpty) return;
       for (final trackId in pending) {
+        await beforeEach?.call();
         await ensureStops(trackId);
       }
     }

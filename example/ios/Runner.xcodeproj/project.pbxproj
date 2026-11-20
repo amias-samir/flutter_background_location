@@ -20,6 +20,7 @@
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		78F1C9E2FF73A6C9F4F5E1F6 /* motion_policy_v2.json in Resources */ = {isa = PBXBuildFile; fileRef = C740C9453BBAED7E346010B6 /* motion_policy_v2.json */; };
 		848CA84A45FF734FF416D14F /* StationaryPolicyV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A9F5C211C722765392F5F3 /* StationaryPolicyV2Tests.swift */; };
+		947EF8805510CBC6028808C5 /* BackgroundLocationServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AC9A1137C1190618B148403 /* BackgroundLocationServiceTests.swift */; };
 		96566B29222A99D8BFFE87F1 /* NativeLocationJournalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DD29D8DF724297438A4000D /* NativeLocationJournalTests.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
@@ -68,6 +69,7 @@
 		3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = AppFrameworkInfo.plist; path = Flutter/AppFrameworkInfo.plist; sourceTree = "<group>"; };
 		61B183E8861CE08E027CB6CC /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		66FE107429F91D70C16C2079 /* turn_capture_v2.json */ = {isa = PBXFileReference; includeInIndex = 1; path = turn_capture_v2.json; sourceTree = "<group>"; };
+		6AC9A1137C1190618B148403 /* BackgroundLocationServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackgroundLocationServiceTests.swift; sourceTree = "<group>"; };
 		7011D34100B5F1950CF546A3 /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -130,6 +132,7 @@
 				37BD10FD97B34E682842ACFF /* TrackingConfigurationTests.swift */,
 				66FE107429F91D70C16C2079 /* turn_capture_v2.json */,
 				2A86522B1E97A252CFF8BFC3 /* activity_reading_compaction_v1.json */,
+				6AC9A1137C1190618B148403 /* BackgroundLocationServiceTests.swift */,
 			);
 			path = RunnerTests;
 			sourceTree = "<group>";
@@ -411,6 +414,7 @@
 				3694E2F1654CBC8CE1BD703F /* StepCounterTests.swift in Sources */,
 				29073C2F6807B8D9FF4AF6E7 /* DecisionInputJournalTests.swift in Sources */,
 				9F3198F52FCC7AA76CC969A8 /* TrackingConfigurationTests.swift in Sources */,
+				947EF8805510CBC6028808C5 /* BackgroundLocationServiceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

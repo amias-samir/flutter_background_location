@@ -4,61 +4,11 @@ import 'package:flutter_background_location_tracker/flutter_background_location_
 import 'package:flutter_background_location_tracker/flutter_background_location_tracker_testing.dart';
 import 'package:flutter_background_location_tracker/src/application/route_map_service.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqflite_common/sqflite_logger.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import 'statement_log.dart';
 import 'stop_replay_support.dart';
 import 'test_support.dart';
-
-/// Records every statement a repository runs, so a test can prove a read
-/// writes nothing and binds a bounded number of arguments.
-final class StatementLog {
-  final statements = <(String, int)>[];
-  var batches = 0;
-
-  DatabaseFactory factory() {
-    sqfliteFfiInit();
-    // Test-only statement recorder; the API is marked experimental.
-    // ignore: experimental_member_use
-    return SqfliteDatabaseFactoryLogger(
-      databaseFactoryFfi,
-      options: SqfliteLoggerOptions(
-        type: SqfliteDatabaseFactoryLoggerType.all,
-        log: (event) {
-          switch (event) {
-            case SqfliteLoggerSqlEvent(:final sql, :final arguments):
-              statements.add(
-                (sql, arguments is List ? arguments.length : 0),
-              );
-            case SqfliteLoggerBatchEvent():
-              batches += 1;
-            default:
-          }
-        },
-      ),
-    );
-  }
-
-  void clear() {
-    statements.clear();
-    batches = 0;
-  }
-
-  static final _write = RegExp(
-    r'^\s*(INSERT|UPDATE|DELETE|REPLACE|BEGIN|COMMIT|CREATE|DROP|ALTER)\b',
-    caseSensitive: false,
-  );
-
-  List<String> get writes => <String>[
-        for (final (sql, _) in statements)
-          if (_write.hasMatch(sql)) sql,
-      ];
-
-  int get maxArguments => statements.fold(
-        0,
-        (max, statement) => statement.$2 > max ? statement.$2 : max,
-      );
-}
 
 void main() {
   final t0 = DateTime.utc(2026, 10, 20, 6);
@@ -422,5 +372,28 @@ void main() {
       reason: 'compaction never deletes points',
     );
     await raw.close();
+  });
+
+  test('retention with many kept routes binds a bounded argument list',
+      () async {
+    final log = StatementLog();
+    final harness = RepositoryHarness(databaseFactory: log.factory());
+    await harness.initialize();
+    final kept = await harness.createActiveTrack(trackId: 'kept');
+    await harness.repository.completeTrack(kept, reason: 'finished');
+    final dropped = await harness.createActiveTrack(trackId: 'dropped');
+    await harness.repository.completeTrack(dropped, reason: 'finished');
+
+    log.clear();
+    await harness.repository.deleteTracksExcept(<String>{
+      kept,
+      for (var i = 0; i < 1200; i++) 'retained-elsewhere-$i',
+    });
+
+    expect(log.maxArguments, lessThanOrEqualTo(999),
+        reason: "Android's framework SQLite allows 999 bound variables");
+    expect(await harness.repository.getTrack(kept), isNotNull);
+    expect(await harness.repository.getTrack(dropped), isNull);
+    await harness.repository.close();
   });
 }

@@ -155,6 +155,12 @@ const options = TrackExportOptions(
   provider, native sampling profile, activity source, raw type, evidence state
   and age, receipt delay, and quality policy version. It is off by default.
 
+Track and Trip exports of 2,000 points or more are encoded on a background
+isolate, so long routes do not freeze the UI. If you assemble a route yourself
+for `TrackExportService.renderAssembledBundle`, call the static
+`TrackExportService.renderAssembledAsync` with the same arguments to get this
+behavior. The output is identical either way.
+
 ## Converting route file formats
 
 `RouteFormatConverter` converts existing route content directly between
@@ -184,6 +190,22 @@ elevation, route names, and coordinate timestamps when those values are
 available. Format-specific metadata that has no equivalent in the destination
 may not be retained. Invalid input or input without usable coordinates throws a
 `FormatException`.
+
+The converter is pure and synchronous. For a large file, run it on a
+background isolate so the UI stays responsive:
+
+```dart
+final converted = await Isolate.run(
+  () => const RouteFormatConverter().convert(
+    contents: sourceContents,
+    sourceFormat: TrackExportFormat.gpx,
+    targetFormat: TrackExportFormat.geoJson,
+  ),
+);
+```
+
+The package's own track and Trip exports already encode routes of 2,000
+points or more on a background isolate.
 
 ## Abort, delete, and erase are different operations
 

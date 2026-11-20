@@ -68,6 +68,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
     // PendingLocationCoordinator owns the only store, so no other writer can
     // change the table behind these counters; diagnostics resynchronize them.
     private val counters = JournalCounters(MAX_PENDING_ROWS, MAX_DATABASE_BYTES)
+    private var lastReclaimCheckAt = Long.MIN_VALUE / 2
 
     init {
         databaseFile.parentFile?.mkdirs()
@@ -111,7 +112,10 @@ internal class PendingLocationStore(context: Context) : Closeable {
         require(trackId.isNotBlank() && trackId.length <= MAX_IDENTIFIER_LENGTH)
 
         val payload = encode(event)
-        if (payload.toByteArray(Charsets.UTF_8).size > MAX_PAYLOAD_BYTES) {
+        // Bytes, as SQLite's length(CAST(payload AS BLOB)) counts them; the
+        // counters used UTF-16 units and drifted on non-BMP text.
+        val payloadBytes = payload.toByteArray(Charsets.UTF_8).size
+        if (payloadBytes > MAX_PAYLOAD_BYTES) {
             throw PendingLocationCapacityException("A native location event exceeded its safety limit.")
         }
 
@@ -155,7 +159,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
         } finally {
             database.endTransaction()
         }
-        if (inserted) counters.recordInsert(sequence, payload.length)
+        if (inserted) counters.recordInsert(sequence, payloadBytes)
         return inserted
     }
 
@@ -266,6 +270,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
         }
         counters.recordDelete(deleted, deletedLength)
         checkpointIfLarge()
+        if (deleted > 0) reclaimFreePagesIfEmpty()
         return deleted
     }
 
@@ -290,8 +295,11 @@ internal class PendingLocationStore(context: Context) : Closeable {
             database.endTransaction()
         }
         counters.recordDelete(deleted, deletedLength)
-        // Erasing a route's evidence should also shrink the files.
-        if (counters.rows == 0) stats(performMaintenance = true)
+        // Erasing a route's evidence also shrinks the files.
+        if (counters.rows == 0) {
+            reclaimFreePagesIfEmpty(force = true)
+            stats(performMaintenance = true)
+        }
         return deleted
     }
 
@@ -321,15 +329,23 @@ internal class PendingLocationStore(context: Context) : Closeable {
         )
     }
 
+    /**
+     * [integrityTrusted]: this process verified this exact file and closed it
+     * unchanged since ([JournalCheckCache]), so the full scan is skipped.
+     */
     @Synchronized
-    fun diagnostic(performMaintenance: Boolean = false): Map<String, Any?> {
-        val integrity = quickCheck()
+    fun diagnostic(
+        performMaintenance: Boolean = false,
+        integrityTrusted: Boolean = false,
+    ): Map<String, Any?> {
+        val integrity = if (integrityTrusted) "ok" else quickCheck()
         return linkedMapOf(
             "platform" to "android",
             "healthy" to (integrity == "ok"),
             "opened" to true,
             "databaseName" to DATABASE_NAME,
             "integrityCheck" to integrity,
+            "integrityCheckSkipped" to integrityTrusted,
             "stats" to stats(performMaintenance).toMap(),
             "usableSpaceBytes" to (databaseFile.parentFile?.usableSpace ?: databaseFile.usableSpace),
         )
@@ -364,7 +380,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
     private fun loadCounters() {
         database.rawQuery(
-            "SELECT COUNT(*), COALESCE(SUM(length($COLUMN_PAYLOAD)), 0), " +
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST($COLUMN_PAYLOAD AS BLOB))), 0), " +
                 "COALESCE(MAX($COLUMN_JOURNAL_SEQUENCE), 0) FROM $TABLE_PENDING_LOCATIONS",
             null,
         ).use { cursor ->
@@ -376,7 +392,7 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
     private fun payloadLength(where: String, arguments: Array<String>): Long =
         database.rawQuery(
-            "SELECT COALESCE(SUM(length($COLUMN_PAYLOAD)), 0) FROM $TABLE_PENDING_LOCATIONS WHERE $where",
+            "SELECT COALESCE(SUM(length(CAST($COLUMN_PAYLOAD AS BLOB))), 0) FROM $TABLE_PENDING_LOCATIONS WHERE $where",
             arguments,
         ).use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L
@@ -455,6 +471,32 @@ internal class PendingLocationStore(context: Context) : Closeable {
         }
     }
 
+    /**
+     * Returns free pages to the file system once the journal is empty.
+     * `auto_vacuum = INCREMENTAL` only takes effect on a database created with
+     * it (Android writes `android_metadata` at open, before the PRAGMA), so a
+     * journal that never got it is vacuumed once, while it holds no rows, to
+     * switch modes. Throttled: an empty journal after an acknowledgement is
+     * the steady state while Dart keeps up.
+     */
+    private fun reclaimFreePagesIfEmpty(force: Boolean = false) {
+        if (counters.rows != 0) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastReclaimCheckAt < RECLAIM_CHECK_INTERVAL_MS) return
+        lastReclaimCheckAt = now
+        runCatching {
+            if (!force && pragmaLong("freelist_count") < RECLAIM_MINIMUM_FREE_PAGES) return
+            if (pragmaLong("auto_vacuum") == AUTO_VACUUM_INCREMENTAL) {
+                database.rawQuery("PRAGMA incremental_vacuum", null).use { cursor ->
+                    while (cursor.moveToNext()) Unit
+                }
+            } else {
+                database.execSQL("PRAGMA auto_vacuum = INCREMENTAL")
+                database.execSQL("VACUUM")
+            }
+        }
+    }
+
     private fun quickCheck(): String = database.rawQuery(
         "PRAGMA quick_check(1)",
         null,
@@ -475,6 +517,8 @@ internal class PendingLocationStore(context: Context) : Closeable {
 
         val databaseNameForDiagnostics: String = DATABASE_NAME
 
+        fun databaseFile(context: Context): File = File(context.noBackupFilesDir, DATABASE_NAME)
+
         private const val TABLE_PENDING_LOCATIONS = "pending_locations"
         private const val COLUMN_EVENT_ID = "event_id"
         private const val COLUMN_TRACK_ID = "track_id"
@@ -494,6 +538,9 @@ internal class PendingLocationStore(context: Context) : Closeable {
         private const val MAX_SQL_ARGUMENTS = 500
         private const val WAL_CHECKPOINT_BYTES = 4L * 1024L * 1024L
         private const val MAINTENANCE_NOT_RUN = "not_run"
+        private const val AUTO_VACUUM_INCREMENTAL = 2L
+        private const val RECLAIM_MINIMUM_FREE_PAGES = 256L
+        private const val RECLAIM_CHECK_INTERVAL_MS = 10L * 60L * 1000L
     }
 }
 
@@ -515,6 +562,9 @@ internal object PendingLocationCoordinator {
     )
     private val lock = Any()
     private var store: PendingLocationStore? = null
+
+    // Touched only on the executor thread.
+    private val checkCache = JournalCheckCache()
 
     fun execute(
         context: Context,
@@ -542,6 +592,8 @@ internal object PendingLocationCoordinator {
                 try {
                     onSuccess(action(storeFor(appContext)))
                 } catch (error: Exception) {
+                    // Whatever failed, the next start checks the file again.
+                    checkCache.forget()
                     onFailure(error)
                 }
             }
@@ -551,17 +603,30 @@ internal object PendingLocationCoordinator {
         }
     }
 
+    /**
+     * [trustVerifiedFile]: capture start may skip the full integrity scan of a
+     * file this process verified and closed unchanged (REL-05 B9). Host
+     * diagnostics leave it false and always scan.
+     */
     fun diagnose(
         context: Context,
         performMaintenance: Boolean = false,
+        trustVerifiedFile: Boolean = false,
         onDiagnostic: (Map<String, Any?>) -> Unit,
     ): Boolean {
         val appContext = context.applicationContext
         return try {
             executor.execute {
                 val diagnostic = try {
-                    storeFor(appContext).diagnostic(performMaintenance)
+                    val trusted = trustVerifiedFile && synchronized(lock) { store == null } &&
+                        checkCache.canSkip(
+                            JournalFileIdentity.of(PendingLocationStore.databaseFile(appContext)),
+                        )
+                    storeFor(appContext).diagnostic(performMaintenance, integrityTrusted = trusted).also {
+                        if (it["healthy"] == true) checkCache.markVerified() else checkCache.forget()
+                    }
                 } catch (error: Exception) {
+                    checkCache.forget()
                     failureDiagnostic(error)
                 }
                 onDiagnostic(diagnostic)
@@ -576,9 +641,16 @@ internal object PendingLocationCoordinator {
         val appContext = context.applicationContext
         return try {
             executor.execute {
-                synchronized(lock) {
-                    store?.close()
+                val closed = synchronized(lock) {
+                    val open = store
+                    open?.close()
                     store = null
+                    open != null
+                }
+                if (closed) {
+                    checkCache.onClosed(
+                        JournalFileIdentity.of(PendingLocationStore.databaseFile(appContext)),
+                    )
                 }
             }
             true
@@ -589,7 +661,10 @@ internal object PendingLocationCoordinator {
 
     private fun storeFor(context: Context): PendingLocationStore =
         synchronized(lock) {
-            store ?: PendingLocationStore(context).also { store = it }
+            store ?: PendingLocationStore(context).also {
+                store = it
+                checkCache.onOpened()
+            }
         }
 
     private fun failureDiagnostic(error: Exception): Map<String, Any?> = linkedMapOf(

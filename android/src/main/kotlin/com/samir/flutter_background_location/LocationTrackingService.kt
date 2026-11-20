@@ -24,6 +24,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.ActivityRecognitionClient
 import com.google.android.gms.location.ActivityTransition
@@ -54,11 +55,13 @@ class LocationTrackingService : Service() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var workerHandler: Handler
-    private var configuration = TrackingConfiguration()
+    // Written on the main thread, read per fix on the provider thread.
+    @Volatile private var configuration = TrackingConfiguration()
     @Volatile
     private var captureStarted = false
     private var currentProfile = TrackingStateStore.PROFILE_IDLE
     private var requestGeneration = 0
+    private var providerRetryAttempt = 0
 
     /**
      * Chooses the stream fixes to record while the moving profile captures
@@ -85,7 +88,7 @@ class LocationTrackingService : Service() {
     private var currentActivityPendingIntent: PendingIntent? = null
     private var currentActivityTransitionPendingIntent: PendingIntent? = null
     private val monotonicDomainId = "android_process_${UUID.randomUUID()}"
-    private var latestActivity: Map<String, Any?>? = null
+    @Volatile private var latestActivity: Map<String, Any?>? = null
     // Newest handled reading per source; periodic samples and transitions
     // have separate clocks, so neither may discard the other as "older".
     private val latestActivityTimestamps = HashMap<String, Long>()
@@ -134,7 +137,7 @@ class LocationTrackingService : Service() {
             if (!captureStarted) return
             stateStore.markServiceHeartbeat(captureActive = true)
             // Entry can come due while neither fixes nor readings arrive.
-            stationaryPolicy?.let { applyStationaryPolicy(it.evaluate(System.currentTimeMillis())) }
+            stationaryPolicy?.let { applyStationaryPolicy(it.evaluate(policyNowMs())) }
             evaluateStepCounter()
             stateStore.emitCurrentStatus()
             mainHandler.postDelayed(this, SERVICE_HEARTBEAT_INTERVAL_MS)
@@ -196,7 +199,7 @@ class LocationTrackingService : Service() {
                 }
                 val policy = stationaryPolicy
                 if (policy != null && evidence["state"] == "moving") {
-                    applyStationaryPolicy(policy.onMovingEvidence(System.currentTimeMillis()))
+                    applyStationaryPolicy(policy.onMovingEvidence(policyNowMs()))
                 } else if (evidence["state"] == "moving") {
                     stillSince = null
                     stationaryDisplacementWindow.reset()
@@ -218,6 +221,13 @@ class LocationTrackingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
+        // A sticky restart (null intent) or a boot restore runs in the
+        // background, where Android may refuse a location foreground service.
+        val restoring = when (action) {
+            ACTION_START, ACTION_RESUME, ACTION_PAUSE, ACTION_STOP,
+            ACTION_UPDATE_CONFIG, ACTION_ACTIVITY_UPDATE -> false
+            else -> true
+        }
 
         try {
             ensureForeground()
@@ -235,10 +245,19 @@ class LocationTrackingService : Service() {
         } catch (error: SecurityException) {
             handleStartCommandFailure(
                 DiagnosticsMode.detail("Tracking permission is unavailable.", error),
+                restoring,
             )
         } catch (error: IllegalStateException) {
             handleStartCommandFailure(
                 DiagnosticsMode.detail("Unable to start background tracking.", error),
+                restoring,
+            )
+        } catch (error: RuntimeException) {
+            // Anything else would crash the process and, under START_STICKY,
+            // loop; it is persisted as a failure instead.
+            handleStartCommandFailure(
+                DiagnosticsMode.detail("Unexpected background tracking failure.", error),
+                restoring = false,
             )
         }
 
@@ -323,9 +342,22 @@ class LocationTrackingService : Service() {
         stateStore.markServiceHeartbeat(captureActive = false)
     }
 
-    private fun handleStartCommandFailure(message: String) {
+    private fun handleStartCommandFailure(message: String, restoring: Boolean) {
+        // startForeground runs before the state store exists, so a refused
+        // promotion used to stop the service with nothing persisted.
+        runCatching { ensureStateStore() }
         if (::stateStore.isInitialized) {
-            failCapture(message)
+            if (!restoring) {
+                failCapture(message)
+            } else if (
+                stateStore.trackingEnabled && !stateStore.isPaused && stateStore.activeTrackId != null
+            ) {
+                // A restart Android refused leaves the route resumable.
+                interruptCapture(message)
+            } else {
+                runCatching { removeForegroundNotification() }
+                stopSelf()
+            }
         } else {
             captureStarted = false
             isCaptureAliveNow = false
@@ -576,6 +608,9 @@ class LocationTrackingService : Service() {
         val accepted = PendingLocationCoordinator.diagnose(
             this,
             performMaintenance = false,
+            // Start right after a stop, or right after the plugin's own
+            // check: the unchanged file need not be scanned again.
+            trustVerifiedFile = true,
         ) { diagnostic ->
             mainHandler.post {
                 if (prepareGeneration != journalPrepareGeneration) return@post
@@ -612,6 +647,7 @@ class LocationTrackingService : Service() {
         }
 
         captureStarted = true
+        providerRetryAttempt = 0
         isCaptureAliveNow = true
         lastPrerequisiteCheckPassedAt = Long.MIN_VALUE / 2
         lastFixStatusEmittedAt = Long.MIN_VALUE / 2
@@ -754,14 +790,47 @@ class LocationTrackingService : Service() {
                 request,
                 locationCallback,
                 workerThread.looper,
-            ).addOnFailureListener { error ->
+            ).addOnSuccessListener {
+                if (generation == requestGeneration) providerRetryAttempt = 0
+            }.addOnFailureListener { error ->
                 if (captureStarted && generation == requestGeneration) {
-                    failCapture(DiagnosticsMode.detail("Location updates failed.", error))
+                    handleLocationRequestFailure(error, generation)
                 }
             }
         } catch (error: SecurityException) {
             failCapture(DiagnosticsMode.detail("Location permission was revoked.", error))
         }
+    }
+
+    /**
+     * A failed request is retried while Play services is only temporarily
+     * unavailable (an update, a lost binder); the same capture generation and
+     * the foreground service continue. Exhausted retries interrupt the route,
+     * which stays resumable, instead of failing it.
+     */
+    private fun handleLocationRequestFailure(error: Exception, generation: Int) {
+        val transient = ProviderRetryPolicy.isTransient(
+            statusCode = (error as? ApiException)?.statusCode,
+            securityFailure = error is SecurityException,
+        )
+        if (!transient) {
+            failCapture(DiagnosticsMode.detail("Location updates failed.", error))
+            return
+        }
+        val attempt = ++providerRetryAttempt
+        val delay = ProviderRetryPolicy.delayMs(attempt)
+        if (delay == null) {
+            providerRetryAttempt = 0
+            interruptCapture(
+                DiagnosticsMode.detail("Location updates stayed unavailable after retrying.", error),
+            )
+            return
+        }
+        mainHandler.postDelayed({
+            if (captureStarted && generation == requestGeneration) {
+                requestLocationUpdates(currentProfile)
+            }
+        }, delay)
     }
 
     private fun requestActivityUpdates() {
@@ -820,7 +889,7 @@ class LocationTrackingService : Service() {
                 latestActivity = event
                 publishActivity(event)
                 stationaryPolicy?.let {
-                    applyStationaryPolicy(it.onActivityUnavailable(System.currentTimeMillis()))
+                    applyStationaryPolicy(it.onActivityUnavailable(policyNowMs()))
                 }
                 if (currentActivityPendingIntent == registeredPendingIntent) {
                     currentActivityPendingIntent = null
@@ -932,7 +1001,11 @@ class LocationTrackingService : Service() {
             return
         }
 
-        val (activityEvidenceState, activityAgeMs) = activityEvidenceAt(nativeReceivedAt)
+        // One snapshot per fix: the main thread can replace the reading while
+        // this payload is built, which mixed one reading's type with another's
+        // time.
+        val activity = latestActivity
+        val (activityEvidenceState, activityAgeMs) = activityEvidenceAt(activity, nativeReceivedAt)
         // The profile in effect when the fix was captured: a batch delivered
         // after a switch holds fixes from before it.
         val capturedProfile = decisionInputs.profileAt(location.elapsedRealtimeNanos)
@@ -987,14 +1060,14 @@ class LocationTrackingService : Service() {
             } else {
                 "android_location_mock_flag_clear"
             },
-            "activityType" to latestActivity?.get("type"),
-            "activityConfidence" to latestActivity?.get("confidence"),
-            "activityTimestamp" to latestActivity?.get("timestamp"),
-            "activitySource" to latestActivity?.get("source"),
-            "activityRawType" to latestActivity?.get("rawType"),
+            "activityType" to activity?.get("type"),
+            "activityConfidence" to activity?.get("confidence"),
+            "activityTimestamp" to activity?.get("timestamp"),
+            "activitySource" to activity?.get("source"),
+            "activityRawType" to activity?.get("rawType"),
             "activityEvidenceState" to activityEvidenceState,
             "activityAgeMs" to activityAgeMs,
-            "activityProbabilities" to latestActivity?.get("probabilities"),
+            "activityProbabilities" to activity?.get("probabilities"),
             "motionEvidence" to TrackingEventBus.lastMotionEvidence,
             "stepCount" to stepCounter.steps(captureGenerationId),
             "stepCoverage" to stepCounter.coverage(captureGenerationId)?.toMap(),
@@ -1123,8 +1196,11 @@ class LocationTrackingService : Service() {
      * reading is aged at the fix, not at its own delivery; readings that were
      * never available keep their state.
      */
-    private fun activityEvidenceAt(fixReceivedAt: Long): Pair<Any?, Any?> {
-        val activity = latestActivity ?: return null to null
+    private fun activityEvidenceAt(
+        snapshot: Map<String, Any?>?,
+        fixReceivedAt: Long,
+    ): Pair<Any?, Any?> {
+        val activity = snapshot ?: return null to null
         val state = activity["evidenceState"]
         val observedAt = activity["timestamp"] as? Long
         if (observedAt == null || (state != "fresh" && state != "stale")) {
@@ -1178,8 +1254,8 @@ class LocationTrackingService : Service() {
             }
             applyStationaryPolicy(
                 policy.onReading(
-                    StationaryPolicyV2.Reading(type, confidence, timestamp, source),
-                    now,
+                    StationaryPolicyV2.Reading(type, confidence, policyTimeOfWallMs(timestamp), source),
+                    policyNowMs(),
                 ),
             )
             return
@@ -1318,8 +1394,9 @@ class LocationTrackingService : Service() {
                     },
                     hasVerticalAccuracy = hasVerticalAccuracy,
                     mocked = mocked,
-                    // The fix's own time, so batched deliveries keep their spacing.
-                    observedAtMs = location.time,
+                    // The fix's own monotonic time, so batched deliveries keep
+                    // their spacing and GPS-versus-device clock skew is moot.
+                    observedAtMs = policyTimeOf(location),
                 ),
             ),
         )
@@ -1944,8 +2021,9 @@ class LocationTrackingService : Service() {
     }
 
     private fun hasHighConfidenceStillActivity(): Boolean {
-        val type = latestActivity?.get("type") as? String
-        val confidence = (latestActivity?.get("confidence") as? Number)?.toInt() ?: 0
+        val activity = latestActivity
+        val type = activity?.get("type") as? String
+        val confidence = (activity?.get("confidence") as? Number)?.toInt() ?: 0
         return type == "stationary" &&
             confidence >= configuration.stationaryConfidenceThreshold
     }
@@ -1966,9 +2044,26 @@ class LocationTrackingService : Service() {
         )
     }
 
+    /**
+     * The motion-policy-2 clock (REL-05 B10): elapsed realtime. The policy
+     * used to compare the device wall clock (its own now), GPS time (fixes)
+     * and reading times with each other, so a skewed or jumping device clock
+     * moved its windows. Journaled and emitted times stay wall clock.
+     */
+    private fun policyNowMs(): Long = SystemClock.elapsedRealtime()
+
+    /** A wall-clock reading time on the policy clock, by its age now. */
+    private fun policyTimeOfWallMs(wallMs: Long): Long =
+        SystemClock.elapsedRealtime() - (System.currentTimeMillis() - wallMs)
+
+    private fun policyTimeOf(location: Location): Long {
+        val nanos = location.elapsedRealtimeNanos
+        return if (nanos > 0L) nanos / 1_000_000L else policyTimeOfWallMs(location.time)
+    }
+
     private fun tryEnterStationaryProfile() {
         stationaryPolicy?.let {
-            applyStationaryPolicy(it.evaluate(System.currentTimeMillis()))
+            applyStationaryPolicy(it.evaluate(policyNowMs()))
             return
         }
         val beganAt = stillSince ?: return

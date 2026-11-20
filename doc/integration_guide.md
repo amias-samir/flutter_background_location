@@ -277,6 +277,15 @@ independent native-state flag.
 | `interrupted` or `failed` | Resume, Complete |
 | `stopping` | No repeated command |
 
+A recording route can become `interrupted` without the user doing anything. On
+Android this happens after a reboot when background location is no longer
+granted, or when Google Play services stays unavailable for about two minutes.
+Shorter Play services outages, such as an update, are retried. On iOS it
+happens when location permission is revoked while recording. In each case the
+recorded points are kept and the route waits: show Resume and Complete, and
+call `resumeTrack()` (or `startOrRecoverTrack()`) once the cause is fixed. The
+package never completes a route because of an interruption.
+
 `watchCurrentTrack()` emits the stored active, paused, or interrupted track and
 is useful for restoring UI state after an app restart:
 

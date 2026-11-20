@@ -1,5 +1,66 @@
 ## Unreleased
 
+- Reliability fixes (no change to what is recorded or decided):
+  - Android: a temporary Google Play services failure (an update, a lost
+    connection) no longer ends the route. Location requests are retried for
+    about two minutes; if Play services stays unavailable the route is
+    interrupted and can be resumed.
+  - Android: after a reboot, a route is restored only when background
+    location is allowed. Otherwise it is interrupted and resumable, instead of
+    Android refusing the restart (API 34+). An unexpected error while the
+    service starts is recorded instead of crashing the app.
+  - Android: each fix carries one consistent activity reading, the native
+    journal returns free space once it is empty, and the export thread ends
+    when the Flutter engine detaches.
+  - iOS: a late "location denied" error interrupts a recording route (it no
+    longer marks it failed) and leaves paused or finished routes alone.
+  - iOS: a relaunch that cannot resume no longer keeps relaunching the app
+    through significant-location changes; a relaunch that resumes also
+    restores the low-battery rule and asks for a fresh first fix.
+  - iOS: a full journal file is reported as `location_journal_capacity`, and
+    status no longer calls a blocking Location Services check every time.
+  - A native acknowledgement that never answers no longer blocks pause or
+    complete, and a fix that cannot be stored keeps the route recording and
+    no longer reports the database error text.
+  - Keeping more than 999 routes with `deleteTracksExcept` works on Android.
+  - Activity readings waiting for the stop rules are kept in order instead of
+    being re-sorted for every reading.
+  - iOS: the fixes that wake a terminated app are kept, and a relaunch before
+    the first unlock after a reboot waits for the unlock instead of losing
+    the route's state.
+  - A fix that can never be stored (it fails the same way three times) is
+    kept in a quarantine table with its values and then released from the
+    native journal, instead of being replayed forever.
+- Faster, lighter recording (route database schema 20; same decisions and
+  stored routes):
+  - Each fix costs 18 SQLite statements (24 with a step count) instead of 25
+    (about 35).
+  - A replay of journaled fixes acknowledges each page of up to 100 fixes at
+    once instead of one by one.
+  - Schema 20 drops a duplicate point index, keeps only accepted points in the
+    pending-upload index, and indexes the columns a route deletion looks up,
+    so deleting a long route no longer holds up recording.
+  - Longer health checks and no empty upload checks while the phone is still,
+    and background reviews let new fixes go first.
+  - Fixes that arrive together (a provider batch, a burst, a replay of the
+    journal) are stored in one database transaction and acknowledged once,
+    with exactly the rows storing them one by one gives: about 15 statements
+    per fix instead of 18.
+  - Reviews of older routes are stored in short transactions, so they no
+    longer hold up recording; a review interrupted by a crash is discarded
+    and the previous one stays.
+  - After a summary-definition change, finished routes are refreshed in the
+    background (or when read) instead of before the app can start.
+  - The cleaned map view of a recording route reuses the segments it already
+    cleaned and cleans only the newest one.
+  - Stop derivation and exports of long routes run off the UI thread.
+    `TrackExportService.renderAssembledAsync` renders on a background
+    isolate for long routes.
+  - Android: starting capture no longer re-scans the native journal file when
+    this app run already checked it and nothing changed since, and the
+    stationary rules measure time with one steady clock, so a phone whose
+    clock is wrong or jumps decides stops the same way.
+
 - Fixed: on Android, the cleaned map view of a route with more than about
   1,000 accepted points failed with `too many SQL variables`. Derived-coordinate
   lookups and point sync updates now bind at most 500 ids per statement.

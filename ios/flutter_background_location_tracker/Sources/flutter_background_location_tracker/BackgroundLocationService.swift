@@ -225,6 +225,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     }
   }
   private var lastEmittedLocation: CLLocation?
+  /// The system-wide Location Services switch, read for every status map.
+  /// `locationServicesEnabled()` is a synchronous call Apple warns can block
+  /// the main thread, so it is read once and again whenever Core Location
+  /// reports an authorization change, which a switch change also triggers.
+  private lazy var locationServicesEnabledCache = CLLocationManager.locationServicesEnabled()
+  private var cachedLocationServicesEnabled: Bool { locationServicesEnabledCache }
   /// Records a fix at sharp turns while the moving profile captures them;
   /// under sampling policy 2 it alone chooses the moving profile's fixes.
   private var turnSampler: TurnCaptureSampler?
@@ -256,6 +262,12 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   private var recentProviderFixKeys: Set<String> = []
   private var recentProviderFixKeyOrder: [String] = []
   private var pendingTerminationRecovery = false
+  /// Fixes delivered by the relaunch itself, before recovery can resume:
+  /// recovery waits for Dart's initialize and the journal, and the fix that
+  /// woke the app used to be dropped. Bounded; replayed once recovery tracks.
+  private var relaunchFixBuffer: [CLLocation] = []
+  private static let maximumRelaunchFixes = 5
+  private var replayingRelaunchFixes = false
   private var recoveredFromTermination = false
   private var terminationRecoveryGapStartedAt: Date?
   // Stored as AnyObject so this package can keep its iOS 13 deployment target
@@ -312,10 +324,61 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     locationJournalQueue = NativeLocationJournalQueue(journal: locationJournal)
     super.init()
     locationManager.delegate = self
+    if Self.protectedDataAvailable() {
+      restorePersistedState()
+      persistedStateRestored = true
+    } else {
+      // A relaunch before the first unlock after a reboot cannot read
+      // UserDefaults (protected until first user authentication). Restoring
+      // then would leave the service idle for the life of the process, and
+      // persisting would overwrite the real route state, so both wait.
+      protectedDataObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.restoreAfterFirstUnlock()
+      }
+    }
+  }
+
+  private var persistedStateRestored = false
+  private var protectedDataObserver: NSObjectProtocol?
+  private var initializeRequested = false
+
+  private static func protectedDataAvailable() -> Bool {
+    // UIApplication may only be read on the main thread; elsewhere keep the
+    // previous behavior and restore immediately.
+    guard Thread.isMainThread else { return true }
+    return UIApplication.shared.isProtectedDataAvailable
+  }
+
+  private func restoreAfterFirstUnlock() {
+    if let observer = protectedDataObserver {
+      NotificationCenter.default.removeObserver(observer)
+      protectedDataObserver = nil
+    }
+    guard !persistedStateRestored else { return }
+    // A journal that could not open while locked failed only in memory
+    // (nothing was persisted); the persisted state decides from here.
+    if lifecycle == .failed, journalFailureMessage != nil {
+      lifecycle = .idle
+      profile = .idle
+      journalFailureMessage = nil
+    }
     restorePersistedState()
+    persistedStateRestored = true
+    // Dart may have initialized while the data was locked; prepare the
+    // journal and recover now that the route state is known.
+    if initializeRequested {
+      initialize { _ in }
+    } else {
+      emitStatus(message: recoveryStatusMessage)
+    }
   }
 
   func initialize(completion: @escaping (Result<[String: Any], Error>) -> Void) {
+    initializeRequested = true
     locationJournalQueue.prepare { [weak self] result in
       guard let self else { return }
       switch result {
@@ -662,7 +725,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     default:
       motionState = "unknown"
     }
-    let locationServicesEnabled = CLLocationManager.locationServicesEnabled()
+    let locationServicesEnabled = cachedLocationServicesEnabled
     var state: [String: Any] = [
       "platform": "ios",
       "state": lifecycle.rawValue,
@@ -1211,6 +1274,10 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       currentAuthorizationStatus() == .authorizedAlways,
       CLLocationManager.locationServicesEnabled()
     else {
+      // Significant-change monitoring would keep relaunching the app for a
+      // route that cannot resume here.
+      relaunchFixBuffer.removeAll()
+      locationManager.stopMonitoringSignificantLocationChanges()
       lifecycle = .interrupted
       profile = .paused
       persistState()
@@ -1224,19 +1291,37 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       lifecycle = .starting
       persistState()
       configureLocationManager(for: .moving)
+      // As a fresh start does: the low-battery durability rule reads the
+      // battery level, and the first fix after a relaunch is acquired fresh.
+      UIDevice.current.isBatteryMonitoringEnabled = true
       startBackgroundActivitySessionIfNeeded()
       startMotionUpdatesIfPossible()
       motionSensorFusion.start(configuration: configuration)
       startStepCounter()
       startConfiguredLocationUpdates()
+      requestStationaryExitProbe()
       lifecycle = .tracking
       recoveredFromTermination = true
       persistState()
+      replayRelaunchFixes()
     } catch {
+      relaunchFixBuffer.removeAll()
+      locationManager.stopMonitoringSignificantLocationChanges()
       lifecycle = .interrupted
       profile = .paused
       persistState()
     }
+  }
+
+  /// Journals the fixes the relaunch delivered before recovery, under the
+  /// recovered generation, through the normal delivery path.
+  private func replayRelaunchFixes() {
+    guard !relaunchFixBuffer.isEmpty else { return }
+    let buffered = relaunchFixBuffer
+    relaunchFixBuffer.removeAll()
+    replayingRelaunchFixes = true
+    defer { replayingRelaunchFixes = false }
+    locationManager(locationManager, didUpdateLocations: buffered)
   }
 
   private func stopBackgroundActivitySession() {
@@ -1979,6 +2064,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   private func persistState() {
+    // Until the persisted state is read, writing would replace it.
+    guard persistedStateRestored else { return }
     userDefaults.set(lifecycle.rawValue, forKey: PersistenceKey.lifecycle)
     userDefaults.set(trackId, forKey: PersistenceKey.trackId)
     userDefaults.set(configuration.dictionary, forKey: PersistenceKey.configuration)
@@ -2000,6 +2087,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   /// keys per callback was the main per-fix I/O, so callbacks persist at most
   /// every 15 s. Profile transitions and probe outcomes persist immediately.
   private func persistContinuityHealth(throttled: Bool = false) {
+    guard persistedStateRestored else { return }
     let now = Date()
     // iOS gives no shutdown signal, so near an empty battery every callback
     // is persisted.
@@ -2143,6 +2231,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     recentProviderFixKeys.removeAll(keepingCapacity: false)
     recentProviderFixKeyOrder.removeAll(keepingCapacity: false)
     pendingTerminationRecovery = false
+    relaunchFixBuffer.removeAll()
     recoveredFromTermination = false
     terminationRecoveryGapStartedAt = nil
     userDefaults.synchronize()
@@ -2160,7 +2249,15 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   // MARK: - CLLocationManagerDelegate
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-    guard lifecycle == .tracking else { return }
+    guard lifecycle == .tracking else {
+      if pendingTerminationRecovery && lifecycle == .starting {
+        relaunchFixBuffer.append(contentsOf: locations)
+        if relaunchFixBuffer.count > Self.maximumRelaunchFixes {
+          relaunchFixBuffer.removeFirst(relaunchFixBuffer.count - Self.maximumRelaunchFixes)
+        }
+      }
+      return
+    }
     let now = Date()
     lastProviderCallbackAt = now
     persistContinuityHealth(throttled: true)
@@ -2209,7 +2306,8 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
       lastEmittedLocation = location
       turnSampler?.record(Self.turnFix(location))
       var event = locationMap(location, providerFixKey: fixKey)
-      event["captureOrigin"] = inBurst ? "probeBurst" : "providerStream"
+      event["captureOrigin"] =
+        replayingRelaunchFixes ? "relaunchBuffer" : (inBurst ? "probeBurst" : "providerStream")
       // The capture-time stamp replaces the current profile's.
       event.merge(decisionInputs.take(inputsMark)) { _, captured in captured }
       events.append((event, generation))
@@ -2265,10 +2363,16 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     completeStationaryExitProbe(outcome: "failed")
 
     if coreLocationError?.code == .denied {
-      stopNativeUpdates()
-      lifecycle = .failed
-      profile = .paused
-      persistState()
+      // Only a capturing route reacts. The authorization callback usually
+      // got here first and interrupted it; a late denial must not turn that,
+      // or a paused or idle route, into a failure. Revoked permission leaves
+      // the route resumable, the same state a relaunch restores.
+      if lifecycle == .tracking || lifecycle == .starting {
+        stopNativeUpdates()
+        lifecycle = .interrupted
+        profile = .paused
+        persistState()
+      }
     }
     emitStatus(message: DiagnosticsMode.detail("Location updates failed", error))
   }
@@ -2282,6 +2386,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
   }
 
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    locationServicesEnabledCache = CLLocationManager.locationServicesEnabled()
     finishPermissionRequestIfNeeded()
     enforceActiveTrackingPreconditions(reason: "authorization_changed")
   }
@@ -2293,6 +2398,7 @@ final class BackgroundLocationService: NSObject, CLLocationManagerDelegate {
     if #available(iOS 14.0, *) {
       return
     }
+    locationServicesEnabledCache = CLLocationManager.locationServicesEnabled()
     finishPermissionRequestIfNeeded()
     enforceActiveTrackingPreconditions(reason: "authorization_changed")
   }

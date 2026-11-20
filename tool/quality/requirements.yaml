@@ -3,7 +3,7 @@ package: flutter_background_location_tracker
 compatibility:
   dart_api: 1
   native_protocol: 2
-  route_database_schema: 19
+  route_database_schema: 20
   android_journal_schema: 2
   android_journal_payload_format: 2
   ios_journal_schema: 1
@@ -1377,3 +1377,265 @@ work_packages:
       - tool/quality/analyze_stop_jitter.dart
       - test/sampling_profile_diagnostics_test.dart
       - test/analyze_stop_jitter_test.dart
+  - id: REL-01
+    phase: REL
+    title: Android fused-location request failures are retried instead of failing the route
+    release_gate: a transient FusedLocationProviderClient failure (Play services updating, binder lost, timeout) is retried five times over about two minutes in the same capture generation; exhausted retries interrupt the route (resumable) and a revoked permission or a permanent status still fails it
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycle.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycleTest.kt
+  - id: REL-01P
+    phase: REL
+    title: Physical check of provider retry
+    release_gate: force-stopping Google Play services during a recorded drive on an Android phone leaves the route tracking (or interrupted after two minutes, never failed) and the journal replays every committed fix
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
+  - id: REL-02
+    phase: REL
+    title: Android boot and sticky restore are safe on API 34 and later
+    release_gate: a boot or package-replaced broadcast starts the service only with foreground location and, from API 29, background location; otherwise the route is interrupted; a refused foreground promotion on a restore persists an interruption instead of stopping with nothing saved; unexpected runtime exceptions in onStartCommand are persisted failures, not process crashes
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingBootReceiver.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycle.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/TrackingServiceLifecycleTest.kt
+  - id: REL-02P
+    phase: REL
+    title: Physical check of boot restore permissions
+    release_gate: rebooting an API 34+ phone mid-route with location allowed only while in use leaves the route interrupted and resumable with no crash dialog; with Allow all the time it resumes capture after boot
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
+  - id: REL-04
+    phase: REL
+    title: Android fix payloads read one activity reading and configuration snapshot
+    release_gate: the provider thread reads the volatile latest reading once per fix, so a journaled fix never carries one reading's type with another's time
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+  - id: REL-05
+    phase: REL
+    title: Android journal housekeeping (byte counters, free-page reclaim, export thread)
+    release_gate: journal counters count UTF-8 bytes like SQLite's blob length; an empty journal returns free pages (incremental vacuum, or a one-time VACUUM that enables it) at most every ten minutes; the export thread ends on engine detach
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/FlutterBackgroundLocationPlugin.kt
+  - id: REL-07
+    phase: REL
+    title: iOS late permission denial interrupts, never fails, and only a capturing route
+    release_gate: kCLErrorDenied from didFailWithError interrupts a tracking or starting route and leaves paused, interrupted and idle routes unchanged, matching the state a relaunch restores
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-08
+    phase: REL
+    title: iOS termination recovery that cannot resume stops significant-change relaunches and restores battery and probe setup
+    release_gate: both recovery failure branches stop significant-location-change monitoring; a successful relaunch recovery enables battery monitoring and requests a fresh-fix probe like a start
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-11
+    phase: REL
+    title: iOS journal page limit reports capacity; status reads a cached Location Services switch
+    release_gate: SQLITE_FULL on append is reported as location_journal_capacity; the status map no longer calls locationServicesEnabled() on the main thread for every emission, the value is refreshed on authorization changes
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/NativeLocationJournal.swift
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-13
+    phase: REL
+    title: A hung acknowledgement or a failed commit never holds or misreports the route
+    release_gate: native acknowledgements time out after 10 s into the deferred-ack path, so pause and complete always finish; a fix that fails to persist keeps the route's lifecycle, reports no error text (which can carry bound coordinates), stays unacknowledged for replay and rebuilds the decision engine from the stored tail
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: REL-15
+    phase: REL
+    title: Route retention binds no caller-sized list
+    release_gate: deleteTracksExcept and deleteTracksExceptForOwner keep a Trip with any retained leg without an IN list, so retaining more than 999 routes works on Android
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/route_map_test.dart
+  - id: REL-16
+    phase: REL
+    title: Ordered stop-reading buffer and no per-fix suspect copies
+    release_gate: activity readings buffered for the stop gate are inserted in evidence order (equal times keep arrival order) and never re-sorted; the kinematic re-anchor test reads the suspects in place; decisions are unchanged (determinism and replay suites green)
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/application/route_decision_engine.dart
+      - test/live_replay_determinism_test.dart
+  - id: REL-09
+    phase: REL
+    title: iOS keeps the fixes that woke a terminated app
+    release_gate: fixes delivered by a significant-change relaunch before termination recovery can resume (up to five) are journaled under the recovered generation with captureOrigin relaunchBuffer, and dropped if recovery fails
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-10
+    phase: REL
+    title: iOS restores route state only once protected data is available
+    release_gate: a relaunch before the first unlock after a reboot neither reads nor overwrites the persisted route state; it restores on protectedDataDidBecomeAvailable and, if Dart already initialized, prepares the journal and recovers then
+    required_before: next release
+    evidence:
+      - ios/flutter_background_location_tracker/Sources/flutter_background_location_tracker/BackgroundLocationService.swift
+  - id: REL-10P
+    phase: REL
+    title: Physical check of relaunch before first unlock
+    release_gate: an iPhone recording with Always permission and significant-change recovery is rebooted and left locked through a drive; after unlocking, the route is resumed or interrupted (never idle with the route lost) and the relaunch fixes are in the route
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
+  - id: REL-12
+    phase: REL
+    title: iOS service lifecycle tests
+    release_gate: XCTests drive BackgroundLocationService through its Core Location delegate with an isolated UserDefaults suite and pin the late-denial and unknown-location behavior
+    required_before: next release
+    evidence:
+      - example/ios/RunnerTests/BackgroundLocationServiceTests.swift
+  - id: REL-14
+    phase: REL
+    title: A native event that can never be stored is quarantined, then acknowledged
+    release_gate: after three deterministic append failures in one process (constraint, mismatch, too big, range, argument, format or type errors; never busy, I/O, full disk, read-only or closed database) the fix's own values are committed to quarantined_native_events and only then acknowledged; later fixes are unaffected
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/quarantine_test.dart
+  - id: FLT-15
+    phase: FLT
+    title: Per-fix SQLite budget
+    release_gate: a steady walking fix costs at most 18 statements and round trips and one with a step count at most 24, in clean and full detail (25 and about 35 before the statement diet); the ceilings only go down
+    required_before: per-fix pipeline changes
+    evidence:
+      - test/pipeline_budget_test.dart
+      - test/statement_log.dart
+  - id: FLT-04
+    phase: FLT
+    title: Per-fix statement diet with identical decisions and rows
+    release_gate: the append reads its track once, skips the accepted-point query when the newest point is accepted, creates the summary row once per track, builds the stored point from the inserted row (equal in every field), shares one summary read per fix, caches column lists per open database and parsed configurations and epochs; session snapshots reuse the current track the repository emits; incremental summaries still equal a refresh
+    required_before: per-fix pipeline changes
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - lib/src/storage/route_summary_store.dart
+      - lib/src/domain/persisted_tracking_config.dart
+      - lib/src/application/tracking_client.dart
+      - test/append_point_row_test.dart
+      - test/route_summary_test.dart
+      - test/pipeline_budget_test.dart
+  - id: FLT-16
+    phase: FLT
+    title: Schema 20 indexes and quarantine table
+    release_gate: the duplicate (track_id, sequence) index is dropped only where a unique index covers it; the pending-upload index holds accepted pending points only; every column a cascading route delete looks up is indexed; a schema 19 database upgrades to exactly the fresh schema and keeps its rows; reopening changes nothing
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/schema20_test.dart
+      - test/sqlite_track_repository_test.dart
+  - id: FLT-24
+    phase: FLT
+    title: Route database connection settings
+    release_gate: journal_size_limit 4 MiB (as a query), an 8 MiB page cache and in-memory temporary storage; synchronous stays FULL
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/sqlite_track_repository_test.dart
+  - id: FLT-03
+    phase: FLT
+    title: One native acknowledgement per journal drain page
+    release_gate: fixes replayed from the native journal are committed one by one as before and acknowledged together after their page (up to 100), so a drain costs one native journal transaction per page; every acknowledged event was committed first
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - test/tracking_client_test.dart
+  - id: FLT-21
+    phase: FLT
+    title: Background review and stop passes yield to live recording
+    release_gate: the owner backfill awaits the queued fixes before each route it reviews or derives stops for
+    required_before: next release
+    evidence:
+      - lib/src/application/route_detail_service.dart
+      - lib/src/application/tracking_client.dart
+  - id: LBO-17B
+    phase: LBO
+    title: Fewer Dart wakeups during stops
+    release_gate: while native capture is stationary the health watchdog doubles its quiet interval up to four minutes and returns to the normal interval on any commit; the periodic batch upload skips a tick when nothing committed since the last one
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+  - id: FLT-02
+    phase: FLT
+    title: Batched ingestion of queued fixes (one transaction and one acknowledgement per batch)
+    release_gate: fixes for one route that queue up behind the point tail (a journal drain page of up to 100, a live burst of up to 25) on a quality policy 5 or later route in the package repository are decided fix by fix inside one transaction and acknowledged once after it commits; points, gaps, stops, summaries, step counts, emitted points and their order equal the fix-by-fix path; a failure rolls back and the same fixes are stored one by one; anything else, including routes recorded before policy 5 and host repositories, keeps the fix-by-fix path
+    required_before: next release
+    evidence:
+      - lib/src/application/tracking_client.dart
+      - lib/src/application/point_ingest.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/batch_ingestion_test.dart
+      - test/pipeline_budget_test.dart
+      - test/live_replay_determinism_test.dart
+  - id: FLT-22
+    phase: FLT
+    title: Route reviews stored in short transactions
+    release_gate: a review's kept fixes are written in 1,000-row transactions under a processing run that no reader sees; one final transaction replaces the previous review and makes the new one current; reviews of one route are serialized; a run a crash left processing is deleted on open and the previous review stays current
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/route_review_test.dart
+  - id: FLT-23
+    phase: FLT
+    title: Finished routes' summaries refreshed after the open
+    release_gate: after a summary-definition change, routes that can still record and routes without a summary row are refreshed before initialize returns; completed and failed routes are refreshed in the background, or first when their summary or bundle is read; close waits for the pass
+    required_before: next release
+    evidence:
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/summary_refresh_test.dart
+  - id: FLT-25
+    phase: FLT
+    title: Incremental cleaned view
+    release_gate: a cleaning run copies every closed segment the newest equivalent completed run (same algorithm, version, configuration and map data, created after the segment ended) covered and derives only the rest; the result equals a full derivation
+    required_before: next release
+    evidence:
+      - lib/src/application/derived_geometry_service.dart
+      - lib/src/storage/sqlite_track_repository.dart
+      - test/incremental_cleaning_test.dart
+  - id: FLT-26
+    phase: FLT
+    title: Stop derivation and long exports off the UI isolate
+    release_gate: derived stops are computed on a background isolate; track and Trip exports of 2,000 points or more are encoded on one with byte-identical output (TrackExportService.renderAssembledAsync); the redundant XML re-parse is gone
+    required_before: next release
+    evidence:
+      - lib/src/application/route_detail_service.dart
+      - lib/src/export/track_export_service.dart
+      - lib/src/export/trip_export_service.dart
+      - test/export_render_isolate_test.dart
+  - id: REL-05B
+    phase: REL
+    title: Android journal re-check skipped for an unchanged verified file; one clock for the stationary policy
+    release_gate: capture start skips quick_check only for the journal file this process verified and closed unchanged (size and modification time of the database and WAL), and host diagnostics always check; StationaryPolicyV2 is fed elapsed realtime for fixes, readings and now, while journaled and emitted times stay wall clock; the shared motion-policy fixture passes unchanged
+    required_before: next release
+    evidence:
+      - android/src/main/kotlin/com/samir/flutter_background_location/JournalCheckCache.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/PendingLocationStore.kt
+      - android/src/main/kotlin/com/samir/flutter_background_location/LocationTrackingService.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/JournalCheckCacheTest.kt
+      - android/src/test/kotlin/com/samir/flutter_background_location/StationaryPolicyV2Test.kt
+  - id: REL-05BP
+    phase: REL
+    title: Physical check of the stationary policy clock
+    release_gate: an Android phone with its clock set two minutes off records a stop and a departure that start and end as on a correctly set phone
+    required_before: next release
+    evidence_mode: physical_manual
+    evidence:
+      - tool/quality/validate_physical_qualification.dart
