@@ -155,6 +155,12 @@ const options = TrackExportOptions(
   provider, native sampling profile, activity source, raw type, evidence state
   and age, receipt delay, and quality policy version. It is off by default.
 
+Track and Trip exports of 2,000 points or more are encoded on a background
+isolate, so long routes do not freeze the UI. If you assemble a route yourself
+for `TrackExportService.renderAssembledBundle`, call the static
+`TrackExportService.renderAssembledAsync` with the same arguments to get this
+behavior. The output is identical either way.
+
 ## Converting route file formats
 
 `RouteFormatConverter` converts existing route content directly between

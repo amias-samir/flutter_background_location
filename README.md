@@ -310,16 +310,19 @@ mock-location interpretation:
 | Background or screen lock while active | Continues in the foreground service with an active-capture partial wake lock | Continues with Core Location background mode (iOS 17+ background-activity session) |
 | Paused, completed | Service, notification and requests stop | Location, motion and background sessions stop |
 | Removed from recent apps | Usually continues; OEM-dependent | Swiping away is a user force-quit and stops tracking |
-| OS process termination | Best-effort service recovery | Route is kept as interrupted and resumed explicitly after launch |
+| OS process termination | Best-effort service recovery | Route is kept as interrupted and resumed explicitly after launch; the fixes that relaunch the app are kept |
 | Android Force stop | Cannot be bypassed | Not applicable |
-| Reboot | Best-effort restoration; OEM-dependent | The app must be launched again |
+| Reboot | Best-effort restoration, only while background location is still granted (otherwise interrupted and resumable); OEM-dependent | The app must be launched again |
+| Location provider outage | Google Play services is retried for about two minutes, then the route is interrupted and resumable | Revoked permission interrupts the route; it is resumable |
 
 A route is never silently marked complete after an interruption.
 
 ## Storage, security, and privacy
 
 - SQLite is the source of truth. Native fixes are removed from the journal only
-  after Dart has committed them.
+  after Dart has committed them. A fix that can never be stored (it fails the
+  same way three times) is kept in a quarantine table, then released from the
+  journal, so it is neither replayed forever nor lost.
 - The default database is not encrypted. Inject your own `TrackRepository` if
   your threat model needs encryption.
 - Diagnostics and support reports never contain coordinates, route or owner
