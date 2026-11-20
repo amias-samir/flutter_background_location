@@ -1,4 +1,4 @@
-## Unreleased
+## 2.0.0
 
 - Reliability fixes (no change to what is recorded or decided):
   - Android: a temporary Google Play services failure (an update, a lost

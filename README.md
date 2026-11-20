@@ -76,7 +76,7 @@ CocoaPods and Swift Package Manager.
 
 ```yaml
 dependencies:
-  flutter_background_location_tracker: ^1.0.0
+  flutter_background_location_tracker: ^2.0.0
 ```
 
 ```dart
